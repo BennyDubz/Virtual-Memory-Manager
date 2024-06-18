@@ -1,0 +1,13 @@
+*.exe
+*.obj
+*.pdb
+.vscode
+*.json
+
+/*/*.obj
+/*/*/*.obj
+
+*.txt
+/*/*.txt
+/*/*/*.txt
+
