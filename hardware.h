@@ -5,7 +5,7 @@
  * Hardware specs for our simulation
  */
 
-#include "./Custom VMM/macros.h"
+#include "./macros.h"
 
 
 #define PAGE_SIZE                   4096
