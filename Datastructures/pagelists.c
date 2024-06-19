@@ -35,8 +35,9 @@ FREE_FRAMES_LISTS* initialize_free_frames(PTE* page_table, ULONG64 num_physical_
     for (int new_list = 0; new_list < NUM_FRAME_LISTS; new_list++) {
         DB_LL_NODE* new_listhead = create_db_list();
         free_frames->listheads[new_list] = new_listhead;
+        free_frames->list_lengths[new_list] = 0;
+        free_frames->curr_list_idx = 0;
     }
-
 
     // Add all the physical frames to their respective free lists
     for (int pte_idx = 0; pte_idx < num_physical_frames; pte_idx++) {
@@ -53,7 +54,8 @@ FREE_FRAMES_LISTS* initialize_free_frames(PTE* page_table, ULONG64 num_physical_
             return NULL;
         }
 
-        if (db_insert_at_head(relevant_listhead, free_frame) == ERROR) {
+        DB_LL_NODE* frame_node = db_insert_at_head(relevant_listhead, free_frame);
+        if (frame_node == NULL) {
             fprintf(stderr, "Failed to insert free frame in its list\n");
             //BW: Might want to free memory for everything we've allocated already
             return NULL;
@@ -62,7 +64,15 @@ FREE_FRAMES_LISTS* initialize_free_frames(PTE* page_table, ULONG64 num_physical_
         free_frame->free_page.status = FREE_STATUS;
         free_frame->free_page.pte = curr_pte;
         free_frame->free_page.zeroed_out = 1;
-        
+        free_frame->free_page.frame_listnode = frame_node;
+
+        free_frames->list_lengths[listhead_idx] += 1;
+    }
+
+    printf("Init free frames: total num frames %llX\n", num_physical_frames);
+    printf("iterating through list lengths:\n");
+    for(int i = 0; i < NUM_FRAME_LISTS; i++) {
+        printf("\tBucket %d has length %llX\n", i, free_frames->list_lengths[i]);
     }
 
     return free_frames;
@@ -91,6 +101,10 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
         page = (PAGE*) db_pop_from_head(frame_listhead);
         free_frames->list_lengths[free_frames->curr_list_idx] -= 1;
         break;
+    }
+
+    if (page == NULL) {
+        printf("NULL PAGE");
     }
 
     return page;

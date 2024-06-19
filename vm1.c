@@ -3,24 +3,15 @@
 #include <windows.h>
 #include <excpt.h>
 #include <stdbool.h>
-#include "./Custom VMM/Datastructures/db_linked_list.h"
-#include "./Custom VMM/Datastructures/pagetable.h"
-#include "./Custom VMM/Datastructures/frame_lists/freelist.h"
+#include "./Datastructures/db_linked_list.h"
+#include "./Datastructures/pagetable.h"
+#include "./Datastructures/pagelists.h"
 
 #include "./hardware.h"
 
+// Allows us to access the windows permission libraries so that we can actually get physical frames
 #pragma comment(lib, "advapi32.lib")
 
-/**
- * My own definitions
- */
-// #define try bool __HadError=false;
-
-
-
-#define PAGE_SIZE                   4096
-
-#define MB(x)                       ((x) * 1024 * 1024)
 
 
 BOOL
@@ -381,10 +372,19 @@ full_virtual_memory_test (
     // pte_t* page_table = malloc(sizeof(pte_t) * num_ptes);
 
     PTE* pagetable = initialize_pagetable(physical_page_count, physical_page_numbers);
+    if (pagetable == NULL) {
+        fprintf(stderr, "Unable to allocate memory for pagetable\n");
+        return;
+    } else {
+        printf("Pagetable created\n");
+    }
 
     FREE_FRAMES_LISTS* free_frames = initialize_free_frames(pagetable, physical_page_count);
-
-
+    if (free_frames == NULL) {
+        fprintf(stderr, "Unable to allocate memory for free frames\n");
+    } else {
+        printf("Free frames created\n");
+    }
 
     //
     // Now perform random accesses.
@@ -432,7 +432,6 @@ full_virtual_memory_test (
         }
 
         if (page_faulted) {
-
             //
             // Connect the virtual address now - if that succeeds then
             // we'll be able to access it from now on.
@@ -449,14 +448,29 @@ full_virtual_memory_test (
             // GET FROM FREE LIST
             // CHECK FOR FAILURE --> OUT OF FREE FRAMES
 
-            // ADJUST TO USE THE POPPED PAGE
-            if (MapUserPhysicalPages (arbitrary_va, 1, physical_page_numbers) == FALSE) {
+            PAGE* new_page = allocate_free_frame(free_frames);
 
-                printf ("full_virtual_memory_test : could not map VA %p to page %llX\n", arbitrary_va, *physical_page_numbers);
+            if (new_page == NULL) {
+                printf("Out of free frames\n");
+                return;
+            }
+
+            ULONG64 pfn = new_page->free_page.pte->memory_format.frame_number;
+            printf("Got free frame with pfn %llX\n", pfn);
+
+            // ADJUST TO USE THE POPPED PAGE
+            if (MapUserPhysicalPages (arbitrary_va, 1, &pfn) == FALSE) {
+
+                printf ("full_virtual_memory_test : could not map VA %p to page %llX\n", arbitrary_va, pfn);
 
                 return;
                 //  DETERMINE ACTIVE LIST VS PFN LIST
             }
+
+            // printf("iterating through list lengths:\n");
+            // for(int i = 0; i < NUM_FRAME_LISTS; i++) {
+            //     printf("\tBucket %d has length %llX\n", i, free_frames->list_lengths[i]);
+            // }
             
 
             // UPDATE PTE

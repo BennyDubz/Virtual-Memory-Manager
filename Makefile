@@ -1,18 +1,36 @@
+# Makefile for memory management simulation
+# Ben Williams
+# June 19th, 2024
+
 CC=cl
 CFLAGS=/EHsc /I.
 
-DEPS = Datastructures/freelist.h Datastructures/modifiedlist.h Datastructures/page.h Datastructures/standbylist.h \
-       Testing/db_linked_list.h Testing/pagelists.h Testing/pagetable.h \
+# Header file dependencies
+DEPS = Datastructures/pagelists.h Datastructures/pagetable.h Datastructures/db_linked_list.h \
        hardware.h macros.h
 
-OBJ = Datastructures/freelist.c Datastructures/modifiedlist.c Datastructures/page.c Datastructures/standbylist.c \
-      Testing/db_linked_list.c Testing/pagelists.c Testing/pagetable.c \
-      vm1.c
+# Object files to compile
+OBJ = Datastructures/pagelists.obj Datastructures/db_linked_list.obj Datastructures/pagetable.obj \
+      vm1.obj
 
+# Default target
 vm.exe: $(OBJ)
-	$(CC) $(CFLAGS) /Fe$@ $^ 
+	$(CC) $(CFLAGS) /Fevm.exe /Fo:. $^
+
+# Compilation rules for individual files
+Datastructures/pagelists.obj: Datastructures/pagelists.c $(DEPS)
+	$(CC) $(CFLAGS) /c /Fo:$@ $<
+
+Datastructures/db_linked_list.obj: Datastructures/db_linked_list.c $(DEPS)
+	$(CC) $(CFLAGS) /c /Fo:$@ $<
+
+Datastructures/pagetable.obj: Datastructures/pagetable.c $(DEPS)
+	$(CC) $(CFLAGS) /c /Fo:$@ $<
+
+vm1.obj: vm1.c $(DEPS)
+	$(CC) $(CFLAGS) /c /Fo:$@ $<
 
 .PHONY: clean
 
 clean:
-	del *.exe *.obj
+	del *.exe *.obj *.pdb

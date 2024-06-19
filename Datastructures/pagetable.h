@@ -22,6 +22,8 @@
 //TODO: Think about various types of structs we would have in here
 // Each would have a status, but then they would have their own 
 
+#ifndef PTE_T
+#define PTE_T
 /**
  * For frames that are either currently accessible or that are on the free list
  */
@@ -63,12 +65,15 @@ typedef struct {
     };
 } PTE;
 
+#endif
 
+#ifndef PAGETABLE_T
+#define PAGETABLE_T
 typedef struct {
     PTE* frame_list;
     // LOCK
 } PAGETABLE;
-
+#endif
 
 /**
  * Initializes the pagetable with all VALID_PTE entries, but all have the valid bit set to 0

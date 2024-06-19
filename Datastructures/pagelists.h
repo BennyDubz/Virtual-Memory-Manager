@@ -8,8 +8,8 @@
 
 #include <windows.h>
 #include "../hardware.h"
-#include "../db_linked_list.h"
-#include "../pagetable.h"
+#include "./db_linked_list.h"
+#include "./pagetable.h"
 
 /**
  * #################################################
@@ -21,6 +21,8 @@
 #define MODIFIED_STATUS 1
 #define STANDBY_STATUS 2
 
+#ifndef PAGE_T
+#define PAGE_T
 typedef struct {
     ULONG64 status:2;
     PTE* pte;
@@ -55,7 +57,7 @@ typedef struct {
         STANDBY_PAGE standby_page;
     };
 } PAGE;
-
+#endif
 
 /**
  * ######################################
@@ -67,7 +69,8 @@ typedef struct {
 // We want to have frames go into different cache slots if we allocate several at a time
 #define NUM_FRAME_LISTS (NUMBER_OF_PHYSICAL_PAGES * PAGE_SIZE) / CACHE_SIZE
 
-
+#ifndef FREE_FRAMES_T
+#define FREE_FRAMES_T
 /**
  * An array of free lists whose length corresponds to the size of the cache
  * 
@@ -89,7 +92,7 @@ typedef struct {
     ULONG64 zeroed_out:1;
     // Other information?
 } FREE_FRAME;
-
+#endif
 
 /**
  * Given the new pagetable, create free frames lists that contain all of the physical frames
