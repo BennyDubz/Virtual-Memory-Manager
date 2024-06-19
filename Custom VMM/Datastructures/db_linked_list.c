@@ -5,8 +5,9 @@
  * Implementation of a simple doubly linked list
  */
 
-#include "db_linked_list.h"
-#include "stdio.h"
+#include <stdio.h>
+#include "./db_linked_list.h"
+#include "../macros.h" 
 
 
 /**

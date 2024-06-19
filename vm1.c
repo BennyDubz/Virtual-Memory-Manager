@@ -3,6 +3,11 @@
 #include <windows.h>
 #include <excpt.h>
 #include <stdbool.h>
+#include "./Custom VMM/Datastructures/db_linked_list.h"
+#include "./Custom VMM/Datastructures/pagetable.h"
+#include "./Custom VMM/Datastructures/frame_lists/freelist.h"
+
+#include "./hardware.h"
 
 #pragma comment(lib, "advapi32.lib")
 
@@ -17,21 +22,6 @@
 
 #define MB(x)                       ((x) * 1024 * 1024)
 
-//
-// This is intentionally a power of two so we can use masking to stay
-// within bounds.
-//
-
-#define VIRTUAL_ADDRESS_SIZE        MB(16)
-
-#define VIRTUAL_ADDRESS_SIZE_IN_UNSIGNED_CHUNKS        (VIRTUAL_ADDRESS_SIZE / sizeof (ULONG_PTR))
-
-//
-// Deliberately use a physical page pool that is approximately 1% of the
-// virtual address space !
-//
-
-#define NUMBER_OF_PHYSICAL_PAGES   ((VIRTUAL_ADDRESS_SIZE / PAGE_SIZE) / 64)
 
 BOOL
 GetPrivilege  (
@@ -340,40 +330,7 @@ full_virtual_memory_test (
                 NUMBER_OF_PHYSICAL_PAGES);
     }
 
-    typedef struct physical_frame {
-        struct physical_frame* flink;
-        struct physical_frame* blink;
-        ULONG64 frame_number;
-    } physical_frame_t;
 
-
-    physical_frame_t free_list;
-
-    free_list.flink = &free_list;
-    free_list.blink = &free_list;
-
-    ULONG64 curr_frame = 1;
-    physical_frame_t* prev_frame = &free_list;
-    while (curr_frame < physical_page_count) {
-        
-        physical_frame_t* new_frame = (physical_frame_t*) malloc(sizeof(physical_frame_t));
-
-        if (new_frame == NULL) {
-            fprintf(stderr, "Unable to allocate memory for new frame\n");
-            return;
-        }
-
-        new_frame->frame_number = physical_page_numbers[curr_frame];
-        new_frame->flink = &free_list;
-        new_frame->blink = prev_frame;
-
-        // modify previous entry and the beginning of the list
-        prev_frame->flink = new_frame;
-        free_list.blink = new_frame;
-
-        prev_frame = new_frame;
-        curr_frame++;
-    }
 
 
 
@@ -410,18 +367,22 @@ full_virtual_memory_test (
         return;
     }
 
-    typedef struct pte {
-        union vm1
-        {
-           // Placeholders, we need to have different structures for different states of each pte
-           ULONG64 pfn;
-           UCHAR random; 
-        };
+    // typedef struct pte {
+    //     union vm1
+    //     {
+    //        // Placeholders, we need to have different structures for different states of each pte
+    //        ULONG64 pfn;
+    //        UCHAR random; 
+    //     };
         
-    } pte_t; // page_table_entry
+    // } pte_t; // page_table_entry
 
-    ULONG64 num_ptes = virtual_address_size / PAGE_SIZE;
-    pte_t* page_table = malloc(sizeof(pte_t) * num_ptes);
+    // ULONG64 num_ptes = virtual_address_size / PAGE_SIZE;
+    // pte_t* page_table = malloc(sizeof(pte_t) * num_ptes);
+
+    PTE* pagetable = initialize_pagetable(physical_page_count, physical_page_numbers);
+
+    FREE_FRAMES_LISTS* free_frames = initialize_free_frames(pagetable, physical_page_count);
 
 
 
