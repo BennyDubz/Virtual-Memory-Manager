@@ -6,9 +6,17 @@
  */
 
 #include "./macros.h"
+#include <windows.h>
 
+// Representing how many powers of 2 large the pages are in bytes
+#define PAGE_POWER                  12 
 
-#define PAGE_SIZE                   4096
+// The size of the page in bytes
+#define PAGE_SIZE                   (1 << PAGE_POWER)
+
+#define DOWN_TO_PAGE_ADDR(x) (x & ~(PAGE_SIZE - 1))
+#define DOWN_TO_PAGE_NUM(x) (x >> PAGE_POWER)
+
 
 //
 // This is intentionally a power of two so we can use masking to stay
@@ -18,7 +26,9 @@
 
 #define VIRTUAL_ADDRESS_SIZE_IN_UNSIGNED_CHUNKS        (VIRTUAL_ADDRESS_SIZE / sizeof (ULONG_PTR))
 
-#define CACHE_SIZE KB(16)
+// #define NUMBER_OF_VIRTUAL_PAGES     (VIRTUAL_ADDRESS_SIZE / PAGE_SIZE)
+
+#define CACHE_SIZE      KB(16)
 
 //
 // Deliberately use a physical page pool that is approximately 1% of the

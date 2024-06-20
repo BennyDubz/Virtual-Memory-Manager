@@ -23,7 +23,7 @@
  * 
  * Returns a memory allocated pointer to a FREE_FRAMES_LISTS struct, or NULL if an error occurs
  */
-FREE_FRAMES_LISTS* initialize_free_frames(PTE* page_table, ULONG64 num_physical_frames) {
+FREE_FRAMES_LISTS* initialize_free_frames(ULONG64* physical_frame_numbers, ULONG64 num_physical_frames) {
     FREE_FRAMES_LISTS* free_frames = (FREE_FRAMES_LISTS*) malloc(sizeof(FREE_FRAMES_LISTS));
 
     if (free_frames == NULL) {
@@ -40,11 +40,13 @@ FREE_FRAMES_LISTS* initialize_free_frames(PTE* page_table, ULONG64 num_physical_
     }
 
     // Add all the physical frames to their respective free lists
-    for (int pte_idx = 0; pte_idx < num_physical_frames; pte_idx++) {
-        PTE* curr_pte = &page_table[pte_idx];
+    for (int pfn_idx = 0; pfn_idx < num_physical_frames; pfn_idx++) {
+        ULONG64 frame_number = physical_frame_numbers[pfn_idx];
 
         // Modulo-operation based on the frame number, not the pte index
-        int listhead_idx = curr_pte->memory_format.frame_number % NUM_FRAME_LISTS;
+        int listhead_idx = frame_number % NUM_FRAME_LISTS;
+        // printf("Physical frame number is %llX, modulo %llX is %d\n", frame_number, NUM_FRAME_LISTS, listhead_idx);
+
         DB_LL_NODE* relevant_listhead = free_frames->listheads[listhead_idx];
 
         PAGE* free_frame = (PAGE*) malloc(sizeof(PAGE));
@@ -62,18 +64,18 @@ FREE_FRAMES_LISTS* initialize_free_frames(PTE* page_table, ULONG64 num_physical_
         }
 
         free_frame->free_page.status = FREE_STATUS;
-        free_frame->free_page.pte = curr_pte;
         free_frame->free_page.zeroed_out = 1;
+        free_frame->free_page.frame_number = frame_number;
         free_frame->free_page.frame_listnode = frame_node;
 
         free_frames->list_lengths[listhead_idx] += 1;
     }
 
-    printf("Init free frames: total num frames %llX\n", num_physical_frames);
-    printf("iterating through list lengths:\n");
-    for(int i = 0; i < NUM_FRAME_LISTS; i++) {
-        printf("\tBucket %d has length %llX\n", i, free_frames->list_lengths[i]);
-    }
+    // printf("Init free frames: total num frames %lld\n", num_physical_frames);
+    // printf("iterating through list lengths:\n");
+    // for(int i = 0; i < NUM_FRAME_LISTS; i++) {
+    //     printf("\tBucket %d has length %lld\n", i, free_frames->list_lengths[i]);
+    // }
 
     return free_frames;
 }
@@ -84,6 +86,11 @@ FREE_FRAMES_LISTS* initialize_free_frames(PTE* page_table, ULONG64 num_physical_
  */
 PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
     int curr_attempts = 0;
+
+    // printf("iterating through list lengths AFF:\n");
+    // for(int i = 0; i < NUM_FRAME_LISTS; i++) {
+    //     printf("\tBucket %d has length %llX\n", i, free_frames->list_lengths[i]);
+    // }
     
     // SYNC - incrementing curr_list_idx
     PAGE* page = NULL;
@@ -91,7 +98,7 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
         // Check for empty list
         if (free_frames->list_lengths[free_frames->curr_list_idx] == 0) {
             curr_attempts += 1;
-            free_frames->curr_list_idx += 1;
+            free_frames->curr_list_idx = (free_frames->curr_list_idx + 1) % NUM_FRAME_LISTS;
             continue;
         }
 
@@ -100,9 +107,11 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
 
         page = (PAGE*) db_pop_from_head(frame_listhead);
         free_frames->list_lengths[free_frames->curr_list_idx] -= 1;
+        free_frames->curr_list_idx = (free_frames->curr_list_idx + 1) % NUM_FRAME_LISTS;
+
         break;
     }
-
+    page->free_page.frame_listnode = NULL;
     if (page == NULL) {
         printf("NULL PAGE");
     }

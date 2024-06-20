@@ -71,6 +71,7 @@ typedef struct {
 #define PAGETABLE_T
 typedef struct {
     PTE* frame_list;
+    ULONG64 num_virtual_pages;
     // LOCK
 } PAGETABLE;
 #endif
@@ -78,6 +79,14 @@ typedef struct {
 /**
  * Initializes the pagetable with all VALID_PTE entries, but all have the valid bit set to 0
  * 
- * Returns a pointer to a list of PTEs with num_physical_frames entries, or NULL if there is an error
+ * Returns a pointer to a pagetable containing all invalid PTEs ready for assignment
  */
-PTE* initialize_pagetable(ULONG64 num_physical_frames, ULONG64* physical_frame_numbers);
+PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages);
+
+
+/**
+ * Given a virtual address, return the relevant PTE from the pagetable
+ * 
+ * Returns NULL upon error
+ */
+PTE* va_to_pte(PAGETABLE* pagetable, PULONG64 virtual_address, PULONG64 vmem_base);

@@ -25,8 +25,8 @@
 #define PAGE_T
 typedef struct {
     ULONG64 status:2;
-    PTE* pte;
     DB_LL_NODE* frame_listnode;
+    ULONG64 frame_number:40;
     /**
      * Whether the page has been cleaned out before it was freed by the previous VA using it
      * 
@@ -47,6 +47,8 @@ typedef struct {
     ULONG64 status:2;
     PTE* pte;
     DB_LL_NODE* frame_listnode;
+    //BW: Make more space efficient later - calculate how many bits are needed based off hardware
+    ULONG64 pagefile_address:40; 
 
 } STANDBY_PAGE;
 
@@ -67,7 +69,7 @@ typedef struct {
 
 
 // We want to have frames go into different cache slots if we allocate several at a time
-#define NUM_FRAME_LISTS (NUMBER_OF_PHYSICAL_PAGES * PAGE_SIZE) / CACHE_SIZE
+#define NUM_FRAME_LISTS (CACHE_SIZE / PAGE_SIZE)
 
 #ifndef FREE_FRAMES_T
 #define FREE_FRAMES_T
@@ -81,9 +83,12 @@ typedef struct {
  */
 typedef struct {
     DB_LL_NODE* listheads[NUM_FRAME_LISTS];
-    ULONG64 list_lengths[NUM_FRAME_LISTS];    
+
+    // BW: Note the potential for race conditions keeping track of this!  
+    ULONG64 list_lengths[NUM_FRAME_LISTS]; 
+
     ULONG64 curr_list_idx;
-    // LOCK (idk windows implementation)
+    // LOCK
 } FREE_FRAMES_LISTS;
 
 
@@ -99,7 +104,7 @@ typedef struct {
  * 
  * Returns a memory allocated pointer to a FREE_FRAMES_LISTS struct, or NULL if an error occurs
  */
-FREE_FRAMES_LISTS* initialize_free_frames(PTE* page_table, ULONG64 num_physical_frames);
+FREE_FRAMES_LISTS* initialize_free_frames(ULONG64* physical_frame_numbers, ULONG64 num_physical_frames);
 
 /**
  * Returns a page off the free list, if there are any. Otherwise, returns NULL

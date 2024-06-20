@@ -265,7 +265,7 @@ full_virtual_memory_test (
     )
 {
     unsigned i;
-    PULONG_PTR p;
+    PULONG_PTR vmem_base;
     PULONG_PTR arbitrary_va;
     unsigned random_number;
     BOOL allocated;
@@ -321,11 +321,6 @@ full_virtual_memory_test (
                 NUMBER_OF_PHYSICAL_PAGES);
     }
 
-
-
-
-
-
     //
     // Reserve a user address space region using the Windows kernel
     // AWE (address windowing extensions) APIs.
@@ -348,43 +343,35 @@ full_virtual_memory_test (
     virtual_address_size_in_unsigned_chunks =
                         virtual_address_size / sizeof (ULONG_PTR);
 
-    p = VirtualAlloc (NULL,
+    vmem_base = VirtualAlloc (NULL,
                       virtual_address_size,
                       MEM_RESERVE | MEM_PHYSICAL,
                       PAGE_READWRITE);
 
-    if (p == NULL) {
+    if (vmem_base == NULL) {
         printf ("full_virtual_memory_test : could not reserve memory\n");
         return;
     }
+    
+    /**
+     * Initialize pagetable and free frames
+     */
 
-    // typedef struct pte {
-    //     union vm1
-    //     {
-    //        // Placeholders, we need to have different structures for different states of each pte
-    //        ULONG64 pfn;
-    //        UCHAR random; 
-    //     };
-        
-    // } pte_t; // page_table_entry
+    ULONG64 number_of_virtual_pages = virtual_address_size / PAGE_SIZE;
 
-    // ULONG64 num_ptes = virtual_address_size / PAGE_SIZE;
-    // pte_t* page_table = malloc(sizeof(pte_t) * num_ptes);
-
-    PTE* pagetable = initialize_pagetable(physical_page_count, physical_page_numbers);
+    PAGETABLE* pagetable = initialize_pagetable(number_of_virtual_pages);
     if (pagetable == NULL) {
         fprintf(stderr, "Unable to allocate memory for pagetable\n");
         return;
-    } else {
-        printf("Pagetable created\n");
     }
 
-    FREE_FRAMES_LISTS* free_frames = initialize_free_frames(pagetable, physical_page_count);
+    FREE_FRAMES_LISTS* free_frames = initialize_free_frames(physical_page_numbers, physical_page_count);
     if (free_frames == NULL) {
         fprintf(stderr, "Unable to allocate memory for free frames\n");
-    } else {
-        printf("Free frames created\n");
     }
+
+    printf("VAS is %llX, PS is %X, num phys %llX, multiplied %llX\n", virtual_address_size, PAGE_SIZE, physical_page_count, PAGE_SIZE * physical_page_count);
+
 
     //
     // Now perform random accesses.
@@ -412,6 +399,7 @@ full_virtual_memory_test (
         random_number = rand ();
 
         random_number %= virtual_address_size_in_unsigned_chunks;
+        // random_number %= virtual_address_size - sizeof(ULONG_PTR);
 
         //
         // Write the virtual address into each page.  If we need to
@@ -420,7 +408,7 @@ full_virtual_memory_test (
 
         page_faulted = FALSE;
 
-        arbitrary_va = p + random_number;
+        arbitrary_va = vmem_base + random_number;
 
         __try {
 
@@ -448,30 +436,37 @@ full_virtual_memory_test (
             // GET FROM FREE LIST
             // CHECK FOR FAILURE --> OUT OF FREE FRAMES
 
+
+            // BW: Need to be able to accurately translate between VA and pagenumber!
+            // Adjust PTE to reflect its allocated page
+            PTE* accessed_pte = va_to_pte(pagetable, arbitrary_va, vmem_base);
+
+            if (accessed_pte == NULL) {
+                fprintf(stderr, "Unable to find the accessed PTE\n");
+                return;
+            }
+
+            if (accessed_pte->memory_format.valid == VALID) {
+                // Skip to the next random access, another thread has already validated this address
+                continue;
+            }
+
+            // BW: Check the pte to see if it is in the standby or modified to see if it can be rescued
+            // Then, check free frames
             PAGE* new_page = allocate_free_frame(free_frames);
+            // Then, check standby
+            
 
             if (new_page == NULL) {
                 printf("Out of free frames\n");
                 return;
             }
 
-            ULONG64 pfn = new_page->free_page.pte->memory_format.frame_number;
-            printf("Got free frame with pfn %llX\n", pfn);
+            ULONG64 pfn = new_page->free_page.frame_number;
 
-            // ADJUST TO USE THE POPPED PAGE
-            if (MapUserPhysicalPages (arbitrary_va, 1, &pfn) == FALSE) {
-
-                printf ("full_virtual_memory_test : could not map VA %p to page %llX\n", arbitrary_va, pfn);
-
-                return;
-                //  DETERMINE ACTIVE LIST VS PFN LIST
-            }
-
-            // printf("iterating through list lengths:\n");
-            // for(int i = 0; i < NUM_FRAME_LISTS; i++) {
-            //     printf("\tBucket %d has length %llX\n", i, free_frames->list_lengths[i]);
-            // }
-            
+            accessed_pte->memory_format.age = 0;
+            accessed_pte->memory_format.frame_number = pfn;
+            accessed_pte->memory_format.valid = VALID;
 
             // UPDATE PTE
 
@@ -481,6 +476,13 @@ full_virtual_memory_test (
             // TODO: Get the page table entry for the arbitrary VA, then modify our page table entry
             // to represent what physical frame we just allocated
 
+            // Allocate the physical frame to the virtual address
+            if (MapUserPhysicalPages (arbitrary_va, 1, &pfn) == FALSE) {
+
+                printf ("full_virtual_memory_test : could not map VA %p to page %llX\n", arbitrary_va, pfn);
+
+                return;
+            }
 
             //
             // No exception handler needed now since we have connected
@@ -496,6 +498,7 @@ full_virtual_memory_test (
             // now that we're done writing our value into it.
             //
 
+            // 
             if (MapUserPhysicalPages (arbitrary_va, 1, NULL) == FALSE) {
 
                 printf ("full_virtual_memory_test : could not unmap VA %p\n", arbitrary_va);
@@ -514,7 +517,7 @@ full_virtual_memory_test (
     // citizen and free it.
     //
 
-    VirtualFree (p, 0, MEM_RELEASE);
+    VirtualFree (vmem_base, 0, MEM_RELEASE);
 
     return;
 }
