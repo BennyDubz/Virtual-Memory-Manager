@@ -87,10 +87,10 @@ FREE_FRAMES_LISTS* initialize_free_frames(ULONG64* physical_frame_numbers, ULONG
 PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
     int curr_attempts = 0;
 
-    // printf("iterating through list lengths AFF:\n");
-    // for(int i = 0; i < NUM_FRAME_LISTS; i++) {
-    //     printf("\tBucket %d has length %llX\n", i, free_frames->list_lengths[i]);
-    // }
+    printf("iterating through list lengths AFF:\n");
+    for(int i = 0; i < NUM_FRAME_LISTS; i++) {
+        printf("\tBucket %d has length %llX\n", i, free_frames->list_lengths[i]);
+    }
     
     // SYNC - incrementing curr_list_idx
     PAGE* page = NULL;
@@ -108,9 +108,9 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
         page = (PAGE*) db_pop_from_head(frame_listhead);
         free_frames->list_lengths[free_frames->curr_list_idx] -= 1;
         free_frames->curr_list_idx = (free_frames->curr_list_idx + 1) % NUM_FRAME_LISTS;
-
         break;
     }
+
     page->free_page.frame_listnode = NULL;
     if (page == NULL) {
         printf("NULL PAGE");

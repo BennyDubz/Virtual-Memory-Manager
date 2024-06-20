@@ -3,7 +3,7 @@
 # June 19th, 2024
 
 CC=cl
-CFLAGS=/EHsc /I.
+CFLAGS=/Zi /EHsc /I.
 
 # Header file dependencies
 DEPS = Datastructures/pagelists.h Datastructures/pagetable.h Datastructures/db_linked_list.h \
