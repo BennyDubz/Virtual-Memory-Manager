@@ -16,8 +16,11 @@
 #define ACCESSIBLE 0
 #define TRIMMED 1
 
-// Modified?
-
+// Identifiers for each type
+#define UNACCESSED_FORMAT 0
+#define VALID_FORMAT 1
+#define DISK_FORMAT 2
+#define TRANSITION_FORMAT 3
 
 //TODO: Think about various types of structs we would have in here
 // Each would have a status, but then they would have their own 
@@ -59,6 +62,7 @@ typedef struct {
 // Generic PTE struct that can handle all cases
 typedef struct {
     union {
+        ULONG64 format_id:2;
         VALID_PTE memory_format;
         DISK_PTE disc_format;
         TRANSITION_PTE transition_format;
@@ -72,6 +76,8 @@ typedef struct {
 typedef struct {
     PTE* frame_list;
     ULONG64 num_virtual_pages;
+    // To allow calculations from PTEs to virtual addresses and vice verca
+    ULONG64 vmem_base;
     // LOCK
 } PAGETABLE;
 #endif
@@ -81,7 +87,7 @@ typedef struct {
  * 
  * Returns a pointer to a pagetable containing all invalid PTEs ready for assignment
  */
-PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages);
+PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base);
 
 
 /**
@@ -89,4 +95,19 @@ PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages);
  * 
  * Returns NULL upon error
  */
-PTE* va_to_pte(PAGETABLE* pagetable, PULONG64 virtual_address, PULONG64 vmem_base);
+PTE* va_to_pte(PAGETABLE* pagetable, PULONG64 virtual_address);
+
+
+/**
+ * Returns the base virtual address associated with the given PTE, or ERROR otherwise
+ * 
+ */
+PULONG_PTR pte_to_va(PAGETABLE* pagetable, PTE* pte);
+
+/**
+ * Returns the frame number of the lowest page in the pagetable that is valid, makes the PTE invalid 
+ * and communicates with the CPU
+ * 
+ * Returns either the frame number or ERROR otherwise
+ */
+ULONG64 steal_lowest_frame(PAGETABLE* pagetable);

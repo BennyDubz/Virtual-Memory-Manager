@@ -199,7 +199,7 @@ full_virtual_memory_test (
 
     ULONG64 number_of_virtual_pages = virtual_address_size / PAGE_SIZE;
 
-    PAGETABLE* pagetable = initialize_pagetable(number_of_virtual_pages);
+    PAGETABLE* pagetable = initialize_pagetable(number_of_virtual_pages, vmem_base);
     if (pagetable == NULL) {
         fprintf(stderr, "Unable to allocate memory for pagetable\n");
         return;
@@ -235,8 +235,7 @@ full_virtual_memory_test (
         // valid PTE and proceed to obtain the physical contents
         // (without faulting to the operating system again).
         //
-
-        random_number = rand ();
+        random_number = rand () * rand() * rand();
 
         random_number %= virtual_address_size_in_unsigned_chunks;
         // random_number %= virtual_address_size - sizeof(ULONG_PTR);
@@ -260,7 +259,6 @@ full_virtual_memory_test (
         }
 
         if (page_faulted) {
-            printf("Page fault!\n");
             //
             // Connect the virtual address now - if that succeeds then
             // we'll be able to access it from now on.
@@ -280,7 +278,7 @@ full_virtual_memory_test (
 
             // BW: Need to be able to accurately translate between VA and pagenumber!
             // Adjust PTE to reflect its allocated page
-            PTE* accessed_pte = va_to_pte(pagetable, arbitrary_va, vmem_base);
+            PTE* accessed_pte = va_to_pte(pagetable, arbitrary_va);
 
             if (accessed_pte == NULL) {
                 fprintf(stderr, "Unable to find the accessed PTE\n");
@@ -288,37 +286,31 @@ full_virtual_memory_test (
             }
 
             if (accessed_pte->memory_format.valid == VALID) {
+                printf("Accessing already valid pte\n");
                 // Skip to the next random access, another thread has already validated this address
                 continue;
             }
 
             // BW: Check the pte to see if it is in the standby or modified to see if it can be rescued
             // Then, check free frames
+
             PAGE* new_page = allocate_free_frame(free_frames);
             // Then, check standby
-            
-            if (i % 5 == 0) {
-                i += 1;
-            }
-
+            ULONG64 pfn;
             if (new_page == NULL) {
-                printf("Out of free frames\n");
-                return;
+                // printf("Stealing frame...\n");
+                pfn = steal_lowest_frame(pagetable);
+                // printf("Stolen pfn: %llX\n", pfn);
+            } else {
+                pfn = new_page->free_page.frame_number;
+                free(new_page);
             }
 
-            ULONG64 pfn = new_page->free_page.frame_number;
-
+            accessed_pte->format_id = VALID_FORMAT;
             accessed_pte->memory_format.age = 0;
             accessed_pte->memory_format.frame_number = pfn;
             accessed_pte->memory_format.valid = VALID;
 
-            // UPDATE PTE
-
-            // MAKE SURE THAT THE VA WOULD FAULT IF WE HIT A VA THAT WE HAVE TRIMMED
-
-
-            // TODO: Get the page table entry for the arbitrary VA, then modify our page table entry
-            // to represent what physical frame we just allocated
 
             // Allocate the physical frame to the virtual address
             if (MapUserPhysicalPages (arbitrary_va, 1, &pfn) == FALSE) {
