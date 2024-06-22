@@ -30,6 +30,7 @@
 
 #define CACHE_SIZE      KB(16)
 
+#define DISK_SIZE       MB(16)
 //
 // Deliberately use a physical page pool that is approximately 1% of the
 // virtual address space !

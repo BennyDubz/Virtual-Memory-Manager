@@ -93,6 +93,15 @@ PAGE* page_from_pfn(ULONG64 frame_number, PULONG_PTR page_storage_base) {
 }
 
 
+// /**
+//  * Connects the given PTE to the open page's physical frame and alerts the CPU
+//  * 
+//  * Returns SUCCESS if there are no issues, ERROR otherwise
+//  */
+// int connect_pte_to_page(PTE* pte, PAGE* open_page) {
+
+// }
+
 /**
  * ##########################
  * FREE FRAMES LIST FUNCTIONS
@@ -115,7 +124,7 @@ FREE_FRAMES_LISTS* initialize_free_frames(PULONG_PTR page_storage_base, ULONG64*
 
     // Create all the individual listheads
     for (int new_list = 0; new_list < NUM_FRAME_LISTS; new_list++) {
-        DB_LL_NODE* new_listhead = create_db_list();
+        DB_LL_NODE* new_listhead = db_create_list();
         free_frames->listheads[new_list] = new_listhead;
         free_frames->list_lengths[new_list] = 0;
         free_frames->curr_list_idx = 0;
@@ -189,6 +198,7 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
 
     return page;
 }
+
 
 /**
  * Zeroes out the memory on the physical frame so that it can be allocated to a new process without privacy loss

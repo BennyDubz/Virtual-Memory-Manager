@@ -24,7 +24,7 @@ typedef struct NODE {
  * 
  * Returns NULL in case of error
  */
-DB_LL_NODE* create_db_list();
+DB_LL_NODE* db_create_list();
 
 
 /**

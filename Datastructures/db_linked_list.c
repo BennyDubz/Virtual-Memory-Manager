@@ -15,7 +15,7 @@
  * 
  * Used for insertion into the list
  */
-static DB_LL_NODE* create_db_node() {
+static DB_LL_NODE* db_create_node() {
     DB_LL_NODE* new_node = malloc(sizeof(DB_LL_NODE));
 
     if (new_node == NULL) {
@@ -32,9 +32,9 @@ static DB_LL_NODE* create_db_node() {
  * 
  * Returns NULL in case of error
  */
-DB_LL_NODE* create_db_list() {
+DB_LL_NODE* db_create_list() {
 
-    DB_LL_NODE* listhead = create_db_node();
+    DB_LL_NODE* listhead = db_create_node();
 
     if (listhead == NULL) return NULL;
 
@@ -56,7 +56,7 @@ DB_LL_NODE* db_insert_at_head(DB_LL_NODE* listhead, void* item) {
         return NULL;
     }
 
-    DB_LL_NODE* new_node = create_db_node();
+    DB_LL_NODE* new_node = db_create_node();
 
     if (new_node == NULL) return NULL;
 
@@ -84,7 +84,7 @@ DB_LL_NODE* db_insert_at_tail(DB_LL_NODE* listhead, void* item) {
         return NULL;
     } 
 
-    DB_LL_NODE* new_node = create_db_node();
+    DB_LL_NODE* new_node = db_create_node();
 
     if (new_node == NULL) return NULL;
 

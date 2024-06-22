@@ -87,6 +87,17 @@ PULONG_PTR initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physi
  */
 PAGE* page_from_pfn(ULONG64 frame_number, PULONG_PTR page_storage_base);
 
+    
+// /**
+//  * Connects the given PTE to the open page's physical frame and alerts the CPU
+//  * 
+//  * It does **NOT** set the valid format on the PTE, however, as this function may be used when
+//  * fetching data from the disk.
+//  * 
+//  * Returns SUCCESS if there are no issues, ERROR otherwise
+//  */
+// int connect_pte_to_page(PTE* pte, PAGE* open_page);
+
 
 /**
  * ######################################

@@ -23,7 +23,7 @@ int main(int argc, char** argv) {
         items[i] = new_item;
     }
 
-    DB_LL_NODE* listhead = create_db_list();  
+    DB_LL_NODE* listhead = db_create_list();  
 
     // Adding items to the head and 
     for (int i = 0; i < NUM_ITEMS; i++) {

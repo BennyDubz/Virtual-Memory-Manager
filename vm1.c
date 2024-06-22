@@ -295,7 +295,7 @@ full_virtual_memory_test (
                 if (is_memory_format(accessed_pte)) {
                     // Skip to the next random access, another thread has already validated this address
                     continue;
-                } else if (is_disc_format(accessed_pte)) {
+                } else if (is_disk_format(accessed_pte)) {
                     // Get the frame
                     // Bring back the page from the pagefile using the PTE
                     // printf("Fetch from disk\n");

@@ -54,9 +54,8 @@ typedef struct {
 // Generic PTE struct that can handle all cases
 typedef struct {
     union {
-        ULONG64 format_id:2;
         VALID_PTE memory_format;
-        DISK_PTE disc_format;
+        DISK_PTE disk_format;
         TRANSITION_PTE transition_format;
     };
 } PTE;
@@ -96,7 +95,7 @@ PTE* va_to_pte(PAGETABLE* pagetable, PULONG64 virtual_address);
 
 
 /**
- * Returns the base virtual address associated with the given PTE, or ERROR otherwise
+ * Returns the base virtual address associated with the given PTE, or NULL otherwise
  * 
  */
 PULONG_PTR pte_to_va(PAGETABLE* pagetable, PTE* pte);
@@ -120,7 +119,7 @@ BOOL is_transition_format(PTE* pte);
  * Returns TRUE if the PTE is in the disc format, FALSE otherwise
  * or if the PTE is NULL
  */
-BOOL is_disc_format(PTE* pte);
+BOOL is_disk_format(PTE* pte);
 
 
 /**
