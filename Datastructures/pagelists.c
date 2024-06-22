@@ -6,9 +6,91 @@
  */
 
 #include <stdio.h>
+#include <windows.h>
 #include "./db_linked_list.h"
 #include "./pagelists.h"
 #include "../macros.h"
+
+/**
+ * ###########################
+ * GENERAL PAGE LIST FUNCTIONS
+ * ###########################
+ */
+
+
+/**
+ * Initializes all of the pages, and organizes them in memory such that they are reachable using the page_from_pfn
+ * function in O(1) time. Returns the address of page_storage_base representing the base address of where all the pages
+ * can be found from, minus the lowest pagenumber for simpler arithmetic in the other functions
+ * 
+ * Returns NULL given any error
+ */
+PULONG_PTR initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_frames) {
+
+    ULONG64 lowest_pfn = 0xFFFFFFFFFFFFFFFF;
+    ULONG64 highest_pfn = 0x0;
+
+    for (ULONG64 frame_idx = 0; frame_idx < num_physical_frames; frame_idx++) {
+        ULONG64 curr_pfn = physical_frame_numbers[frame_idx];
+        
+        lowest_pfn = curr_pfn < lowest_pfn ? curr_pfn : lowest_pfn;
+
+        highest_pfn = curr_pfn > highest_pfn ? curr_pfn : highest_pfn;
+    }
+
+    // Now we can reserve the minimum amount of memory required for this scheme
+    PULONG_PTR page_storage_base = VirtualAlloc(NULL, (highest_pfn - lowest_pfn) * sizeof(PAGE), 
+                                                MEM_RESERVE, PAGE_READWRITE);
+    
+    if (page_storage_base == NULL) {
+        fprintf(stderr, "Unable to reserve memory for the pages\n");
+        return NULL;
+    }
+    
+    // This makes it so we can easily shift to find even the lowest physical frame
+    page_storage_base -= lowest_pfn;
+
+
+    // Now, we can actually commit memory for each page
+    for (ULONG64 frame_idx = 0; frame_idx < num_physical_frames; frame_idx++) {
+        ULONG64 curr_pfn = physical_frame_numbers[frame_idx];
+        
+        // PULONG_PTR storage_address = page_storage_base + curr_pfn;
+
+        PAGE* new_page = VirtualAlloc(page_storage_base + curr_pfn, sizeof(PAGE), 
+                                    MEM_COMMIT, PAGE_READWRITE);
+        
+        if (new_page == NULL) {
+            fprintf(stderr, "Unable to allocate memory for page in initialize_pages\n");
+            return NULL;
+        }
+        
+        new_page->free_page.frame_number = curr_pfn;
+        new_page->free_page.status = INVALID;
+        new_page->free_page.zeroed_out = 1;
+    }
+
+
+    return page_storage_base;
+}
+
+
+/**
+ * ### Initialize pages must be called before this function! ###
+ * 
+ * Given the frame number and the base address of where the pages are stored, returns a pointer to the relevant 
+ * PAGE struct associated with the frame number. 
+ * 
+ * Returns NULL given any error
+ */
+PAGE* page_from_pfn(ULONG64 frame_number, PULONG_PTR page_storage_base) {
+    if (page_storage_base == NULL) {
+        fprintf(stderr, "Page storage base is NULL in page_from_pfn\n");
+        return NULL;
+    }
+
+    return (PAGE*) (page_storage_base + frame_number);
+}
 
 
 /**
@@ -23,7 +105,7 @@
  * 
  * Returns a memory allocated pointer to a FREE_FRAMES_LISTS struct, or NULL if an error occurs
  */
-FREE_FRAMES_LISTS* initialize_free_frames(ULONG64* physical_frame_numbers, ULONG64 num_physical_frames) {
+FREE_FRAMES_LISTS* initialize_free_frames(PULONG_PTR page_storage_base, ULONG64* physical_frame_numbers, ULONG64 num_physical_frames) {
     FREE_FRAMES_LISTS* free_frames = (FREE_FRAMES_LISTS*) malloc(sizeof(FREE_FRAMES_LISTS));
 
     if (free_frames == NULL) {
@@ -45,14 +127,13 @@ FREE_FRAMES_LISTS* initialize_free_frames(ULONG64* physical_frame_numbers, ULONG
 
         // Modulo-operation based on the frame number, not the pte index
         int listhead_idx = frame_number % NUM_FRAME_LISTS;
-        // printf("Physical frame number is %llX, modulo %llX is %d\n", frame_number, NUM_FRAME_LISTS, listhead_idx);
 
         DB_LL_NODE* relevant_listhead = free_frames->listheads[listhead_idx];
 
-        PAGE* free_frame = (PAGE*) malloc(sizeof(PAGE));
+        PAGE* free_frame = page_from_pfn(frame_number, page_storage_base);
 
         if (free_frame == NULL) {
-            fprintf(stderr, "Unable to allocate memory for a free frame\n");
+            fprintf(stderr, "Unable to find the page associated with the pfn in initialize_free_frames\n");
             return NULL;
         }
 
@@ -63,19 +144,13 @@ FREE_FRAMES_LISTS* initialize_free_frames(ULONG64* physical_frame_numbers, ULONG
             return NULL;
         }
 
-        free_frame->status = FREE_STATUS;
+        free_frame->free_page.status = FREE_STATUS;
         free_frame->free_page.zeroed_out = 1;
         free_frame->free_page.frame_number = frame_number;
         free_frame->free_page.frame_listnode = frame_node;
 
         free_frames->list_lengths[listhead_idx] += 1;
     }
-
-    // printf("Init free frames: total num frames %lld\n", num_physical_frames);
-    // printf("iterating through list lengths:\n");
-    // for(int i = 0; i < NUM_FRAME_LISTS; i++) {
-    //     printf("\tBucket %d has length %lld\n", i, free_frames->list_lengths[i]);
-    // }
 
     return free_frames;
 }

@@ -32,6 +32,7 @@ typedef struct {
      * We need to zero out pages that are going to a different process than the one it was at before
      */
     ULONG64 zeroed_out:1; 
+    ULONG64 status:2;
 
 } FREE_PAGE;
 
@@ -39,6 +40,7 @@ typedef struct {
     PTE* pte;
     DB_LL_NODE* frame_listnode;
     ULONG64 modified_again:1;
+    ULONG64 status:2;
 } MODIFIED_PAGE;
 
 typedef struct {
@@ -46,18 +48,45 @@ typedef struct {
     DB_LL_NODE* frame_listnode;
     //BW: Make more space efficient later - calculate how many bits are needed based off hardware
     ULONG64 pagefile_address:40; 
-
+    ULONG64 status:2;
 } STANDBY_PAGE;
 
 typedef struct {
     union {
-        ULONG64 status:2;
         FREE_PAGE free_page;
         MODIFIED_PAGE modified_page;
         STANDBY_PAGE standby_page;
     };
 } PAGE;
 #endif
+
+/**
+ * ###########################
+ * GENERAL PAGE LIST FUNCTIONS
+ * ###########################
+ */
+
+
+/**
+ * Initializes all of the pages, and organizes them in memory such that they are reachable using the page_from_pfn
+ * function in O(1) time. Returns the address of page_storage_base representing the base address of where all the pages
+ * can be found from
+ * 
+ * Returns NULL given any error
+ */
+PULONG_PTR initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_frames);
+
+
+/**
+ * ### Initialize pages must be called before this function! ###
+ * 
+ * Given the frame number and the base address of where the pages are stored, returns a pointer to the relevant 
+ * PAGE struct associated with the frame number. 
+ * 
+ * Returns NULL given any error
+ */
+PAGE* page_from_pfn(ULONG64 frame_number, PULONG_PTR page_storage_base);
+
 
 /**
  * ######################################
@@ -88,21 +117,22 @@ typedef struct {
     ULONG64 curr_list_idx;
     // LOCK
 } FREE_FRAMES_LISTS;
-
-
 #endif
+
 
 /**
  * Given the new pagetable, create free frames lists that contain all of the physical frames
  * 
  * Returns a memory allocated pointer to a FREE_FRAMES_LISTS struct, or NULL if an error occurs
  */
-FREE_FRAMES_LISTS* initialize_free_frames(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_frames);
+FREE_FRAMES_LISTS* initialize_free_frames(PULONG_PTR page_storage_base, PULONG_PTR physical_frame_numbers, ULONG64 num_physical_frames);
+
 
 /**
  * Returns a page off the free list, if there are any. Otherwise, returns NULL
  */
 PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames);
+
 
 /**
  * Zeroes out the memory on the physical frame so that it can be allocated to a new process without privacy loss

@@ -3,7 +3,7 @@
 # Date: June 19th, 2024
 
 CC=cl
-CFLAGS=/c /EHsc
+CFLAGS=/Zi /c /EHsc
 OBJS = db_linked_list.obj pagetable.obj pagelists.obj
 LIB = vm_datastructures.lib
 

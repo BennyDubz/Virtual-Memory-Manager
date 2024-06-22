@@ -194,8 +194,15 @@ full_virtual_memory_test (
     }
     
     /**
-     * Initialize pagetable and free frames
+     * Initialize pages, pagetable, and free frames
      */
+
+    PULONG_PTR page_storage_base = initialize_pages(physical_page_numbers, physical_page_count);
+
+    if (page_storage_base == NULL) {
+        fprintf(stderr, "Unable to allocate memory for the pages\n");
+        return;
+    }
 
     ULONG64 number_of_virtual_pages = virtual_address_size / PAGE_SIZE;
 
@@ -205,9 +212,10 @@ full_virtual_memory_test (
         return;
     }
 
-    FREE_FRAMES_LISTS* free_frames = initialize_free_frames(physical_page_numbers, physical_page_count);
+    FREE_FRAMES_LISTS* free_frames = initialize_free_frames(page_storage_base, physical_page_numbers, physical_page_count);
     if (free_frames == NULL) {
         fprintf(stderr, "Unable to allocate memory for free frames\n");
+        return;
     }
 
     printf("VAS is %llX, PS is %X, num phys %llX, multiplied %llX\n", virtual_address_size, PAGE_SIZE, physical_page_count, PAGE_SIZE * physical_page_count);
@@ -272,11 +280,7 @@ full_virtual_memory_test (
             // TODO: Look at the PTE for this va to make sure we are doing the right thing
             // Might be trimmed, might be first access, etc...
 
-            // GET FROM FREE LIST
-            // CHECK FOR FAILURE --> OUT OF FREE FRAMES
 
-
-            // BW: Need to be able to accurately translate between VA and pagenumber!
             // Adjust PTE to reflect its allocated page
             PTE* accessed_pte = va_to_pte(pagetable, arbitrary_va);
 
@@ -285,28 +289,45 @@ full_virtual_memory_test (
                 return;
             }
 
-            if (accessed_pte->memory_format.valid == VALID) {
-                printf("Accessing already valid pte\n");
-                // Skip to the next random access, another thread has already validated this address
-                continue;
+            //BW: What to do if the PTE has never been accessed before?
+            if (is_used_pte(accessed_pte)) {
+                // Check the PTE to decide what our course of action is
+                if (is_memory_format(accessed_pte)) {
+                    // Skip to the next random access, another thread has already validated this address
+                    continue;
+                } else if (is_disc_format(accessed_pte)) {
+                    // Get the frame
+                    // Bring back the page from the pagefile using the PTE
+                    // printf("Fetch from disk\n");
+                } else if (is_transition_format(accessed_pte)) {
+                    // Rescue the frame from the modified or standby list
+                    
+                }
             }
 
-            // BW: Check the pte to see if it is in the standby or modified to see if it can be rescued
-            // Then, check free frames
+            /**
+             * By the time we get here, the PTE has never been accessed before,
+             * so we just need to find a frame to allocate to it
+             */            
 
             PAGE* new_page = allocate_free_frame(free_frames);
+
             // Then, check standby
             ULONG64 pfn;
             if (new_page == NULL) {
                 // printf("Stealing frame...\n");
                 pfn = steal_lowest_frame(pagetable);
+
+                if (pfn == ERROR) {
+                    fprintf(stderr, "Unable to find valid frame to steal\n");
+                }
+
                 // printf("Stolen pfn: %llX\n", pfn);
             } else {
                 pfn = new_page->free_page.frame_number;
-                free(new_page);
+                //BW: Make the page list
             }
 
-            accessed_pte->format_id = VALID_FORMAT;
             accessed_pte->memory_format.age = 0;
             accessed_pte->memory_format.frame_number = pfn;
             accessed_pte->memory_format.valid = VALID;

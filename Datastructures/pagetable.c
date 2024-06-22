@@ -32,15 +32,14 @@ PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base)
         return NULL;
     }
 
-    pagetable->frame_list = pte_list;
+    pagetable->pte_list = pte_list;
     pagetable->num_virtual_pages = num_virtual_pages;
     pagetable->vmem_base = (ULONG64) vmem_base;
 
     // Create empty, invalid PTEs for entire virtual address space
     for (int virtual_page = 0; virtual_page <= num_virtual_pages; virtual_page++) {
         PTE new_pte;
-        new_pte.format_id = UNACCESSED_FORMAT; 
-
+        new_pte.memory_format.frame_number = 0;
         pte_list[virtual_page] = new_pte;
     }
 
@@ -61,7 +60,7 @@ PTE* va_to_pte(PAGETABLE* pagetable, PULONG_PTR virtual_address) {
         return NULL;
     }
 
-    return &pagetable->frame_list[pte_index];
+    return &pagetable->pte_list[pte_index];
 }
 
 /**
@@ -75,7 +74,7 @@ PULONG_PTR pte_to_va(PAGETABLE* pagetable, PTE* pte) {
     }
 
     //BW: Implement additional safety checks
-    ULONG64 base_address_pte_list = (ULONG64) pagetable->frame_list;
+    ULONG64 base_address_pte_list = (ULONG64) pagetable->pte_list;
     ULONG64 pte_address = (ULONG64) pte;
 
     ULONG64 pte_index = (pte_address - base_address_pte_list) / sizeof(PTE);
@@ -83,6 +82,51 @@ PULONG_PTR pte_to_va(PAGETABLE* pagetable, PTE* pte) {
     PULONG_PTR virtual_address = (PULONG_PTR) (pagetable->vmem_base + (pte_index * PAGE_SIZE));
 
     return virtual_address;
+}
+
+
+/**
+ * Returns TRUE if the PTE is in the memory format, FALSE otherwise
+ * or if the PTE is NULL
+ */
+BOOL is_memory_format(PTE* pte) {
+    if (pte == NULL) return FALSE;
+
+    return pte->memory_format.valid == VALID;
+}
+
+
+/**
+ * Returns TRUE if the PTE is in the transition format, FALSE otherwise
+ * or if the PTE is NULL
+ */
+BOOL is_transition_format(PTE* pte) {
+    if (pte == NULL) return FALSE;
+    
+    return (pte->disc_format.always_zero == 0 && \
+        pte->disc_format.on_disc == 1);
+}
+
+
+/**
+ * Returns TRUE if the PTE is in the disc format, FALSE otherwise
+ * or if the PTE is NULL
+ */
+BOOL is_disc_format(PTE* pte) {
+    if (pte == NULL) return FALSE;
+
+    return (pte->transition_format.always_zero == 0 && \
+        pte->transition_format.always_zero2 == 0);
+}
+
+/**
+ * Returns TRUE if the PTE has ever been accessed, FALE otherwise
+ * or if the PTE is NULL
+ */
+BOOL is_used_pte(PTE* pte) {
+    if (pte == NULL) return FALSE;
+
+    return pte->memory_format.frame_number != 0;
 }
 
 /**
@@ -94,9 +138,11 @@ PULONG_PTR pte_to_va(PAGETABLE* pagetable, PTE* pte) {
 ULONG64 steal_lowest_frame(PAGETABLE* pagetable) {
 
     for (ULONG64 pte_idx = 0; pte_idx < pagetable->num_virtual_pages; pte_idx++) {
-        PTE* candidate_pte = &pagetable->frame_list[pte_idx];
+        PTE* candidate_pte = &pagetable->pte_list[pte_idx];
 
-        if (candidate_pte->format_id == VALID_FORMAT && candidate_pte->memory_format.valid == VALID) {
+        // See if the pte is currently linked to a physical frame that we can take
+        if (is_memory_format(candidate_pte)) {
+            
             // We have found our victim to steal from
             ULONG64 pfn = candidate_pte->memory_format.frame_number;
 

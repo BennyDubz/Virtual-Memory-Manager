@@ -12,16 +12,6 @@
 #define INVALID 0
 #define VALID 1
 
-// Status possibilities
-#define ACCESSIBLE 0
-#define TRIMMED 1
-
-// Identifiers for each type
-#define UNACCESSED_FORMAT 0
-#define VALID_FORMAT 1
-#define DISK_FORMAT 2
-#define TRANSITION_FORMAT 3
-
 //TODO: Think about various types of structs we would have in here
 // Each would have a status, but then they would have their own 
 
@@ -43,6 +33,7 @@ typedef struct {
 typedef struct {
     ULONG64 always_zero:1;
     ULONG64 pagefile_address:40;
+    // Will always be one for this structure
     ULONG64 on_disc:1;
 } DISK_PTE;
 
@@ -55,6 +46,7 @@ typedef struct {
 typedef struct {
     ULONG64 always_zero:1;
     ULONG64 frame_number:40;
+    // It is not on the disk yet, so this is zero
     ULONG64 always_zero2:1;
 } TRANSITION_PTE;
 
@@ -74,12 +66,17 @@ typedef struct {
 #ifndef PAGETABLE_T
 #define PAGETABLE_T
 typedef struct {
-    PTE* frame_list;
+    PTE* pte_list;
     ULONG64 num_virtual_pages;
     // To allow calculations from PTEs to virtual addresses and vice verca
     ULONG64 vmem_base;
     // LOCK
 } PAGETABLE;
+
+#define MAX_AGE (1 << 5) - 1
+// typedef struct {
+    
+// } AGELISTS;
 #endif
 
 /**
@@ -103,6 +100,35 @@ PTE* va_to_pte(PAGETABLE* pagetable, PULONG64 virtual_address);
  * 
  */
 PULONG_PTR pte_to_va(PAGETABLE* pagetable, PTE* pte);
+
+
+/**
+ * Returns TRUE if the PTE is in the memory format, FALSE otherwise
+ * or if the PTE is NULL
+ */
+BOOL is_memory_format(PTE* pte);
+
+
+/**
+ * Returns TRUE if the PTE is in the transition format, FALSE otherwise
+ * or if the PTE is NULL
+ */
+BOOL is_transition_format(PTE* pte);
+
+
+/**
+ * Returns TRUE if the PTE is in the disc format, FALSE otherwise
+ * or if the PTE is NULL
+ */
+BOOL is_disc_format(PTE* pte);
+
+
+/**
+ * Returns TRUE if the PTE has ever been accessed, FALE otherwise
+ * or if the PTE is NULL
+ */
+BOOL is_used_pte(PTE* pte);
+
 
 /**
  * Returns the frame number of the lowest page in the pagetable that is valid, makes the PTE invalid 
