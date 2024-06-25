@@ -22,6 +22,8 @@ DB_LL_NODE* db_create_node(void* item) {
         fprintf(stderr, "Unable to allocate memory for new db node\n");
         return NULL;
     }
+
+    new_node->item = item;
     
     return new_node;
 }

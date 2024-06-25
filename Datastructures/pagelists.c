@@ -50,14 +50,16 @@ PULONG_PTR initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physi
     // This makes it so we can easily shift to find even the lowest physical frame
     page_storage_base -= lowest_pfn;
 
-
     // Now, we can actually commit memory for each page
     for (ULONG64 frame_idx = 0; frame_idx < num_physical_frames; frame_idx++) {
         ULONG64 curr_pfn = physical_frame_numbers[frame_idx];
         
-        PAGE* new_page = VirtualAlloc(page_storage_base + curr_pfn, 
+        void* page_region = VirtualAlloc(page_storage_base + curr_pfn, 
                                     sizeof(PAGE), MEM_COMMIT, PAGE_READWRITE);
         
+
+        PAGE* new_page = page_storage_base + curr_pfn;
+       
         if (new_page == NULL) {
             fprintf(stderr, "Unable to allocate memory for page in initialize_pages\n");
             return NULL;
@@ -68,7 +70,6 @@ PULONG_PTR initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physi
          * later on down the road. If we were unable to allocate memory to a node to add
          * it to a standby list, for example, then we would have serious issues.
          */
-        # if 0
         DB_LL_NODE* page_listnode = db_create_node(new_page);
 
         if (page_listnode == NULL) {
@@ -77,10 +78,7 @@ PULONG_PTR initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physi
         }
         
         new_page->free_page.frame_listnode = page_listnode;
-        #endif
         new_page->free_page.frame_number = curr_pfn;
-        new_page->free_page.status = INVALID;
-        new_page->free_page.zeroed_out = 1;
     }
 
 
@@ -101,8 +99,10 @@ PAGE* page_from_pfn(ULONG64 frame_number, PULONG_PTR page_storage_base) {
         fprintf(stderr, "Page storage base is NULL in page_from_pfn\n");
         return NULL;
     }
+    
+    PAGE* page_mod_addr = (PAGE*) page_storage_base;
 
-    return (PAGE*) (page_storage_base) + frame_number;
+    return page_mod_addr + frame_number;
 }
 
 
@@ -159,19 +159,14 @@ FREE_FRAMES_LISTS* initialize_free_frames(PULONG_PTR page_storage_base, ULONG64*
             return NULL;
         }
 
-        DB_LL_NODE* free_listnode = db_insert_at_head(relevant_listhead, free_frame);
-
-        #if 0
         // Add the already allocated frame listnode to the free list
         if (db_insert_node_at_head(relevant_listhead, free_frame->free_page.frame_listnode) == ERROR) {
             fprintf(stderr, "Failed to insert free frame in its list\n");
             return NULL;
         }
-        #endif
 
         free_frame->free_page.status = FREE_STATUS;
         free_frame->free_page.zeroed_out = 1;
-        free_frame->free_page.frame_number = frame_number;
 
         free_frames->list_lengths[listhead_idx] += 1;
     }
