@@ -28,6 +28,14 @@ DB_LL_NODE* db_create_list();
 
 
 /**
+ * Allocates memory for and initializes a db node with the given item
+ * 
+ * Returns a pointer to the node, or NULL upon error
+ */
+DB_LL_NODE* db_create_node(void* item);
+
+
+/**
  * Inserts the item at the head of the doubly linked list
  * 
  * Returns the new listnode that was inserted upon success, NULL otherwise
@@ -41,6 +49,24 @@ DB_LL_NODE* db_insert_at_head(DB_LL_NODE* listhead, void* item);
  * Returns the new listnode that was inserted upon success, NULL otherwise
  */
 DB_LL_NODE* db_insert_at_tail(DB_LL_NODE* listhead, void* item);
+
+
+/**
+ * Adds the given node at the head, allows for conservation of listnodes across lists
+ * 
+ * Returns SUCCESS if there are no issues, ERROR otherwise
+ * 
+ */
+int db_insert_node_at_head(DB_LL_NODE* listhead, DB_LL_NODE* node);
+
+
+/**
+ * Adds the given node at the tail, allows for conservation of listnodes across lists
+ * 
+ * Returns SUCCESS if there are no issues, ERROR otherwise
+ * 
+ */
+int db_insert_node_at_tail(DB_LL_NODE* listhead, DB_LL_NODE* node);
 
 
 /**

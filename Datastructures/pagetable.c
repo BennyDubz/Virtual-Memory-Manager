@@ -76,6 +76,7 @@ PTE* va_to_pte(PAGETABLE* pagetable, PULONG_PTR virtual_address) {
     return &pagetable->pte_list[pte_index];
 }
 
+
 /**
  * Returns the base virtual address associated with the given PTE, or NULL otherwise
  * 

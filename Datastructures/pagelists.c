@@ -62,7 +62,22 @@ PULONG_PTR initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physi
             fprintf(stderr, "Unable to allocate memory for page in initialize_pages\n");
             return NULL;
         }
+
+        /**
+         * By creating the listnodes here up front as well, we ensure we do not have to malloc them 
+         * later on down the road. If we were unable to allocate memory to a node to add
+         * it to a standby list, for example, then we would have serious issues.
+         */
+        # if 0
+        DB_LL_NODE* page_listnode = db_create_node(new_page);
+
+        if (page_listnode == NULL) {
+            fprintf(stderr, "Unable to allocate memory for frame listnode in initialize_pages\n");
+            return NULL;
+        }
         
+        new_page->free_page.frame_listnode = page_listnode;
+        #endif
         new_page->free_page.frame_number = curr_pfn;
         new_page->free_page.status = INVALID;
         new_page->free_page.zeroed_out = 1;
@@ -144,17 +159,19 @@ FREE_FRAMES_LISTS* initialize_free_frames(PULONG_PTR page_storage_base, ULONG64*
             return NULL;
         }
 
-        DB_LL_NODE* frame_node = db_insert_at_head(relevant_listhead, free_frame);
-        if (frame_node == NULL) {
+        DB_LL_NODE* free_listnode = db_insert_at_head(relevant_listhead, free_frame);
+
+        #if 0
+        // Add the already allocated frame listnode to the free list
+        if (db_insert_node_at_head(relevant_listhead, free_frame->free_page.frame_listnode) == ERROR) {
             fprintf(stderr, "Failed to insert free frame in its list\n");
-            //BW: Might want to free memory for everything we've allocated already
             return NULL;
         }
+        #endif
 
         free_frame->free_page.status = FREE_STATUS;
         free_frame->free_page.zeroed_out = 1;
         free_frame->free_page.frame_number = frame_number;
-        free_frame->free_page.frame_listnode = frame_node;
 
         free_frames->list_lengths[listhead_idx] += 1;
     }
@@ -185,7 +202,12 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
         page = (PAGE*) db_pop_from_head(frame_listhead);
         free_frames->list_lengths[free_frames->curr_list_idx] -= 1;
         free_frames->curr_list_idx = (free_frames->curr_list_idx + 1) % NUM_FRAME_LISTS;
-        page->free_page.frame_listnode = NULL;
+
+        //BW: The listnode should also be refreshed 
+        page->free_page.frame_listnode->blink = NULL;
+        page->free_page.frame_listnode->flink = NULL;
+
+
         break;
     }
 

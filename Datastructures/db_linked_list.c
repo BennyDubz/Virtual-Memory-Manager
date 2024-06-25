@@ -13,9 +13,9 @@
 /**
  * Allocates memory for and initializes a db node with the given item
  * 
- * Used for insertion into the list
+ * Returns a pointer to the node, or NULL upon error
  */
-static DB_LL_NODE* db_create_node() {
+DB_LL_NODE* db_create_node(void* item) {
     DB_LL_NODE* new_node = malloc(sizeof(DB_LL_NODE));
 
     if (new_node == NULL) {
@@ -34,7 +34,7 @@ static DB_LL_NODE* db_create_node() {
  */
 DB_LL_NODE* db_create_list() {
 
-    DB_LL_NODE* listhead = db_create_node();
+    DB_LL_NODE* listhead = db_create_node(NULL);
 
     if (listhead == NULL) return NULL;
 
@@ -56,7 +56,7 @@ DB_LL_NODE* db_insert_at_head(DB_LL_NODE* listhead, void* item) {
         return NULL;
     }
 
-    DB_LL_NODE* new_node = db_create_node();
+    DB_LL_NODE* new_node = db_create_node(item);
 
     if (new_node == NULL) return NULL;
 
@@ -67,7 +67,6 @@ DB_LL_NODE* db_insert_at_head(DB_LL_NODE* listhead, void* item) {
 
     new_node->blink = listhead;
     new_node->flink = front_node;
-    new_node->item = item;
 
     return new_node;
 }
@@ -84,7 +83,7 @@ DB_LL_NODE* db_insert_at_tail(DB_LL_NODE* listhead, void* item) {
         return NULL;
     } 
 
-    DB_LL_NODE* new_node = db_create_node();
+    DB_LL_NODE* new_node = db_create_node(item);
 
     if (new_node == NULL) return NULL;
 
@@ -95,9 +94,56 @@ DB_LL_NODE* db_insert_at_tail(DB_LL_NODE* listhead, void* item) {
 
     new_node->blink = backnode;
     new_node->flink = listhead;
-    new_node->item = item;
 
     return new_node;
+}
+
+
+/**
+ * Adds the given node at the head, allows for conservation of listnodes across lists
+ * 
+ * Returns SUCCESS if there are no issues, ERROR otherwise
+ * 
+ */
+int db_insert_node_at_head(DB_LL_NODE* listhead, DB_LL_NODE* node) {
+    if (listhead == NULL || node == NULL) {
+        fprintf(stderr, "NULL listhead or node given to db_insert_at_head\n");
+        return ERROR;
+    }
+
+    DB_LL_NODE* old_head = listhead->flink;
+
+    node->flink = old_head;
+    node->blink = listhead;
+    
+    listhead->flink = node;
+    old_head->blink = node;
+
+    return SUCCESS;
+}
+
+
+/**
+ * Adds the given node at the tail, allows for conservation of listnodes across lists
+ * 
+ * Returns SUCCESS if there are no issues, ERROR otherwise
+ * 
+ */
+int db_insert_node_at_tail(DB_LL_NODE* listhead, DB_LL_NODE* node) {
+    if (listhead == NULL || node == NULL) {
+        fprintf(stderr, "NULL listhead or node given to db_insert_at_tail\n");
+        return ERROR;
+    }
+
+    DB_LL_NODE* old_tail = listhead->blink;
+
+    node->flink = listhead;
+    node->blink = old_tail;
+    
+    listhead->blink = node;
+    old_tail->flink = node;
+
+    return SUCCESS;
 }
 
 
