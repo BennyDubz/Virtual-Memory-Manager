@@ -25,7 +25,7 @@
  * 
  * Returns NULL given any error
  */
-PULONG_PTR initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_frames) {
+PAGE* initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_frames) {
 
     ULONG64 lowest_pfn = 0xFFFFFFFFFFFFFFFF;
     ULONG64 highest_pfn = 0x0;
@@ -82,7 +82,7 @@ PULONG_PTR initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physi
     }
 
 
-    return (PULONG_PTR) page_storage_base;
+    return page_storage_base;
 }
 
 
@@ -94,15 +94,13 @@ PULONG_PTR initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physi
  * 
  * Returns NULL given any error
  */
-PAGE* page_from_pfn(ULONG64 frame_number, PULONG_PTR page_storage_base) {
+PAGE* page_from_pfn(ULONG64 frame_number, PAGE* page_storage_base) {
     if (page_storage_base == NULL) {
         fprintf(stderr, "Page storage base is NULL in page_from_pfn\n");
         return NULL;
     }
     
-    PAGE* page_mod_addr = (PAGE*) page_storage_base;
-
-    return page_mod_addr + frame_number;
+    return page_storage_base + frame_number;
 }
 
 
@@ -127,7 +125,7 @@ PAGE* page_from_pfn(ULONG64 frame_number, PULONG_PTR page_storage_base) {
  * 
  * Returns a memory allocated pointer to a FREE_FRAMES_LISTS struct, or NULL if an error occurs
  */
-FREE_FRAMES_LISTS* initialize_free_frames(PULONG_PTR page_storage_base, ULONG64* physical_frame_numbers, ULONG64 num_physical_frames) {
+FREE_FRAMES_LISTS* initialize_free_frames(PAGE* page_storage_base, ULONG64* physical_frame_numbers, ULONG64 num_physical_frames) {
     FREE_FRAMES_LISTS* free_frames = (FREE_FRAMES_LISTS*) malloc(sizeof(FREE_FRAMES_LISTS));
 
     if (free_frames == NULL) {

@@ -92,48 +92,39 @@ PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base)
  * 
  * Returns NULL upon error
  */
-PTE* va_to_pte(PAGETABLE* pagetable, PULONG64 virtual_address);
+PTE* va_to_pte(PAGETABLE pagetable, PULONG64 virtual_address);
 
 
 /**
  * Returns the base virtual address associated with the given PTE, or NULL otherwise
  * 
  */
-PULONG_PTR pte_to_va(PAGETABLE* pagetable, PTE* pte);
+PULONG_PTR pte_to_va(PAGETABLE pagetable, PTE* pte);
 
 
 /**
  * Returns TRUE if the PTE is in the memory format, FALSE otherwise
  * or if the PTE is NULL
  */
-BOOL is_memory_format(PTE* pte);
+BOOL is_memory_format(PTE pte);
 
 
 /**
  * Returns TRUE if the PTE is in the transition format, FALSE otherwise
  * or if the PTE is NULL
  */
-BOOL is_disk_format(PTE* pte);
+BOOL is_disk_format(PTE pte);
 
 
 /**
  * Returns TRUE if the PTE is in the disc format, FALSE otherwise
  * or if the PTE is NULL
  */
-BOOL is_transition_format(PTE* pte);
+BOOL is_transition_format(PTE pte);
 
 
 /**
  * Returns TRUE if the PTE has ever been accessed, FALSE otherwise
  * or if the PTE is NULL
  */
-BOOL is_used_pte(PTE* pte);
-
-
-/**
- * Returns the frame number of the lowest page in the pagetable that is valid, makes the PTE invalid 
- * and communicates with the CPU
- * 
- * Returns either the frame number or ERROR otherwise
- */
-ULONG64 steal_lowest_frame(PAGETABLE* pagetable);
+BOOL is_used_pte(PTE pte);

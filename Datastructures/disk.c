@@ -41,8 +41,6 @@ DISK* initialize_disk() {
         return NULL;
     }
     
-    int i = 0;
-
     PULONG_PTR disk_end = disk_base + (DISK_SIZE / sizeof(PULONG_PTR));
     
     // Add each slot of the disk to the disk listhead, so that each can be popped and treated as a page of storage
@@ -50,19 +48,11 @@ DISK* initialize_disk() {
 
         PULONG_PTR slot = VirtualAlloc(disk_slot, PAGE_SIZE, MEM_COMMIT, PAGE_READWRITE);
 
-        // printf("diff is %llX, pagesize is %X\n", disk_slot - prev, PAGE_SIZE);
-        // printf("curr slot: %X, prev %X\n", disk_slot, prev);
-        
-        *disk_slot = 0x12345678;
-
         if (db_insert_at_head(disk_listhead, slot) == NULL) {
             fprintf(stderr, "Unable to create listnode for disk slot address\n");
             return NULL;
         }
-        // prev = disk_slot;
-        i++; 
     }
-
 
     disk->base_address = disk_base;
     disk->disk_slot_listhead = disk_listhead;
@@ -106,7 +96,7 @@ int write_to_disk(PAGETABLE* pagetable, PTE* pte, DISK* disk) {
 
     //BW: We could also have a race condition where two threads are writing to the disk at the same time,
     // that scenario may change this line to checking if the PTE is also already in disk format
-    if (is_memory_format(pte) == FALSE) {
+    if (is_memory_format(*pte) == FALSE) {
         fprintf(stderr, "Incorrect memory format of PTE given in write_to_disk\n");
         return ERROR;
     }
@@ -125,7 +115,7 @@ int write_to_disk(PAGETABLE* pagetable, PTE* pte, DISK* disk) {
 
     // *disk_slot = 0x87654321;
 
-    PULONG_PTR pte_va = pte_to_va(pagetable, pte);
+    PULONG_PTR pte_va = pte_to_va(*pagetable, pte);
 
     if (pte_va == NULL) {
         fprintf(stderr, "Error getting pte VA in write_to_disk\n");
@@ -161,14 +151,14 @@ int get_from_disk(PAGETABLE* pagetable, PTE* pte, ULONG64 pfn, DISK* disk) {
         return ERROR;
     }
 
-    if (is_transition_format(pte) == FALSE) {
+    if (is_transition_format(*pte) == FALSE) {
         fprintf(stderr, "PTE is not in disk format in get_from_disk\n");
         return ERROR;
     }
 
     PULONG_PTR disk_slot = (PULONG_PTR) pte->disk_format.pagefile_address;
 
-    PULONG_PTR pte_va = pte_to_va(pagetable, pte);
+    PULONG_PTR pte_va = pte_to_va(*pagetable, pte);
 
     if (pte_va == NULL) {
         fprintf(stderr, "NULL destination virtual address in get_from_disk\n");

@@ -4,16 +4,34 @@
 #include <excpt.h>
 #include <stdbool.h>
 #include <assert.h>
-#include "./Datastructures/db_linked_list.h"
-#include "./Datastructures/pagetable.h"
-#include "./Datastructures/pagelists.h"
-#include "./Datastructures/disk.h"
+
+#include "./Datastructures/datastructures.h"
+#include "./Machinery/pagefault.h"
 
 #include "./hardware.h"
 
 // Allows us to access the windows permission libraries so that we can actually get physical frames
 #pragma comment(lib, "advapi32.lib")
 
+// ########## DEFINED GLOBALS ##########
+
+/**
+ * GLOBAL VALUES OR POINTERS
+ */
+
+PAGE* page_storage_base;
+
+/**
+ * GLOBAL DATASTRUCTURES
+ */
+PAGETABLE* pagetable;
+
+DISK* disk;
+
+FREE_FRAMES_LISTS* free_frames;
+
+
+// #####################################
 
 
 BOOL
@@ -199,7 +217,7 @@ full_virtual_memory_test (
      * Initialize pages, pagetable, and free frames
      */
 
-    PULONG_PTR page_storage_base = initialize_pages(physical_page_numbers, physical_page_count);
+    page_storage_base = initialize_pages(physical_page_numbers, physical_page_count);
 
     if (page_storage_base == NULL) {
         fprintf(stderr, "Unable to allocate memory for the pages\n");
@@ -208,19 +226,19 @@ full_virtual_memory_test (
 
     ULONG64 number_of_virtual_pages = virtual_address_size / PAGE_SIZE;
 
-    PAGETABLE* pagetable = initialize_pagetable(number_of_virtual_pages, vmem_base);
+    pagetable = initialize_pagetable(number_of_virtual_pages, vmem_base);
     if (pagetable == NULL) {
         fprintf(stderr, "Unable to allocate memory for pagetable\n");
         return;
     }
 
-    FREE_FRAMES_LISTS* free_frames = initialize_free_frames(page_storage_base, physical_page_numbers, physical_page_count);
+    free_frames = initialize_free_frames(page_storage_base, physical_page_numbers, physical_page_count);
     if (free_frames == NULL) {
         fprintf(stderr, "Unable to allocate memory for free frames\n");
         return;
     }
 
-    DISK* disk = initialize_disk();
+    disk = initialize_disk();
     if (disk == NULL) {
         fprintf(stderr, "Unable to allocate memory for disk\n");
         return;
@@ -231,7 +249,9 @@ full_virtual_memory_test (
     // Now perform random accesses.
     //
 
+    BOOL new_addr = TRUE;
     srand (time (NULL));
+    int fault_result;
     // srand(1);
 
     for (i = 0; i < MB (1); i += 1) {
@@ -249,11 +269,18 @@ full_virtual_memory_test (
         // the virtual address and this time, the CPU will see the
         // valid PTE and proceed to obtain the physical contents
         // (without faulting to the operating system again).
-        //
-        random_number = rand () * rand() * rand();
+        // 
 
-        random_number %= virtual_address_size_in_unsigned_chunks;
-        // random_number %= virtual_address_size - sizeof(ULONG_PTR);
+        // If we fail a page fault, we will want to try the address again and not change it
+        if (new_addr) {
+            random_number = rand () * rand() * rand();
+
+            random_number %= virtual_address_size_in_unsigned_chunks;
+
+            arbitrary_va = vmem_base + random_number;
+        } else {
+            new_addr = TRUE;
+        }
 
         //
         // Write the virtual address into each page.  If we need to
@@ -261,10 +288,6 @@ full_virtual_memory_test (
         //
 
         page_faulted = FALSE;
-
-        //BW: Have a local variable to see if we want to re-use the old arb-va
-        // or if we want to create a new random address
-        arbitrary_va = vmem_base + random_number;
 
         __try {
 
@@ -276,144 +299,12 @@ full_virtual_memory_test (
 
         }
 
-
         if (page_faulted) {
-            //
-            // Connect the virtual address now - if that succeeds then
-            // we'll be able to access it from now on.
-            //
-            // THIS IS JUST REUSING THE SAME PHYSICAL PAGE OVER AND OVER !
-            //
-            // IT NEEDS TO BE REPLACED WITH A TRUE MEMORY MANAGEMENT
-            // STATE MACHINE !
-            //
+            fault_result = pagefault(arbitrary_va);
 
-            // TODO: Look at the PTE for this va to make sure we are doing the right thing
-            // Might be trimmed, might be first access, etc...
-
-
-            // Adjust PTE to reflect its allocated page
-            PTE* accessed_pte = va_to_pte(pagetable, arbitrary_va);
-
-            if (accessed_pte == NULL) {
-                fprintf(stderr, "Unable to find the accessed PTE\n");
-                return;
-            }
-
-            // Much shorter lock hold than using the accessed PTE for all of the other if statements
-            EnterCriticalSection(&pagetable->pte_lock);
-            PTE local_pte = *accessed_pte;
-
-            if (is_used_pte(&local_pte)) {
-                // Check the PTE to decide what our course of action is
-                if (is_memory_format(&local_pte)) {
-                    LeaveCriticalSection(&pagetable->pte_lock);
-                    // Skip to the next random access, another thread has already validated this address
-                    continue;
-                } else if (is_disk_format(&local_pte)) {
-                    printf("Seeing disk format pte\n");
-                    // Get the frame
-                    // Bring back the page from the pagefile using the PTE
-                    // printf("Fetch from disk\n");
-                } else if (is_transition_format(&local_pte)) {
-                    printf("Seeing transition format pte\n");
-                    // Rescue the frame from the modified or standby list
-                    
-                }
-            }
-
-            /**
-             * By the time we get here, the PTE has never been accessed before,
-             * so we just need to find a frame to allocate to it
-             */            
-            
-            //BW: Might have deadlock if we have a lock for free frames list
-            PAGE* new_page = allocate_free_frame(free_frames);
-
-            // Then, check standby
-            ULONG64 pfn;
-            if (new_page == NULL) {
-                
-                //BW: Will be replaced by taking from the standby
-                // if the standby fails, then we need to release our lock and wait to be signalled by the standby
-                // thread to try this page fault again
-                pfn = steal_lowest_frame(pagetable);
-
-                if (pfn == ERROR) {
-                    fprintf(stderr, "Unable to find valid frame to steal\n");
-                }
-
-                // printf("Stolen pfn: %llX\n", pfn);
-            } else {
-                pfn = new_page->free_page.frame_number;
-                if (pfn == 0) {
-                    fprintf(stderr, "Invalid pfn from free page\n");
-                    LeaveCriticalSection(&pagetable->pte_lock);
-                    return;
-                }
-            }
-
-            local_pte.memory_format.age = 0;
-            local_pte.memory_format.frame_number = pfn;
-            local_pte.memory_format.valid = VALID;
-
-            *accessed_pte = local_pte;
-
-            // Allocate the physical frame to the virtual address
-            if (MapUserPhysicalPages (arbitrary_va, 1, &pfn) == FALSE) {
-
-                printf ("full_virtual_memory_test : could not map VA %p to page %llX\n", arbitrary_va, pfn);
-                LeaveCriticalSection(&pagetable->pte_lock);
-                return;
-            }
-
-            LeaveCriticalSection(&pagetable->pte_lock);
-            //
-            // No exception handler needed now since we have connected
-            // the virtual address above to one of our physical pages
-            // so no subsequent fault can occur.
-            //
-
-            // BW: Will remove this so that the only try/except is at 271,
-            // and that that block can be considered user code.
-            __try {
-
-                *arbitrary_va = (ULONG_PTR) arbitrary_va;
-
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-
-                page_faulted = TRUE;
-
-            }
-
-
-            #if 0
-            //
-            // Unmap the virtual address translation we installed above
-            // now that we're done writing our value into it.
-            //
-
-            // 
-            if (MapUserPhysicalPages (arbitrary_va, 1, NULL) == FALSE) {
-
-                printf ("full_virtual_memory_test : could not unmap VA %p\n", arbitrary_va);
-
-                return;
-            }
-            #endif
-
-        } else {
-            // printf("Trying to write to disk with arb va %p\n", arbitrary_va);
-            PTE* accessed_pte = va_to_pte(pagetable, arbitrary_va);
-
-            if (accessed_pte == NULL) {
-                fprintf(stderr, "Unable to find relevant PTE\n");
-                return;
-            }
-
-            if (write_to_disk(pagetable, accessed_pte, disk) == ERROR) {
-                fprintf(stderr, "Unable to write to disk\n");
-                return;
+            //BW: This is likely a temporary solution, we will want to further separate the usermode code
+            if (fault_result == ERROR) {
+                new_addr = FALSE;
             }
         }
     }

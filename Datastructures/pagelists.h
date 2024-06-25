@@ -74,7 +74,7 @@ typedef struct {
  * 
  * Returns NULL given any error
  */
-PULONG_PTR initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_frames);
+PAGE* initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_frames);
 
 
 /**
@@ -85,7 +85,7 @@ PULONG_PTR initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physi
  * 
  * Returns NULL given any error
  */
-PAGE* page_from_pfn(ULONG64 frame_number, PULONG_PTR page_storage_base);
+PAGE* page_from_pfn(ULONG64 frame_number, PAGE* page_storage_base);
 
     
 // /**
@@ -136,7 +136,7 @@ typedef struct {
  * 
  * Returns a memory allocated pointer to a FREE_FRAMES_LISTS struct, or NULL if an error occurs
  */
-FREE_FRAMES_LISTS* initialize_free_frames(PULONG_PTR page_storage_base, PULONG_PTR physical_frame_numbers, ULONG64 num_physical_frames);
+FREE_FRAMES_LISTS* initialize_free_frames(PAGE* page_storage_base, PULONG_PTR physical_frame_numbers, ULONG64 num_physical_frames);
 
 
 /**
