@@ -34,7 +34,7 @@ typedef struct {
     ULONG64 always_zero:1;
     ULONG64 pagefile_address:40;
     // Will always be one for this structure
-    ULONG64 on_disc:1;
+    ULONG64 on_disk:1;
 } DISK_PTE;
 
 
@@ -69,6 +69,7 @@ typedef struct {
     ULONG64 num_virtual_pages;
     // To allow calculations from PTEs to virtual addresses and vice verca
     ULONG64 vmem_base;
+    CRITICAL_SECTION pte_lock;
     // LOCK
 } PAGETABLE;
 
@@ -112,18 +113,18 @@ BOOL is_memory_format(PTE* pte);
  * Returns TRUE if the PTE is in the transition format, FALSE otherwise
  * or if the PTE is NULL
  */
-BOOL is_transition_format(PTE* pte);
+BOOL is_disk_format(PTE* pte);
 
 
 /**
  * Returns TRUE if the PTE is in the disc format, FALSE otherwise
  * or if the PTE is NULL
  */
-BOOL is_disk_format(PTE* pte);
+BOOL is_transition_format(PTE* pte);
 
 
 /**
- * Returns TRUE if the PTE has ever been accessed, FALE otherwise
+ * Returns TRUE if the PTE has ever been accessed, FALSE otherwise
  * or if the PTE is NULL
  */
 BOOL is_used_pte(PTE* pte);

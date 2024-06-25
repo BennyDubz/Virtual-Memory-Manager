@@ -3,9 +3,11 @@
 #include <windows.h>
 #include <excpt.h>
 #include <stdbool.h>
+#include <assert.h>
 #include "./Datastructures/db_linked_list.h"
 #include "./Datastructures/pagetable.h"
 #include "./Datastructures/pagelists.h"
+#include "./Datastructures/disk.h"
 
 #include "./hardware.h"
 
@@ -218,7 +220,11 @@ full_virtual_memory_test (
         return;
     }
 
-    printf("VAS is %llX, PS is %X, num phys %llX, multiplied %llX\n", virtual_address_size, PAGE_SIZE, physical_page_count, PAGE_SIZE * physical_page_count);
+    DISK* disk = initialize_disk();
+    if (disk == NULL) {
+        fprintf(stderr, "Unable to allocate memory for disk\n");
+        return;
+    }
 
 
     //
@@ -226,6 +232,7 @@ full_virtual_memory_test (
     //
 
     srand (time (NULL));
+    // srand(1);
 
     for (i = 0; i < MB (1); i += 1) {
 
@@ -255,6 +262,8 @@ full_virtual_memory_test (
 
         page_faulted = FALSE;
 
+        //BW: Have a local variable to see if we want to re-use the old arb-va
+        // or if we want to create a new random address
         arbitrary_va = vmem_base + random_number;
 
         __try {
@@ -264,7 +273,9 @@ full_virtual_memory_test (
         } __except (EXCEPTION_EXECUTE_HANDLER) {
 
             page_faulted = TRUE;
+
         }
+
 
         if (page_faulted) {
             //
@@ -289,17 +300,23 @@ full_virtual_memory_test (
                 return;
             }
 
-            //BW: What to do if the PTE has never been accessed before?
-            if (is_used_pte(accessed_pte)) {
+            // Much shorter lock hold than using the accessed PTE for all of the other if statements
+            EnterCriticalSection(&pagetable->pte_lock);
+            PTE local_pte = *accessed_pte;
+
+            if (is_used_pte(&local_pte)) {
                 // Check the PTE to decide what our course of action is
-                if (is_memory_format(accessed_pte)) {
+                if (is_memory_format(&local_pte)) {
+                    LeaveCriticalSection(&pagetable->pte_lock);
                     // Skip to the next random access, another thread has already validated this address
                     continue;
-                } else if (is_disk_format(accessed_pte)) {
+                } else if (is_disk_format(&local_pte)) {
+                    printf("Seeing disk format pte\n");
                     // Get the frame
                     // Bring back the page from the pagefile using the PTE
                     // printf("Fetch from disk\n");
-                } else if (is_transition_format(accessed_pte)) {
+                } else if (is_transition_format(&local_pte)) {
+                    printf("Seeing transition format pte\n");
                     // Rescue the frame from the modified or standby list
                     
                 }
@@ -309,13 +326,17 @@ full_virtual_memory_test (
              * By the time we get here, the PTE has never been accessed before,
              * so we just need to find a frame to allocate to it
              */            
-
+            
+            //BW: Might have deadlock if we have a lock for free frames list
             PAGE* new_page = allocate_free_frame(free_frames);
 
             // Then, check standby
             ULONG64 pfn;
             if (new_page == NULL) {
-                // printf("Stealing frame...\n");
+                
+                //BW: Will be replaced by taking from the standby
+                // if the standby fails, then we need to release our lock and wait to be signalled by the standby
+                // thread to try this page fault again
                 pfn = steal_lowest_frame(pagetable);
 
                 if (pfn == ERROR) {
@@ -325,29 +346,46 @@ full_virtual_memory_test (
                 // printf("Stolen pfn: %llX\n", pfn);
             } else {
                 pfn = new_page->free_page.frame_number;
-                //BW: Make the page list
+                if (pfn == 0) {
+                    fprintf(stderr, "Invalid pfn from free page\n");
+                    LeaveCriticalSection(&pagetable->pte_lock);
+                    return;
+                }
             }
 
-            accessed_pte->memory_format.age = 0;
-            accessed_pte->memory_format.frame_number = pfn;
-            accessed_pte->memory_format.valid = VALID;
+            local_pte.memory_format.age = 0;
+            local_pte.memory_format.frame_number = pfn;
+            local_pte.memory_format.valid = VALID;
 
+            *accessed_pte = local_pte;
 
             // Allocate the physical frame to the virtual address
             if (MapUserPhysicalPages (arbitrary_va, 1, &pfn) == FALSE) {
 
                 printf ("full_virtual_memory_test : could not map VA %p to page %llX\n", arbitrary_va, pfn);
-
+                LeaveCriticalSection(&pagetable->pte_lock);
                 return;
             }
 
+            LeaveCriticalSection(&pagetable->pte_lock);
             //
             // No exception handler needed now since we have connected
             // the virtual address above to one of our physical pages
             // so no subsequent fault can occur.
             //
 
-            *arbitrary_va = (ULONG_PTR) arbitrary_va;
+            // BW: Will remove this so that the only try/except is at 271,
+            // and that that block can be considered user code.
+            __try {
+
+                *arbitrary_va = (ULONG_PTR) arbitrary_va;
+
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+
+                page_faulted = TRUE;
+
+            }
+
 
             #if 0
             //
@@ -364,6 +402,19 @@ full_virtual_memory_test (
             }
             #endif
 
+        } else {
+            // printf("Trying to write to disk with arb va %p\n", arbitrary_va);
+            PTE* accessed_pte = va_to_pte(pagetable, arbitrary_va);
+
+            if (accessed_pte == NULL) {
+                fprintf(stderr, "Unable to find relevant PTE\n");
+                return;
+            }
+
+            if (write_to_disk(pagetable, accessed_pte, disk) == ERROR) {
+                fprintf(stderr, "Unable to write to disk\n");
+                return;
+            }
         }
     }
 

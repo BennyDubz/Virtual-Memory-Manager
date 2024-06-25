@@ -39,7 +39,7 @@ PULONG_PTR initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physi
     }
 
     // Now we can reserve the minimum amount of memory required for this scheme
-    PULONG_PTR page_storage_base = VirtualAlloc(NULL, (highest_pfn - lowest_pfn) * sizeof(PAGE), 
+    PAGE* page_storage_base = VirtualAlloc(NULL, (highest_pfn - lowest_pfn) * sizeof(PAGE), 
                                                 MEM_RESERVE, PAGE_READWRITE);
     
     if (page_storage_base == NULL) {
@@ -55,10 +55,8 @@ PULONG_PTR initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physi
     for (ULONG64 frame_idx = 0; frame_idx < num_physical_frames; frame_idx++) {
         ULONG64 curr_pfn = physical_frame_numbers[frame_idx];
         
-        // PULONG_PTR storage_address = page_storage_base + curr_pfn;
-
-        PAGE* new_page = VirtualAlloc(page_storage_base + curr_pfn, sizeof(PAGE), 
-                                    MEM_COMMIT, PAGE_READWRITE);
+        PAGE* new_page = VirtualAlloc(page_storage_base + curr_pfn, 
+                                    sizeof(PAGE), MEM_COMMIT, PAGE_READWRITE);
         
         if (new_page == NULL) {
             fprintf(stderr, "Unable to allocate memory for page in initialize_pages\n");
@@ -71,7 +69,7 @@ PULONG_PTR initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physi
     }
 
 
-    return page_storage_base;
+    return (PULONG_PTR) page_storage_base;
 }
 
 
@@ -89,7 +87,7 @@ PAGE* page_from_pfn(ULONG64 frame_number, PULONG_PTR page_storage_base) {
         return NULL;
     }
 
-    return (PAGE*) (page_storage_base + frame_number);
+    return (PAGE*) (page_storage_base) + frame_number;
 }
 
 
@@ -170,13 +168,8 @@ FREE_FRAMES_LISTS* initialize_free_frames(PULONG_PTR page_storage_base, ULONG64*
  */
 PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
     int curr_attempts = 0;
-
-    // printf("iterating through list lengths AFF:\n");
-    // for(int i = 0; i < NUM_FRAME_LISTS; i++) {
-    //     printf("\tBucket %d has length %llX\n", i, free_frames->list_lengths[i]);
-    // }
     
-    // SYNC - incrementing curr_list_idx
+    //BW: SYNC - incrementing curr_list_idx
     PAGE* page = NULL;
     while (curr_attempts < NUM_FRAME_LISTS) {
         // Check for empty list

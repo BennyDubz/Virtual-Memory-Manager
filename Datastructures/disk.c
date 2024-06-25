@@ -15,7 +15,7 @@
  * 
  * Returns NULL upon any error
  */
-DISK* inititalize_disk() {
+DISK* initialize_disk() {
     DISK* disk = (DISK*) malloc(sizeof(DISK));
 
     if (disk == NULL) {
@@ -23,7 +23,10 @@ DISK* inititalize_disk() {
         return NULL;
     }
 
-    PULONG_PTR disk_base = VirtualAlloc(NULL, (size_t) DISK_SIZE, MEM_COMMIT, PAGE_READWRITE);
+    PULONG_PTR disk_base = VirtualAlloc(NULL, DISK_SIZE, MEM_RESERVE, PAGE_READWRITE);
+    // PULONG_PTR disk_base = (PULONG_PTR) malloc(DISK_SIZE);
+
+    // printf("Size is %llX\n, num slots %llX", DISK_SIZE, DISK_SLOTS);
 
     if (disk_base == NULL) {
         fprintf(stderr, "Unable to virtual alloc memory for the disk base in initialize_disk\n");
@@ -37,15 +40,29 @@ DISK* inititalize_disk() {
         fprintf(stderr, "Unable to initialize disk listhead\n");
         return NULL;
     }
+    
+    int i = 0;
 
-    for (ULONG64 disk_slot = 0; disk_slot < DISK_SLOTS; disk_slot++) {
-        PULONG_PTR slot_addr = (PULONG_PTR) disk_base + (disk_slot * PAGE_SIZE);
+    PULONG_PTR disk_end = disk_base + (DISK_SIZE / sizeof(PULONG_PTR));
+    
+    // Add each slot of the disk to the disk listhead, so that each can be popped and treated as a page of storage
+    for (PULONG_PTR disk_slot = disk_base; disk_slot < disk_end; disk_slot += (PAGE_SIZE / sizeof(ULONG_PTR))) {
 
-        if (db_insert_at_head(disk_listhead, slot_addr) == NULL) {
+        PULONG_PTR slot = VirtualAlloc(disk_slot, PAGE_SIZE, MEM_COMMIT, PAGE_READWRITE);
+
+        // printf("diff is %llX, pagesize is %X\n", disk_slot - prev, PAGE_SIZE);
+        // printf("curr slot: %X, prev %X\n", disk_slot, prev);
+        
+        *disk_slot = 0x12345678;
+
+        if (db_insert_at_head(disk_listhead, slot) == NULL) {
             fprintf(stderr, "Unable to create listnode for disk slot address\n");
             return NULL;
         }
+        // prev = disk_slot;
+        i++; 
     }
+
 
     disk->base_address = disk_base;
     disk->disk_slot_listhead = disk_listhead;
@@ -106,16 +123,27 @@ int write_to_disk(PAGETABLE* pagetable, PTE* pte, DISK* disk) {
         return ERROR;
     }
 
+    // *disk_slot = 0x87654321;
+
+    PULONG_PTR pte_va = pte_to_va(pagetable, pte);
+
+    if (pte_va == NULL) {
+        fprintf(stderr, "Error getting pte VA in write_to_disk\n");
+        return ERROR;
+    }
+
+    // *pte_va = 0x111111111;
+
     // Copy the memory over to the slot
-    memcpy(disk_slot, pte_to_va(pagetable, pte), PAGE_SIZE);
+    memcpy(disk_slot, pte_va, PAGE_SIZE);
 
     // Simulate the fact that disk writes take a while
     // Sleep(10);
 
     // Modify the PTE to reflect that it is now on the disk
     pte->disk_format.always_zero = 0;
-    pte->disk_format.pagefile_address = disk_slot;
-    pte->disk_format.on_disc = 1;
+    pte->disk_format.pagefile_address = (ULONG64) disk_slot;
+    pte->disk_format.on_disk = 1;
 
     return SUCCESS;
 }
@@ -133,7 +161,7 @@ int get_from_disk(PAGETABLE* pagetable, PTE* pte, ULONG64 pfn, DISK* disk) {
         return ERROR;
     }
 
-    if (is_disk_format(pte) == FALSE) {
+    if (is_transition_format(pte) == FALSE) {
         fprintf(stderr, "PTE is not in disk format in get_from_disk\n");
         return ERROR;
     }
@@ -152,10 +180,13 @@ int get_from_disk(PAGETABLE* pagetable, PTE* pte, ULONG64 pfn, DISK* disk) {
 
         printf ("full_virtual_memory_test : could not map VA %p to page %llX\n", pte_va, pfn);
 
-        return;
+        return ERROR;
     }
 
-    memcpy(pte_va, disk_slot, (size_t) PAGE_SIZE);
+    if (memcpy(pte_va, disk_slot, (size_t) PAGE_SIZE) == NULL) {
+        fprintf(stderr, "Unable to copy memory from pte to disk\n");
+        return ERROR;
+    }
 
     // Now that the data is copied, we can update the actual PTE
     pte->memory_format.age = 0;

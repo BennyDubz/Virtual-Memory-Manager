@@ -4,7 +4,7 @@
 
 CC=cl
 CFLAGS=/Zi /c /EHsc
-OBJS = db_linked_list.obj pagetable.obj pagelists.obj
+OBJS = db_linked_list.obj pagetable.obj pagelists.obj disk.obj
 LIB = vm_datastructures.lib
 
 # Rule to create the library
@@ -20,6 +20,9 @@ pagetable.obj : pagetable.c pagetable.h
 
 pagelists.obj : pagelists.c pagelists.h
 	$(CC) $(CFLAGS) /Fo$@ pagelists.c
+
+disk.obj : disk.c disk.h
+	$(CC) $(CFLAGS) /Fo$@ disk.c
 
 .PHONY: clean
 

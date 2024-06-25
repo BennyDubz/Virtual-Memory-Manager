@@ -35,7 +35,7 @@ typedef struct {
  * 
  * Returns NULL upon any error
  */
-DISK* inititalize_disk();
+DISK* initialize_disk();
 
 
 /**
@@ -51,7 +51,7 @@ PULONG_PTR get_free_disk_slot(DISK* disk);
  * 
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
-int write_to_disk(PTE* pte, DISK* disk);
+int write_to_disk(PAGETABLE* pagetable, PTE* pte, DISK* disk);
 
 
 /**
@@ -60,4 +60,4 @@ int write_to_disk(PTE* pte, DISK* disk);
  * 
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
-int get_from_disk(PTE* pte, PAGE* open_page, DISK* disk);
+int get_from_disk(PAGETABLE* pagetable, PTE* pte, ULONG64 pfn, DISK* disk);
