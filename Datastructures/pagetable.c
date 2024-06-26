@@ -56,50 +56,6 @@ PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base)
 
 
 /**
- * Given a virtual address, return the relevant PTE from the pagetable
- * 
- * Returns NULL upon error
- */
-PTE* va_to_pte(PAGETABLE pagetable, PULONG_PTR virtual_address) {
-    if (virtual_address == NULL) {
-        fprintf(stderr, "NULL pagetable or virtual address given to va_to_pta");
-        return NULL;
-    }
-
-    ULONG64 pte_index = DOWN_TO_PAGE_NUM((ULONG64) virtual_address - pagetable.vmem_base);
-
-    if (pte_index > pagetable.num_virtual_pages) {
-        fprintf(stderr, "Illegal virtual address given to va_to_pte %llX\n", (ULONG64) virtual_address);
-        return NULL;
-    }
-
-    return &pagetable.pte_list[pte_index];
-}
-
-
-/**
- * Returns the base virtual address associated with the given PTE, or NULL otherwise
- * 
- */
-PULONG_PTR pte_to_va(PAGETABLE pagetable, PTE* pte) {
-    if (pte == NULL) {
-        fprintf(stderr, "NULL PTE given to pte_to_va");
-        return NULL;
-    }
-
-    //BW: Implement additional safety checks
-    ULONG64 base_address_pte_list = (ULONG64) pagetable.pte_list;
-    ULONG64 pte_address = (ULONG64) pte;
-
-    ULONG64 pte_index = (pte_address - base_address_pte_list) / sizeof(PTE);
-
-    PULONG_PTR virtual_address = (PULONG_PTR) (pagetable.vmem_base + (pte_index * PAGE_SIZE));
-
-    return virtual_address;
-}
-
-
-/**
  * Returns TRUE if the PTE is in the memory format, FALSE otherwise
  */
 BOOL is_memory_format(PTE pte) {

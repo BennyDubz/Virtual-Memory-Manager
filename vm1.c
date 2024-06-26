@@ -30,6 +30,10 @@ DISK* disk;
 
 FREE_FRAMES_LISTS* free_frames;
 
+STANDBY_LIST* standby_list;
+
+MODIFIED_LIST* modified_list;
+
 
 // #####################################
 
@@ -244,6 +248,17 @@ full_virtual_memory_test (
         return;
     }
 
+    standby_list = initialize_standby_list();
+    if (standby_list == NULL) {
+        fprintf(stderr, "Unable to initialize standby list\n");
+        return;
+    }
+
+    modified_list = initialize_modified_list();
+    if (modified_list == NULL) {
+        fprintf(stderr, "Unable to initialize modified list\n");
+        return;
+    }
 
     //
     // Now perform random accesses.
@@ -304,7 +319,9 @@ full_virtual_memory_test (
 
             //BW: This is likely a temporary solution, we will want to further separate the usermode code
             if (fault_result == ERROR) {
+                printf("Fault failed\n");
                 new_addr = FALSE;
+                return;
             }
         }
     }

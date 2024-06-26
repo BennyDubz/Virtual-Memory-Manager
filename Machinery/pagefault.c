@@ -9,6 +9,7 @@
 #include "../globals.h"
 #include "../macros.h"
 #include "./trim.h"
+#include "./conversions.h"
 #include "../Datastructures/datastructures.h"
 
 
@@ -19,27 +20,14 @@
  * 
  */
 int pagefault(PULONG_PTR virtual_address) {
-    //
-            // Connect the virtual address now - if that succeeds then
-            // we'll be able to access it from now on.
-            //
-            // THIS IS JUST REUSING THE SAME PHYSICAL PAGE OVER AND OVER !
-            //
-            // IT NEEDS TO BE REPLACED WITH A TRUE MEMORY MANAGEMENT
-            // STATE MACHINE !
-            //
-
-            // TODO: Look at the PTE for this va to make sure we are doing the right thing
-            // Might be trimmed, might be first access, etc...
-
-
-            // Adjust PTE to reflect its allocated page
-            PTE* accessed_pte = va_to_pte(*pagetable, virtual_address);
+            PTE* accessed_pte = va_to_pte(virtual_address);
 
             if (accessed_pte == NULL) {
                 fprintf(stderr, "Unable to find the accessed PTE\n");
                 return ERROR;
             }
+
+            BOOL disk_flag = FALSE;
 
             // Much shorter lock hold than using the accessed PTE for all of the other if statements
             EnterCriticalSection(&pagetable->pte_lock);
@@ -52,14 +40,18 @@ int pagefault(PULONG_PTR virtual_address) {
                     // Skip to the next random access, another thread has already validated this address
                     return SUCCESS;
                 } else if (is_disk_format(local_pte)) {
-                    printf("Seeing disk format pte\n");
-                    // Get the frame
-                    // Bring back the page from the pagefile using the PTE
-                    // printf("Fetch from disk\n");
+                    disk_flag = TRUE;
                 } else if (is_transition_format(local_pte)) {
                     printf("Seeing transition format pte\n");
-                    // Rescue the frame from the modified or standby list
-                    
+
+                    if (rescue_pte(&local_pte) == ERROR) {
+                        LeaveCriticalSection(&pagetable->pte_lock);
+                        return ERROR;
+                    } else {
+                        *accessed_pte = local_pte;
+                        LeaveCriticalSection(&pagetable->pte_lock);
+                        return SUCCESS;
+                    }              
                 }
             }
 
@@ -94,12 +86,6 @@ int pagefault(PULONG_PTR virtual_address) {
                 }
             }
 
-            local_pte.memory_format.age = 0;
-            local_pte.memory_format.frame_number = pfn;
-            local_pte.memory_format.valid = VALID;
-
-            *accessed_pte = local_pte;
-
             // Allocate the physical frame to the virtual address
             if (MapUserPhysicalPages (virtual_address, 1, &pfn) == FALSE) {
 
@@ -107,6 +93,22 @@ int pagefault(PULONG_PTR virtual_address) {
                 LeaveCriticalSection(&pagetable->pte_lock);
                 return ERROR;
             }
+
+            if (disk_flag) {
+                // We need to use the accessed pte to have the correct address for pte_to_va
+                if (get_from_disk(accessed_pte) == ERROR) {
+                    fprintf(stderr, "Failed to read from disk into pte\n");
+                    LeaveCriticalSection(&pagetable->pte_lock);
+                    return ERROR;
+                }
+            }
+
+            local_pte.memory_format.age = 0;
+            local_pte.memory_format.frame_number = pfn;
+            local_pte.memory_format.valid = VALID;
+
+            *accessed_pte = local_pte;
+
 
             LeaveCriticalSection(&pagetable->pte_lock);
             //
@@ -135,4 +137,48 @@ int pagefault(PULONG_PTR virtual_address) {
                 return;
             }
             #endif
+}
+
+/**
+ * For the given PTE, find its associated page in the standby list or modified list
+ * and reconnect its frame back to the pte and remove it from the list
+ * 
+ * ### The pagetable critical section must be acquired before this! ###
+ * 
+ * Returns SUCCESS if the pte is succssfully reconnected, ERROR otherwise
+ */
+int rescue_pte(PTE* pte) {
+    if (pte == NULL || !is_transition_format(*pte)) {
+        fprintf(stderr, "NULL or invalid pte given to rescue_pte\n");
+        return ERROR;
+    }
+
+    ULONG64 pfn = pte->transition_format.frame_number;
+
+    PAGE* relevant_page = page_from_pfn(pfn);
+    
+    int result;
+
+    if (page_is_modified(*relevant_page)) {
+        if (modified_rescue_page(modified_list, pte) == NULL) {
+            return ERROR;
+        }
+    } else if (page_is_standby(*relevant_page)){
+        if (standby_rescue_page(standby_list, pte) == NULL) {
+            return ERROR;
+        }
+    }
+
+    pte->memory_format.age = 0;
+    pte->memory_format.valid = VALID;
+
+    // Reconnect PTE with the CPU
+    if (MapUserPhysicalPages (pte_to_va(pte), 1, &pfn) == FALSE) {
+
+        printf ("full_virtual_memory_test : could not map VA %p to page %llX\n", pte_to_va(pte), pfn);
+        LeaveCriticalSection(&pagetable->pte_lock);
+        return ERROR;
+    }
+
+    return SUCCESS;
 }

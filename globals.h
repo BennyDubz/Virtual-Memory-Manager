@@ -24,6 +24,10 @@ extern DISK* disk;
 
 extern FREE_FRAMES_LISTS* free_frames;
 
+extern STANDBY_LIST* standby_list;
+
+extern MODIFIED_LIST* modified_list;
+
 
 /**
  * GLOBAL SYNCHRONIZATION

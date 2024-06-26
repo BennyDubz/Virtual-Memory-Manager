@@ -12,7 +12,10 @@
 #include <windows.h>
 
 #define DISK_SLOTS (DISK_SIZE / PAGE_SIZE)
- 
+
+#define DISK_USEDSLOT 0
+#define DISK_FREESLOT 1
+
 #ifndef DISK_T
 #define DISK_T
 
@@ -23,8 +26,8 @@ typedef struct {
      *  be able to be initialized at the beginning of the simulation
      */
     PULONG_PTR base_address;
-    DB_LL_NODE* disk_slot_listhead;
-    // LOCK
+    UCHAR disk_slot_statuses[DISK_SLOTS];
+    ULONG64 num_open_slots;
 } DISK;
 
 #endif
@@ -36,28 +39,3 @@ typedef struct {
  * Returns NULL upon any error
  */
 DISK* initialize_disk();
-
-
-/**
- * Returns a pointer to an open disk slot, if there are any
- * 
- * Returns NULL if the disk does not exist or if there are no slots left
- */
-PULONG_PTR get_free_disk_slot(DISK* disk);
-
-
-/**
- * Writes the given PTE to the disk, and modifies the PTE to reflect this
- * 
- * Returns SUCCESS if there are no issues, ERROR otherwise
- */
-int write_to_disk(PAGETABLE* pagetable, PTE* pte, DISK* disk);
-
-
-/**
- * Fetches the memory for the given PTE on the disk, puts it on the given open page.
- * It then edits the PTE to reflect that it is now valid and accessible.
- * 
- * Returns SUCCESS if there are no issues, ERROR otherwise
- */
-int get_from_disk(PAGETABLE* pagetable, PTE* pte, ULONG64 pfn, DISK* disk);

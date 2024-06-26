@@ -32,7 +32,7 @@ typedef struct {
  */
 typedef struct {
     ULONG64 always_zero:1;
-    ULONG64 pagefile_address:40;
+    ULONG64 pagefile_idx:40;
     // Will always be one for this structure
     ULONG64 on_disk:1;
 } DISK_PTE;
@@ -85,21 +85,6 @@ typedef struct {
  * Returns a pointer to a pagetable containing all invalid PTEs ready for assignment
  */
 PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base);
-
-
-/**
- * Given a virtual address, return the relevant PTE from the pagetable
- * 
- * Returns NULL upon error
- */
-PTE* va_to_pte(PAGETABLE pagetable, PULONG64 virtual_address);
-
-
-/**
- * Returns the base virtual address associated with the given PTE, or NULL otherwise
- * 
- */
-PULONG_PTR pte_to_va(PAGETABLE pagetable, PTE* pte);
 
 
 /**

@@ -10,7 +10,7 @@ CFLAGS=/Zi /EHsc /I.
 DATASTRUCTURES_H = Datastructures/pagelists.h Datastructures/pagetable.h Datastructures/db_linked_list.h \
        Datastructures/disk.h
 
-MACHINERY_H = Machinery/pagefault.h Machinery/trim.h
+MACHINERY_H = Machinery/pagefault.h Machinery/trim.h Machinery/conversions.h
 
 OTHER_H = hardware.h macros.h globals.h
 
@@ -21,7 +21,7 @@ DEPS = $(DATASTRUCTURES_H) $(MACHINERY_H) $(OTHER_H)
 DATASTRUCTURES_O = Datastructures/pagelists.obj Datastructures/db_linked_list.obj Datastructures/pagetable.obj \
       Datastructures/disk.obj
 
-MACHINERY_O = Machinery/pagefault.obj Machinery/trim.obj
+MACHINERY_O = Machinery/pagefault.obj Machinery/trim.obj Machinery/conversions.obj
 
 OTHER_O = vm1.obj
 
@@ -56,6 +56,9 @@ Machinery/pagefault.obj: Machinery/pagefault.c $(DEPS)
 	$(CC) $(CFLAGS) /c /Fo:$@ $<
 
 Machinery/trim.obj: Machinery/trim.c $(DEPS)
+	$(CC) $(CFLAGS) /c /Fo:$@ $<
+
+Machinery/conversions.obj: Machinery/conversions.c $(DEPS)
 	$(CC) $(CFLAGS) /c /Fo:$@ $<
 
 vm1.obj: vm1.c $(DEPS)

@@ -87,20 +87,26 @@ PAGE* initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_f
 
 
 /**
- * ### Initialize pages must be called before this function! ###
- * 
- * Given the frame number and the base address of where the pages are stored, returns a pointer to the relevant 
- * PAGE struct associated with the frame number. 
- * 
- * Returns NULL given any error
+ * Returns TRUE if the page is in the free status, FALSE otherwise
  */
-PAGE* page_from_pfn(ULONG64 frame_number, PAGE* page_storage_base) {
-    if (page_storage_base == NULL) {
-        fprintf(stderr, "Page storage base is NULL in page_from_pfn\n");
-        return NULL;
-    }
-    
-    return page_storage_base + frame_number;
+BOOL page_is_free(PAGE page) {
+    return page.free_page.status == FREE_STATUS;
+}
+
+
+/**
+ * Returns TRUE if the page is in the modified status, FALSE otherwise
+ */
+BOOL page_is_modified(PAGE page) {
+    return page.modified_page.status == MODIFIED_STATUS;
+}
+
+
+/**
+ * Returns TRUE if the page is in the standby status, FALSE otherwise
+ */
+BOOL page_is_standby(PAGE page) {
+    return page.standby_page.status == STANDBY_STATUS;
 }
 
 
@@ -150,7 +156,7 @@ FREE_FRAMES_LISTS* initialize_free_frames(PAGE* page_storage_base, ULONG64* phys
 
         DB_LL_NODE* relevant_listhead = free_frames->listheads[listhead_idx];
 
-        PAGE* free_frame = page_from_pfn(frame_number, page_storage_base);
+        PAGE* free_frame = page_storage_base + frame_number;
 
         if (free_frame == NULL) {
             fprintf(stderr, "Unable to find the page associated with the pfn in initialize_free_frames\n");
@@ -213,4 +219,215 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
  * 
  * Returns SUCCESS if no issues, ERROR otherwise
  */
-int zero_out_frame(PTE* page_table, ULONG64 frame_number);
+int zero_out_frame(PTE* pte);
+
+
+/**
+ * #######################
+ * MODIFIED LIST FUNCTIONS
+ * #######################
+ */
+
+/**
+ * Allocates memory for and initializes a modified list struct
+ * 
+ * Returns a pointer to the modified list or NULL upon error
+ */
+MODIFIED_LIST* initialize_modified_list() {
+    MODIFIED_LIST* modified_list = (MODIFIED_LIST*) malloc(sizeof(MODIFIED_LIST));
+
+    if (modified_list == NULL) {
+        fprintf(stderr, "Unable to allocate memory for modified list in initialize_modified_list\n");
+        return NULL;
+    }
+
+    DB_LL_NODE* mod_listhead = db_create_list();
+
+    if (mod_listhead == NULL) {
+        fprintf(stderr, "Unable to create listhead in initialize_modified_list\n");
+        return NULL;
+    }
+
+    modified_list->listhead = mod_listhead;
+    modified_list->list_length = 0;
+
+    InitializeCriticalSection(&modified_list->lock);
+
+    return modified_list;
+}
+
+
+/**
+ * Adds the given page to the modiefied list
+ * 
+ * Returns SUCCESS if there are no issues, ERROR otherwise
+ */
+int modified_add_page(PAGE* page, MODIFIED_LIST* modified_list) {
+    if (page == NULL || modified_list == NULL) {
+        fprintf(stderr, "NULL page or modified list given to modified_add_page\n");
+        return ERROR;
+    }
+
+    EnterCriticalSection(&modified_list->lock);
+    db_insert_node_at_head(modified_list->listhead, page->modified_page.frame_listnode);
+    modified_list->list_length += 1;
+    LeaveCriticalSection(&modified_list->lock);
+
+    return SUCCESS;
+}
+
+
+/**
+ * Pops the oldest page from the modified list and returns it
+ * 
+ * Returns NULL upon any error or if the list is empty
+ */
+PAGE* modified_pop_page(MODIFIED_LIST* modified_list) {
+    if (modified_list == NULL) {
+        fprintf(stderr, "NULL standby list given to modified_pop_page\n");
+        return NULL;
+    }
+
+    EnterCriticalSection(&modified_list->lock);
+    PAGE* popped = db_pop_from_tail(modified_list->listhead);
+    if (popped != NULL) {
+        modified_list->list_length -= 1;
+    }
+    LeaveCriticalSection(&modified_list->lock);
+
+    return popped;
+}   
+
+
+/**
+ * Rescues the page associated with the given PTE in the modified list, if it is there
+ * 
+ * Returns a pointer to the rescued page, or NULL upon error or if the page cannot be found
+ */
+PAGE* modified_rescue_page(MODIFIED_LIST* modified_list, PTE* pte) {
+    if (modified_list == NULL || pte == NULL) {
+        fprintf(stderr, "NULL modified list or pte given to modified_rescue_page\n");
+    }
+
+    PAGE* rescue = NULL;
+    
+    EnterCriticalSection(&modified_list->lock);
+    DB_LL_NODE* curr_node = modified_list->listhead->flink;
+    while (curr_node != modified_list->listhead) {
+        
+        if (((PAGE*) curr_node->item)->modified_page.pte == pte) {
+            rescue = db_remove_from_middle(curr_node);
+            break;
+        }
+        curr_node = curr_node->flink;
+    }
+    LeaveCriticalSection(&modified_list->lock);
+
+    return rescue;
+}
+
+
+/**
+ * ######################
+ * STANDBY LIST FUNCTIONS
+ * ######################
+ */
+
+
+/**
+ * Allocates memory for and initializes a standby list struct
+ * 
+ * Returns a pointer to the standby list or NULL upon error
+ */
+STANDBY_LIST* initialize_standby_list() {
+    STANDBY_LIST* standby_list = (STANDBY_LIST*) malloc(sizeof(STANDBY_LIST));
+
+    if (standby_list == NULL) {
+        fprintf(stderr, "Unable to allocate memory for modified list in initialize_modified_list\n");
+        return NULL;
+    }
+
+    DB_LL_NODE* mod_listhead = db_create_list();
+
+    if (mod_listhead == NULL) {
+        fprintf(stderr, "Unable to create listhead in initialize_modified_list\n");
+        return NULL;
+    }
+
+    standby_list->listhead = mod_listhead;
+    standby_list->list_length = 0;
+
+    InitializeCriticalSection(&standby_list->lock);
+
+    return standby_list;
+}
+
+
+/**
+ * Adds the given page to the standby list
+ * 
+ * Returns SUCCESS if there are no issues, ERROR otherwise
+ */
+int standby_add_page(PAGE* page, STANDBY_LIST* standby_list) {
+    if (page == NULL || standby_list == NULL) {
+        fprintf(stderr, "NULL page or standby list given to standby_add_page\n");
+        return ERROR;
+    }
+
+    EnterCriticalSection(&standby_list->lock);
+    db_insert_node_at_head(standby_list->listhead, page->modified_page.frame_listnode);
+    standby_list->list_length += 1;
+    LeaveCriticalSection(&standby_list->lock);
+
+    return SUCCESS;
+}
+
+
+/**
+ * Pops the oldest page from the standby list and returns it
+ * 
+ * Returns NULL upon any error or if the list is empty
+ */
+PAGE* standby_pop_page(STANDBY_LIST* standby_list) {
+    if (standby_list == NULL) {
+        fprintf(stderr, "NULL standby list given to standby_pop_page\n");
+        return NULL;
+    }
+
+    EnterCriticalSection(&standby_list->lock);
+    PAGE* popped = db_pop_from_tail(standby_list->listhead);
+    if (popped != NULL) {
+        standby_list->list_length -= 1;
+    }
+    LeaveCriticalSection(&standby_list->lock);
+
+    return popped;
+}   
+
+
+/**
+ * Rescues the page associated with the given PTE in the standby list, if it is there
+ * 
+ * Returns a pointer to the rescued page, or NULL upon error or if the page cannot be found
+ */
+PAGE* standby_rescue_page(STANDBY_LIST* standby_list, PTE* pte) {
+    if (standby_list == NULL || pte == NULL) {
+        fprintf(stderr, "NULL standby list or pte given to standby_rescue_page\n");
+    }
+
+    PAGE* rescue = NULL;
+
+    EnterCriticalSection(&standby_list->lock);
+    DB_LL_NODE* curr_node = standby_list->listhead->flink;
+    while (curr_node != standby_list->listhead) {
+        
+        if (((PAGE*) curr_node->item)->standby_page.pte == pte) {
+            rescue = db_remove_from_middle(curr_node);
+            break;
+        }
+        curr_node = curr_node->flink;
+    }
+    LeaveCriticalSection(&standby_list->lock);
+
+    return rescue;
+}

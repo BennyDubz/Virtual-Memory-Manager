@@ -170,7 +170,7 @@ void* db_pop_from_head(DB_LL_NODE* listhead) {
 
     void* item = head_node->item;
 
-    free(head_node);
+    // free(head_node);
 
     return item;
 }
@@ -195,7 +195,7 @@ void* db_pop_from_tail(DB_LL_NODE* listhead) {
     tail_node->blink->flink = listhead;
     void* item = tail_node->item;
 
-    free(tail_node);
+    // free(tail_node);
     return item;
 }
 

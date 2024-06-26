@@ -24,6 +24,8 @@
 #ifndef PAGE_T
 #define PAGE_T
 typedef struct {
+    ULONG64 status:2;
+
     DB_LL_NODE* frame_listnode;
     ULONG64 frame_number:40;
     /**
@@ -32,23 +34,22 @@ typedef struct {
      * We need to zero out pages that are going to a different process than the one it was at before
      */
     ULONG64 zeroed_out:1; 
-    ULONG64 status:2;
 
 } FREE_PAGE;
 
 typedef struct {
+    ULONG64 status:2;
     PTE* pte;
     DB_LL_NODE* frame_listnode;
     ULONG64 modified_again:1;
-    ULONG64 status:2;
 } MODIFIED_PAGE;
 
 typedef struct {
+    ULONG64 status:2;
     PTE* pte;
     DB_LL_NODE* frame_listnode;
     //BW: Make more space efficient later - calculate how many bits are needed based off hardware
-    ULONG64 pagefile_address:40; 
-    ULONG64 status:2;
+    ULONG64 pagefile_idx:40; 
 } STANDBY_PAGE;
 
 typedef struct {
@@ -76,18 +77,24 @@ typedef struct {
  */
 PAGE* initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_frames);
 
+    
+/**
+ * Returns TRUE if the page is in the free status, FALSE otherwise
+ */
+BOOL page_is_free(PAGE page);
+
 
 /**
- * ### Initialize pages must be called before this function! ###
- * 
- * Given the frame number and the base address of where the pages are stored, returns a pointer to the relevant 
- * PAGE struct associated with the frame number. 
- * 
- * Returns NULL given any error
+ * Returns TRUE if the page is in the modified status, FALSE otherwise
  */
-PAGE* page_from_pfn(ULONG64 frame_number, PAGE* page_storage_base);
+BOOL page_is_modified(PAGE page);
 
-    
+
+/**
+ * Returns TRUE if the page is in the standby status, FALSE otherwise
+ */
+BOOL page_is_standby(PAGE page);
+
 // /**
 //  * Connects the given PTE to the open page's physical frame and alerts the CPU
 //  * 
@@ -150,7 +157,7 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames);
  * 
  * Returns SUCCESS if no issues, ERROR otherwise
  */
-int zero_out_frame(PTE* page_table, ULONG64 frame_number);
+int zero_out_pte(PTE* pte);
 
 
 /**
@@ -159,6 +166,47 @@ int zero_out_frame(PTE* page_table, ULONG64 frame_number);
  * ###################################
  */
 
+#ifndef MODIFIED_LIST_T
+#define MODIFIED_LIST_T
+typedef struct {
+    DB_LL_NODE* listhead;
+    ULONG64 list_length;
+    CRITICAL_SECTION lock;
+
+} MODIFIED_LIST;
+
+/**
+ * Allocates memory for and initializes a modified list struct
+ * 
+ * Returns a pointer to the modified list or NULL upon error
+ */
+MODIFIED_LIST* initialize_modified_list();
+
+
+/**
+ * Adds the given page to the modiefied list
+ * 
+ * Returns SUCCESS if there are no issues, ERROR otherwise
+ */
+int modified_add_page(PAGE* page, MODIFIED_LIST* modified_list);
+
+
+/**
+ * Pops the oldest page from the modified list and returns it
+ * 
+ * Returns NULL upon any error or if the list is empty
+ */
+PAGE* modified_pop_page(MODIFIED_LIST* modified_list);
+
+
+/**
+ * Rescues the page associated with the given PTE in the modified list, if it is there
+ * 
+ * Returns a pointer to the rescued page, or NULL upon error or if the page cannot be found
+ */
+PAGE* modified_rescue_page(MODIFIED_LIST* modified_list, PTE* pte);
+
+#endif
 
 
 /**
@@ -166,3 +214,45 @@ int zero_out_frame(PTE* page_table, ULONG64 frame_number);
  * STANDBY LIST STRUCTS AND FUNCTIONS
  * ##################################
  */
+
+#ifndef STANDBY_LIST_T
+#define STANDBY_LIST_T
+
+typedef struct {
+    DB_LL_NODE* listhead;
+    ULONG64 list_length;
+    CRITICAL_SECTION lock;
+
+} STANDBY_LIST;
+
+/**
+ * Allocates memory for and initializes a standby list struct
+ * 
+ * Returns a pointer to the standby list or NULL upon error
+ */
+STANDBY_LIST* initialize_standby_list();
+
+
+/**
+ * Adds the given page to the standby list
+ * 
+ * Returns SUCCESS if there are no issues, ERROR otherwise
+ */
+int standby_add_page(PAGE* page, STANDBY_LIST* standby_list);
+
+/**
+ * Pops the oldest page from the standby list and returns it
+ * 
+ * Returns NULL upon any error or if the list is empty
+ */
+PAGE* standby_pop_page(STANDBY_LIST* standby_list);
+
+
+/**
+ * Rescues the page associated with the given PTE in the standby list, if it is there
+ * 
+ * Returns a pointer to the rescued page, or NULL upon error or if the page cannot be found
+ */
+PAGE* standby_rescue_page(STANDBY_LIST* standby_list, PTE* pte);
+
+#endif
