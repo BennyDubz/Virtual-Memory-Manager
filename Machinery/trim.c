@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <assert.h>
+#include <windows.h>
 #include "../globals.h"
 #include "./conversions.h"
 #include "../Datastructures/datastructures.h"
@@ -57,6 +58,42 @@ ULONG64 steal_lowest_frame() {
     // No frame to steal was ever found
     return ERROR;
 }
+
+
+/**
+ * Thread dedicated to aging all of the valid PTEs in the pagetable
+ */
+void thread_aging() {
+    ULONG64 ptes_per_lock = pagetable->num_virtual_pages / pagetable->num_locks;
+    ULONG64 section_start;
+    int waiting_result;
+
+    while(TRUE) {
+        waiting_result = WaitForSingleObject(aging_event, INFINITE);
+        
+        // Go through each lock section and increment all valid PTEs
+        for (ULONG64 lock_section = 0; lock_section < pagetable->num_locks; lock_section++) {
+            section_start = lock_section * ptes_per_lock;
+
+            EnterCriticalSection(&pagetable->pte_locks[lock_section]);
+            for (ULONG64 pte_idx = section_start; pte_idx < section_start + ptes_per_lock; pte_idx++) {
+                // Ignore invalid PTEs
+                if (! is_memory_format(pagetable->pte_list[pte_idx])) continue;
+
+                // Don't allow the age to wrap
+                if (pagetable->pte_list[pte_idx].memory_format.age == MAX_AGE) {
+                    continue;
+                } else {
+                    pagetable->pte_list[pte_idx].memory_format.age++;
+                }
+            }
+            LeaveCriticalSection(&pagetable->pte_locks[lock_section]);
+        }
+    }
+}
+
+
+
 
 #if 0
 /**
@@ -148,18 +185,9 @@ int write_to_disk(PTE* pte, ULONG64* disk_idx_storage) {
 
     PULONG_PTR disk_slot_addr = disk_idx_to_addr(disk_idx);
 
-    // *pte_va = 0x111111111;
-
     // Copy the memory over to the slot
     memcpy(disk_slot_addr, pte_va, PAGE_SIZE);
 
-    // Simulate the fact that disk writes take a while
-    // Sleep(10);
-
-    // // Modify the PTE to reflect that it is now on the disk
-    // pte->disk_format.always_zero = 0;
-    // pte->disk_format.pagefile_idx = (ULONG64) disk_slot;
-    // pte->disk_format.on_disk = 1;
     *disk_idx_storage = disk_idx;
 
     return SUCCESS;
@@ -205,6 +233,7 @@ int get_from_disk(PTE* pte) {
 }
 
 
+// Allows for better usage of the disk, especially early on
 ULONG64 free_disk_idx_search = 0;
 static free_disk_idx_increment() {
     free_disk_idx_search++;
@@ -212,6 +241,7 @@ static free_disk_idx_increment() {
         free_disk_idx_search = 0;
     }
 }
+
 
 /**
  * Writes an open disk idx into the result storage pointer
@@ -255,8 +285,6 @@ int get_free_disk_idx(ULONG64* result_storage) {
     assert(FALSE);
     return ERROR;
 }
-
-
 
 
 /**

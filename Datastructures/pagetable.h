@@ -64,12 +64,17 @@ typedef struct {
 
 #ifndef PAGETABLE_T
 #define PAGETABLE_T
+
+// #define PAGETABLE_NUMLOCKS ((VIRTUAL_ADDRESS_SIZE / PAGE_SIZE) >> 8)
+
 typedef struct {
     PTE* pte_list;
     ULONG64 num_virtual_pages;
     // To allow calculations from PTEs to virtual addresses and vice verca
     ULONG64 vmem_base;
-    CRITICAL_SECTION pte_lock;
+
+    ULONG64 num_locks;
+    CRITICAL_SECTION* pte_locks;
     // LOCK
 } PAGETABLE;
 

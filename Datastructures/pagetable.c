@@ -49,7 +49,21 @@ PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base)
         pte_list[virtual_page] = new_pte;
     }
 
-    InitializeCriticalSection(&pagetable->pte_lock);
+    ULONG64 num_locks = max(num_virtual_pages >> 8, 1);
+
+    CRITICAL_SECTION* pte_locks = (CRITICAL_SECTION*) malloc(sizeof(CRITICAL_SECTION) * num_locks);
+
+    if (pte_locks == NULL) {
+        fprintf(stderr, "Unable to allocate memory for pagetable locks\n");
+        return NULL;
+    }
+
+    for (ULONG64 curr_lock = 0; curr_lock < num_locks; curr_lock++) {
+        InitializeCriticalSection(&pte_locks[curr_lock]);
+    } 
+
+    pagetable->num_locks = num_locks;
+    pagetable->pte_locks = pte_locks;
 
     return pagetable;
 }

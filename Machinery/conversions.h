@@ -26,6 +26,12 @@ PULONG_PTR pte_to_va(PTE* pte);
 
 
 /**
+ * Returns a pointer to the pagetable's lock governing the given PTE
+ */
+CRITICAL_SECTION* pte_to_lock(PTE* pte);
+
+
+/**
  * Given the frame number, returns a pointer to the relevant PAGE struct associated with the frame number
  * using the page storage base
  * 

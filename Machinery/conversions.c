@@ -55,6 +55,22 @@ PULONG_PTR pte_to_va(PTE* pte) {
     return virtual_address;
 }
 
+
+/**
+ * Returns a pointer to the pagetable's lock governing the given PTE
+ */
+CRITICAL_SECTION* pte_to_lock(PTE* pte) {
+    ULONG64 base_address_pte_list = (ULONG64) pagetable->pte_list;
+    ULONG64 pte_address = (ULONG64) pte;
+
+    ULONG64 pte_index = (pte_address - base_address_pte_list) / sizeof(PTE);
+
+    LONG64 lock_index = pte_index / (pagetable->num_virtual_pages / pagetable->num_locks);
+
+    return &pagetable->pte_locks[lock_index];
+}
+
+
 /**
  * ### Initialize pages must be called before this function! ###
  * 

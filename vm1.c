@@ -7,6 +7,7 @@
 
 #include "./Datastructures/datastructures.h"
 #include "./Machinery/pagefault.h"
+#include "./Machinery/trim.h"
 
 #include "./hardware.h"
 
@@ -33,6 +34,21 @@ FREE_FRAMES_LISTS* free_frames;
 STANDBY_LIST* standby_list;
 
 MODIFIED_LIST* modified_list;
+
+
+/**
+ * GLOBAL SYNCHRONIZATION
+ */
+
+HANDLE aging_event;
+
+HANDLE trimming_event;
+
+HANDLE modified_writing_event;
+
+ULONG64 num_child_threads;
+
+HANDLE* threads;
 
 
 // #####################################
@@ -218,7 +234,7 @@ full_virtual_memory_test (
     }
     
     /**
-     * Initialize pages, pagetable, and free frames
+     * Initialize pages, pagetable, all page lists, and the disk
      */
 
     page_storage_base = initialize_pages(physical_page_numbers, physical_page_count);
@@ -260,6 +276,24 @@ full_virtual_memory_test (
         return;
     }
 
+    /**
+     * Initialize all events and threads
+     */
+
+    aging_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+
+    trimming_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+
+    modified_writing_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+
+    num_child_threads = 1; // Does not include this thread that handles page faults
+
+    threads = (HANDLE*) malloc(sizeof(HANDLE) * num_child_threads);
+
+    threads[0] = CreateThread(NULL, 0, &thread_aging, NULL, 0, NULL);
+
+
+
     //
     // Now perform random accesses.
     //
@@ -286,6 +320,11 @@ full_virtual_memory_test (
         // (without faulting to the operating system again).
         // 
 
+        // Signal aging (temporary)
+        if (i % 8 == 0) {
+            SetEvent(aging_event);
+        }
+
         // If we fail a page fault, we will want to try the address again and not change it
         if (new_addr) {
             random_number = rand () * rand() * rand();
@@ -311,7 +350,7 @@ full_virtual_memory_test (
         } __except (EXCEPTION_EXECUTE_HANDLER) {
 
             page_faulted = TRUE;
-
+            new_addr = FALSE;
         }
 
         if (page_faulted) {
@@ -320,8 +359,6 @@ full_virtual_memory_test (
             //BW: This is likely a temporary solution, we will want to further separate the usermode code
             if (fault_result == ERROR) {
                 printf("Fault failed\n");
-                new_addr = FALSE;
-                return;
             }
         }
     }

@@ -5,6 +5,7 @@
  * All global variables used across the state machine as well as inside the datastructures
  */
 
+#include <windows.h>
 #include "Datastructures/disk.h"
 #include "Datastructures/pagetable.h"
 #include "Datastructures/pagelists.h"
@@ -32,3 +33,14 @@ extern MODIFIED_LIST* modified_list;
 /**
  * GLOBAL SYNCHRONIZATION
  */
+
+extern HANDLE aging_event;
+
+extern HANDLE trimming_event;
+
+extern HANDLE modified_writing_event;
+
+extern ULONG64 num_child_threads;
+
+extern HANDLE* threads;
+

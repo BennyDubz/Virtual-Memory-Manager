@@ -18,6 +18,12 @@ ULONG64 steal_lowest_frame();
 
 
 /**
+ * Thread dedicated to aging all of the valid PTEs in the pagetable
+ */
+void thread_aging();
+
+
+/**
  * Writes the given PTE to the disk, and stores the resulting disk_idx in disk_idx_storage
  * 
  * Returns the disk index if there are no issues, ERROR otherwise
