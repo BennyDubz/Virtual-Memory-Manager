@@ -19,7 +19,7 @@
 
 
 /**
- * Initializes all of the pages, and organizes them in memory such that they are reachable using the page_from_pfn
+ * Initializes all of the pages, and organizes them in memory such that they are reachable using the pfn_to_page
  * function in O(1) time. Returns the address of page_storage_base representing the base address of where all the pages
  * can be found from, minus the lowest pagenumber for simpler arithmetic in the other functions
  * 
@@ -109,15 +109,6 @@ BOOL page_is_standby(PAGE page) {
     return page.standby_page.status == STANDBY_STATUS;
 }
 
-
-// /**
-//  * Connects the given PTE to the open page's physical frame and alerts the CPU
-//  * 
-//  * Returns SUCCESS if there are no issues, ERROR otherwise
-//  */
-// int connect_pte_to_page(PTE* pte, PAGE* open_page) {
-
-// }
 
 /**
  * ##########################
@@ -258,7 +249,7 @@ MODIFIED_LIST* initialize_modified_list() {
 
 
 /**
- * Adds the given page to the modiefied list
+ * Adds the given page to the modified list (at the head)
  * 
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
@@ -268,17 +259,15 @@ int modified_add_page(PAGE* page, MODIFIED_LIST* modified_list) {
         return ERROR;
     }
 
-    EnterCriticalSection(&modified_list->lock);
     db_insert_node_at_head(modified_list->listhead, page->modified_page.frame_listnode);
     modified_list->list_length += 1;
-    LeaveCriticalSection(&modified_list->lock);
 
     return SUCCESS;
 }
 
 
 /**
- * Pops the oldest page from the modified list and returns it
+ * Pops the oldest page (tail) from the modified list and returns it
  * 
  * Returns NULL upon any error or if the list is empty
  */
@@ -288,12 +277,10 @@ PAGE* modified_pop_page(MODIFIED_LIST* modified_list) {
         return NULL;
     }
 
-    EnterCriticalSection(&modified_list->lock);
     PAGE* popped = db_pop_from_tail(modified_list->listhead);
     if (popped != NULL) {
         modified_list->list_length -= 1;
     }
-    LeaveCriticalSection(&modified_list->lock);
 
     return popped;
 }   

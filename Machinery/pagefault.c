@@ -76,7 +76,6 @@ int pagefault(PULONG_PTR virtual_address) {
         //BW: Will be replaced by taking from the standby
         // if the standby fails, then we need to release our lock and wait to be signalled by the standby
         // thread to try this page fault again
-        printf("Stealing frame\n");
         pfn = steal_lowest_frame(pagetable);
 
         if (pfn == ERROR) {
@@ -161,7 +160,7 @@ int rescue_pte(PTE* pte) {
 
     ULONG64 pfn = pte->transition_format.frame_number;
 
-    PAGE* relevant_page = page_from_pfn(pfn);
+    PAGE* relevant_page = pfn_to_page(pfn);
     
     int result;
 

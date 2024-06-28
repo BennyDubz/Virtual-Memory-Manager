@@ -79,8 +79,16 @@ CRITICAL_SECTION* pte_to_lock(PTE* pte) {
  * 
  * Returns NULL given any error
  */
-PAGE* page_from_pfn(ULONG64 frame_number) {
+PAGE* pfn_to_page(ULONG64 frame_number) {
     return page_storage_base + frame_number;
+}
+
+
+/**
+ * Given a pointer to the page, returns the pfn associated with it
+ */
+ULONG64 page_to_pfn(PAGE* page) {
+    return (ULONG64) (page - page_storage_base) / sizeof(PAGE);
 }
 
 
@@ -90,7 +98,7 @@ PAGE* page_from_pfn(ULONG64 frame_number) {
  * Returns a pointer to the relevant slot, or NULL upon error
  */
 PULONG_PTR disk_idx_to_addr(ULONG64 disk_idx) {
-    if (disk_idx > DISK_SLOTS) {
+    if (disk_idx > DISK_STORAGE_SLOTS) {
         fprintf(stderr, "NULL diskbase or invalid disk_idx given to disk_idx_to_addr\n");
         return NULL;
     }
@@ -115,4 +123,21 @@ ULONG64 disk_addr_to_idx(PULONG_PTR disk_slot_addr) {
     ULONG64 difference = (ULONG64) (disk_slot_addr - disk->base_address);
 
     return difference / PAGE_SIZE;
+}
+
+
+/**
+ * From the index of the disk slot, return a pointer to its governing lock
+ * 
+ * Returns NULL upon error
+ */
+CRITICAL_SECTION* disk_idx_to_lock(ULONG64 disk_idx) {
+    if (disk_idx > DISK_STORAGE_SLOTS) {
+        fprintf(stderr, "Disk idx above number of available slots in disk_idx_to_lock\n");
+        return NULL;
+    }
+
+    ULONG64 lock_index = disk_idx / (DISK_STORAGE_SLOTS / disk->num_locks);
+
+    return &disk->disk_slot_locks[lock_index];
 }

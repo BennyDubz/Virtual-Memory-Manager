@@ -39,15 +39,15 @@ typedef struct {
 
 typedef struct {
     ULONG64 status:2;
-    PTE* pte;
     DB_LL_NODE* frame_listnode;
+    PTE* pte;
     ULONG64 modified_again:1;
 } MODIFIED_PAGE;
 
 typedef struct {
     ULONG64 status:2;
-    PTE* pte;
     DB_LL_NODE* frame_listnode;
+    PTE* pte;
     //BW: Make more space efficient later - calculate how many bits are needed based off hardware
     ULONG64 pagefile_idx:40; 
 } STANDBY_PAGE;
@@ -69,7 +69,7 @@ typedef struct {
 
 
 /**
- * Initializes all of the pages, and organizes them in memory such that they are reachable using the page_from_pfn
+ * Initializes all of the pages, and organizes them in memory such that they are reachable using the pfn_to_page
  * function in O(1) time. Returns the address of page_storage_base representing the base address of where all the pages
  * can be found from
  * 
@@ -95,15 +95,6 @@ BOOL page_is_modified(PAGE page);
  */
 BOOL page_is_standby(PAGE page);
 
-// /**
-//  * Connects the given PTE to the open page's physical frame and alerts the CPU
-//  * 
-//  * It does **NOT** set the valid format on the PTE, however, as this function may be used when
-//  * fetching data from the disk.
-//  * 
-//  * Returns SUCCESS if there are no issues, ERROR otherwise
-//  */
-// int connect_pte_to_page(PTE* pte, PAGE* open_page);
 
 
 /**
@@ -184,7 +175,7 @@ MODIFIED_LIST* initialize_modified_list();
 
 
 /**
- * Adds the given page to the modiefied list
+ * Adds the given page to the modified list
  * 
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */

@@ -58,12 +58,21 @@ PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base)
         return NULL;
     }
 
+    ULONG64* valid_pte_counts = (ULONG64*) malloc(sizeof(ULONG64));
+
+    if (valid_pte_counts == NULL) {
+        fprintf(stderr, "Unable to allocate memory for valid_pte_counts\n");
+        return NULL;
+    }
+
     for (ULONG64 curr_lock = 0; curr_lock < num_locks; curr_lock++) {
         InitializeCriticalSection(&pte_locks[curr_lock]);
+        valid_pte_counts[curr_lock] = 0;
     } 
 
     pagetable->num_locks = num_locks;
     pagetable->pte_locks = pte_locks;
+    pagetable->valid_pte_counts = valid_pte_counts;
 
     return pagetable;
 }

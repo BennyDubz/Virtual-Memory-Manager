@@ -34,11 +34,19 @@ extern MODIFIED_LIST* modified_list;
  * GLOBAL SYNCHRONIZATION
  */
 
+extern HANDLE waiting_for_pages_event;
+
 extern HANDLE aging_event;
 
 extern HANDLE trimming_event;
 
-extern HANDLE modified_writing_event;
+extern HANDLE pagetable_to_modified_event;
+
+extern HANDLE modified_to_standby_event;
+
+HANDLE disk_write_available_event;
+
+HANDLE disk_read_available_event;
 
 extern ULONG64 num_child_threads;
 

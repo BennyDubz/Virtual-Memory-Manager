@@ -40,11 +40,21 @@ MODIFIED_LIST* modified_list;
  * GLOBAL SYNCHRONIZATION
  */
 
+HANDLE waiting_for_pages_event;
+
 HANDLE aging_event;
 
 HANDLE trimming_event;
 
 HANDLE modified_writing_event;
+
+HANDLE disk_write_available_event;
+
+HANDLE disk_read_available_event;
+
+HANDLE pagetable_to_modified_event;
+
+HANDLE modified_to_standby_event;
 
 ULONG64 num_child_threads;
 
@@ -280,19 +290,32 @@ full_virtual_memory_test (
      * Initialize all events and threads
      */
 
+    //BW: This could later be turned into a manual-reset lock if we are able to write
+    // multiple pages to standby simultaneously, but right now we do it one page at a time
+    waiting_for_pages_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+
     aging_event = CreateEvent(NULL, FALSE, FALSE, NULL);
 
     trimming_event = CreateEvent(NULL, FALSE, FALSE, NULL);
 
-    modified_writing_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+    pagetable_to_modified_event = CreateEvent(NULL, FALSE, FALSE, NULL);
 
-    num_child_threads = 1; // Does not include this thread that handles page faults
+    modified_to_standby_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+
+    disk_write_available_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+
+    disk_read_available_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+
+    // Does not include this thread that handles page faults, and does not include worker threads
+    num_child_threads = 3; 
 
     threads = (HANDLE*) malloc(sizeof(HANDLE) * num_child_threads);
 
     threads[0] = CreateThread(NULL, 0, &thread_aging, NULL, 0, NULL);
 
+    threads[1] = CreateThread(NULL, 0, &thread_pagetable_to_modified, NULL, 0, NULL);
 
+    threads[2] = CreateThread(NULL, 0, &thread_modified_to_standby, NULL, 0, NULL);
 
     //
     // Now perform random accesses.

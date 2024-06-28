@@ -24,6 +24,33 @@ void thread_aging();
 
 
 /**
+ * Thread dedicated to going through the pagetable and putting high-age PTEs on the modified list
+ */
+void thread_pagetable_to_modified();
+
+
+/**
+ * Thread dedicated to writing pages from the modified list to disk, putting finally adding the pages to standby
+ */
+void thread_modified_to_standby();
+
+
+/**
+ * Connects the given PTE to the open page's physical frame and alerts the CPU
+ * 
+ * Returns SUCCESS if there are no issues, ERROR otherwise
+ */
+int connect_pte_to_page(PTE* pte, PAGE* open_page);
+
+
+/**
+ * Disconnects the PTE from the CPU, but **does not** change the PTE structure
+ * as this may be used for both disk and transition format PTEs
+ */
+int disconnect_pte_from_cpu(PTE* pte);
+
+
+/**
  * Writes the given PTE to the disk, and stores the resulting disk_idx in disk_idx_storage
  * 
  * Returns the disk index if there are no issues, ERROR otherwise
@@ -46,7 +73,7 @@ int get_from_disk(PTE* pte);
  * Returns SUCCESS if we successfully wrote a disk idx, ERROR otherwise (may be empty)
  * 
  */
-int get_free_disk_idx(ULONG64* result_storage);
+int allocate_disk_slot(ULONG64* result_storage);
 
 
 /**

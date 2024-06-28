@@ -37,7 +37,13 @@ CRITICAL_SECTION* pte_to_lock(PTE* pte);
  * 
  * Returns NULL given any error
  */
-PAGE* page_from_pfn(ULONG64 frame_number);
+PAGE* pfn_to_page(ULONG64 frame_number);
+
+
+/**
+ * Given a pointer to the page, returns the pfn associated with it
+ */
+ULONG64 page_to_pfn(PAGE* page);
 
 
 /**
@@ -54,3 +60,9 @@ PULONG_PTR disk_idx_to_addr(ULONG64 disk_idx);
  * Returns the disk index upon success, or ERROR otherwise
  */
 ULONG64 disk_addr_to_idx(PULONG_PTR disk_slot_addr);
+
+
+/**
+ * From the index of the disk slot, return a pointer to its governing lock
+ */
+CRITICAL_SECTION* disk_idx_to_lock(ULONG64 disk_idx);
