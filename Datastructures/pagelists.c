@@ -136,7 +136,11 @@ FREE_FRAMES_LISTS* initialize_free_frames(PAGE* page_storage_base, ULONG64* phys
         free_frames->listheads[new_list] = new_listhead;
         free_frames->list_lengths[new_list] = 0;
         free_frames->curr_list_idx = 0;
+
+        InitializeCriticalSection(&free_frames->list_locks[new_list]);
     }
+
+
 
     // Add all the physical frames to their respective free lists
     for (int pfn_idx = 0; pfn_idx < num_physical_frames; pfn_idx++) {
@@ -176,27 +180,47 @@ FREE_FRAMES_LISTS* initialize_free_frames(PAGE* page_storage_base, ULONG64* phys
 PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
     int curr_attempts = 0;
     
-    //BW: SYNC - incrementing curr_list_idx
+    ULONG64 local_index = free_frames->curr_list_idx;
+
     PAGE* page = NULL;
     while (curr_attempts < NUM_FRAME_LISTS) {
-        // Check for empty list
+        // Check for empty list - we can quickly check here before acquiring the lock
         if (free_frames->list_lengths[free_frames->curr_list_idx] == 0) {
             curr_attempts += 1;
+
+            local_index++;
+
+            /**
+             * We expect multiple threads to be incrementing this, new starting threads don't start
+             * on empty slots
+             */
             free_frames->curr_list_idx = (free_frames->curr_list_idx + 1) % NUM_FRAME_LISTS;
             continue;
         }
 
-        // By here, we know we can get a free frame
+        // By here, the **odds are better** that we will get a free frame, but not guaranteed
+        EnterCriticalSection(&free_frames->list_locks[local_index]);
         DB_LL_NODE* frame_listhead = free_frames->listheads[free_frames->curr_list_idx];
 
         page = (PAGE*) db_pop_from_head(frame_listhead);
+
+        // We lost the race condition, release lock and try again with the next one
+        if (page == NULL) {
+            free_frames->curr_list_idx = (free_frames->curr_list_idx + 1) % NUM_FRAME_LISTS;
+            /**
+             * We purposefully do NOT increment curr_attempts, as we want the thread to be able to
+             * try again (especially early on if the standby list is still empty)
+             */
+            local_index++;
+            LeaveCriticalSection(&free_frames->list_locks[local_index]);
+
+        }
+
         free_frames->list_lengths[free_frames->curr_list_idx] -= 1;
-        free_frames->curr_list_idx = (free_frames->curr_list_idx + 1) % NUM_FRAME_LISTS;
 
-        //BW: The listnode should also be refreshed 
-        page->free_page.frame_listnode->blink = NULL;
-        page->free_page.frame_listnode->flink = NULL;
+        page->active_page.status = ACTIVE_STATUS;
 
+        LeaveCriticalSection(&free_frames->list_locks[local_index]);
 
         break;
     }
@@ -206,11 +230,23 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
 
 
 /**
- * Zeroes out the memory on the physical frame so that it can be allocated to a new process without privacy loss
+ * Zeroes out the memory on the physical frame so that it can be reallocated without privacy loss
  * 
  * Returns SUCCESS if no issues, ERROR otherwise
  */
-int zero_out_frame(PTE* pte);
+int zero_out_page(PAGE* page) {
+    if (page == NULL) {
+        fprintf(stderr, "NULL page given to zero out page\n");
+        return ERROR;
+    }
+
+    /**
+     * Have a few addresses to pop from that we use temporarily to map the pfn to
+     * so that we can memset() them to zero.
+     */
+
+    return SUCCESS;
+}
 
 
 /**
@@ -218,6 +254,7 @@ int zero_out_frame(PTE* pte);
  * MODIFIED LIST FUNCTIONS
  * #######################
  */
+
 
 /**
  * Allocates memory for and initializes a modified list struct
@@ -259,6 +296,7 @@ int modified_add_page(PAGE* page, MODIFIED_LIST* modified_list) {
         return ERROR;
     }
 
+    page->modified_page.status = MODIFIED_STATUS;
     db_insert_node_at_head(modified_list->listhead, page->modified_page.frame_listnode);
     modified_list->list_length += 1;
 
@@ -284,34 +322,6 @@ PAGE* modified_pop_page(MODIFIED_LIST* modified_list) {
 
     return popped;
 }   
-
-
-/**
- * Rescues the page associated with the given PTE in the modified list, if it is there
- * 
- * Returns a pointer to the rescued page, or NULL upon error or if the page cannot be found
- */
-PAGE* modified_rescue_page(MODIFIED_LIST* modified_list, PTE* pte) {
-    if (modified_list == NULL || pte == NULL) {
-        fprintf(stderr, "NULL modified list or pte given to modified_rescue_page\n");
-    }
-
-    PAGE* rescue = NULL;
-    
-    EnterCriticalSection(&modified_list->lock);
-    DB_LL_NODE* curr_node = modified_list->listhead->flink;
-    while (curr_node != modified_list->listhead) {
-        
-        if (((PAGE*) curr_node->item)->modified_page.pte == pte) {
-            rescue = db_remove_from_middle(curr_node);
-            break;
-        }
-        curr_node = curr_node->flink;
-    }
-    LeaveCriticalSection(&modified_list->lock);
-
-    return rescue;
-}
 
 
 /**
@@ -360,61 +370,10 @@ int standby_add_page(PAGE* page, STANDBY_LIST* standby_list) {
         fprintf(stderr, "NULL page or standby list given to standby_add_page\n");
         return ERROR;
     }
-
-    EnterCriticalSection(&standby_list->lock);
+    
+    page->standby_page.status = STANDBY_STATUS;
     db_insert_node_at_head(standby_list->listhead, page->modified_page.frame_listnode);
     standby_list->list_length += 1;
-    LeaveCriticalSection(&standby_list->lock);
 
     return SUCCESS;
-}
-
-
-/**
- * Pops the oldest page from the standby list and returns it
- * 
- * Returns NULL upon any error or if the list is empty
- */
-PAGE* standby_pop_page(STANDBY_LIST* standby_list) {
-    if (standby_list == NULL) {
-        fprintf(stderr, "NULL standby list given to standby_pop_page\n");
-        return NULL;
-    }
-
-    EnterCriticalSection(&standby_list->lock);
-    PAGE* popped = db_pop_from_tail(standby_list->listhead);
-    if (popped != NULL) {
-        standby_list->list_length -= 1;
-    }
-    LeaveCriticalSection(&standby_list->lock);
-
-    return popped;
-}   
-
-
-/**
- * Rescues the page associated with the given PTE in the standby list, if it is there
- * 
- * Returns a pointer to the rescued page, or NULL upon error or if the page cannot be found
- */
-PAGE* standby_rescue_page(STANDBY_LIST* standby_list, PTE* pte) {
-    if (standby_list == NULL || pte == NULL) {
-        fprintf(stderr, "NULL standby list or pte given to standby_rescue_page\n");
-    }
-
-    PAGE* rescue = NULL;
-
-    EnterCriticalSection(&standby_list->lock);
-    DB_LL_NODE* curr_node = standby_list->listhead->flink;
-    while (curr_node != standby_list->listhead) {
-        
-        if (((PAGE*) curr_node->item)->standby_page.pte == pte) {
-            rescue = db_remove_from_middle(curr_node);
-            break;
-        }
-        curr_node = curr_node->flink;
-    }
-    LeaveCriticalSection(&standby_list->lock);
-
-    return rescue;
 }

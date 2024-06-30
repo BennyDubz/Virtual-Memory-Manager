@@ -20,19 +20,19 @@ ULONG64 steal_lowest_frame();
 /**
  * Thread dedicated to aging all of the valid PTEs in the pagetable
  */
-void thread_aging();
+LPTHREAD_START_ROUTINE thread_aging();
 
 
 /**
- * Thread dedicated to going through the pagetable and putting high-age PTEs on the modified list
+ * Thread dedicated to trimming PTEs from the pagetable and putting them on the modified list
  */
-void thread_pagetable_to_modified();
+LPTHREAD_START_ROUTINE thread_trimming();
 
 
 /**
  * Thread dedicated to writing pages from the modified list to disk, putting finally adding the pages to standby
  */
-void thread_modified_to_standby();
+LPTHREAD_START_ROUTINE thread_modified_to_standby();
 
 
 /**
@@ -40,7 +40,7 @@ void thread_modified_to_standby();
  * 
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
-int connect_pte_to_page(PTE* pte, PAGE* open_page);
+int connect_pte_to_pfn(PTE* pte, ULONG64 pfn);
 
 
 /**
@@ -50,21 +50,28 @@ int connect_pte_to_page(PTE* pte, PAGE* open_page);
 int disconnect_pte_from_cpu(PTE* pte);
 
 
+// /**
+//  * Writes the given PTE to the disk, and stores the resulting disk_idx in disk_idx_storage
+//  * 
+//  * Returns the disk index if there are no issues, ERROR otherwise
+//  */
+// int write_to_disk(PTE* pte, ULONG64* disk_idx_storage);
+
 /**
- * Writes the given PTE to the disk, and stores the resulting disk_idx in disk_idx_storage
+ * A thread dedicated to writing the given page to the disk. Writes the resulting
+ * disk storage index into the given pointer disk_idx_storage.
  * 
- * Returns the disk index if there are no issues, ERROR otherwise
+ * Returns SUCCESS if we write the page to disk, ERROR otherwise
  */
-int write_to_disk(PTE* pte, ULONG64* disk_idx_storage);
+int write_to_disk(PAGE* transition_page, ULONG64* disk_idx_storage);
 
 
 /**
- * Fetches the memory for the given PTE on the disk, 
- * assuming the PTE's virtual address has already been mapped to a valid physical frame
+ * Fetches the memory from the disk index and puts it onto the open page
  * 
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
-int get_from_disk(PTE* pte);
+int read_from_disk(ULONG64 pfn, ULONG64 disk_idx);
 
 
 /**

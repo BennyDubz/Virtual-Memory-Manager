@@ -12,6 +12,7 @@
 #include "../macros.h"
 #include "../hardware.h"
 
+
 /**
  * Given a virtual address, return the relevant PTE from the pagetable
  * 
@@ -88,7 +89,11 @@ PAGE* pfn_to_page(ULONG64 frame_number) {
  * Given a pointer to the page, returns the pfn associated with it
  */
 ULONG64 page_to_pfn(PAGE* page) {
-    return (ULONG64) (page - page_storage_base) / sizeof(PAGE);
+    // page* = psb + (framenumber * sizeof(page))
+    //page* - psb = (framenumber * sizeof(page)
+    // return (ULONG64) (page - page_storage_base) / sizeof(PAGE);
+    return (ULONG64) (page - page_storage_base);
+
 }
 
 

@@ -223,6 +223,6 @@ void* db_remove_from_middle(DB_LL_NODE* middle_node) {
 
     void* item = middle_node->item;
     
-    free(middle_node);
+    // free(middle_node);
     return item;
 }

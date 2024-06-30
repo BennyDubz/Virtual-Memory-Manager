@@ -12,7 +12,7 @@ DATASTRUCTURES_H = Datastructures/pagelists.h Datastructures/pagetable.h Datastr
 
 MACHINERY_H = Machinery/pagefault.h Machinery/trim.h Machinery/conversions.h
 
-OTHER_H = hardware.h macros.h globals.h
+OTHER_H = hardware.h macros.h globals.h init.h
 
 # Combined header file dependencies
 DEPS = $(DATASTRUCTURES_H) $(MACHINERY_H) $(OTHER_H)
@@ -23,7 +23,7 @@ DATASTRUCTURES_O = Datastructures/pagelists.obj Datastructures/db_linked_list.ob
 
 MACHINERY_O = Machinery/pagefault.obj Machinery/trim.obj Machinery/conversions.obj
 
-OTHER_O = vm1.obj
+OTHER_O = init.obj vm1.obj
 
 # Object files to compile
 OBJ = $(DATASTRUCTURES_O) $(MACHINERY_O) $(OTHER_O)
@@ -59,6 +59,9 @@ Machinery/trim.obj: Machinery/trim.c $(DEPS)
 	$(CC) $(CFLAGS) /c /Fo:$@ $<
 
 Machinery/conversions.obj: Machinery/conversions.c $(DEPS)
+	$(CC) $(CFLAGS) /c /Fo:$@ $<
+
+init.obj: init.c $(DEPS)
 	$(CC) $(CFLAGS) /c /Fo:$@ $<
 
 vm1.obj: vm1.c $(DEPS)

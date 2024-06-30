@@ -79,7 +79,7 @@ typedef struct {
     // LOCK
 } PAGETABLE;
 
-#define MAX_AGE (1 << 5) - 1
+#define MAX_AGE (1 << 4) - 1
 // typedef struct {
     
 // } AGELISTS;
@@ -119,3 +119,9 @@ BOOL is_transition_format(PTE pte);
  * or if the PTE is NULL
  */
 BOOL is_used_pte(PTE pte);
+
+
+/**
+ * Returns TRUE if both PTEs are equivalent, FALSE otherwise
+ */
+BOOL ptes_are_equal(PTE pte1, PTE pte2);

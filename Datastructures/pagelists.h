@@ -20,6 +20,7 @@
 #define FREE_STATUS 0
 #define MODIFIED_STATUS 1
 #define STANDBY_STATUS 2
+#define ACTIVE_STATUS 3
 
 #ifndef PAGE_T
 #define PAGE_T
@@ -41,6 +42,7 @@ typedef struct {
     ULONG64 status:2;
     DB_LL_NODE* frame_listnode;
     PTE* pte;
+
     ULONG64 modified_again:1;
 } MODIFIED_PAGE;
 
@@ -52,11 +54,29 @@ typedef struct {
     ULONG64 pagefile_idx:40; 
 } STANDBY_PAGE;
 
+/**
+ * The purpose of this is to help resolve race conditions when rescuing
+ * pages from the standby list.
+ * 
+ * If a transition PTE's corresponding page is swapped to the ACTIVE_STATUS
+ * by the time it is able to acquire the standby lock, then it must have
+ * been taken out from under them. 
+ * 
+ * This is not applicable to the modified list as those pages would only move to the
+ * standby list during the race.
+ */
+typedef struct {
+    ULONG64 status:2;
+    DB_LL_NODE* frame_listnode;
+} ACTIVE_PAGE;
+
+
 typedef struct {
     union {
         FREE_PAGE free_page;
         MODIFIED_PAGE modified_page;
         STANDBY_PAGE standby_page;
+        ACTIVE_PAGE active_page;
     };
 } PAGE;
 #endif
@@ -121,9 +141,11 @@ typedef struct {
     DB_LL_NODE* listheads[NUM_FRAME_LISTS];
 
     // BW: Note the potential for race conditions keeping track of this!  
-    ULONG64 list_lengths[NUM_FRAME_LISTS]; 
+    volatile ULONG64 list_lengths[NUM_FRAME_LISTS]; 
 
     ULONG64 curr_list_idx;
+
+    CRITICAL_SECTION list_locks[NUM_FRAME_LISTS];
     // LOCK
 } FREE_FRAMES_LISTS;
 #endif
@@ -144,11 +166,11 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames);
 
 
 /**
- * Zeroes out the memory on the physical frame so that it can be allocated to a new process without privacy loss
+ * Zeroes out the memory on the physical frame so that it can be reallocated to without privacy loss
  * 
  * Returns SUCCESS if no issues, ERROR otherwise
  */
-int zero_out_pte(PTE* pte);
+int zero_out_page(PAGE* page);
 
 
 /**
@@ -161,7 +183,7 @@ int zero_out_pte(PTE* pte);
 #define MODIFIED_LIST_T
 typedef struct {
     DB_LL_NODE* listhead;
-    ULONG64 list_length;
+    volatile ULONG64 list_length;
     CRITICAL_SECTION lock;
 
 } MODIFIED_LIST;
@@ -190,13 +212,6 @@ int modified_add_page(PAGE* page, MODIFIED_LIST* modified_list);
 PAGE* modified_pop_page(MODIFIED_LIST* modified_list);
 
 
-/**
- * Rescues the page associated with the given PTE in the modified list, if it is there
- * 
- * Returns a pointer to the rescued page, or NULL upon error or if the page cannot be found
- */
-PAGE* modified_rescue_page(MODIFIED_LIST* modified_list, PTE* pte);
-
 #endif
 
 
@@ -211,7 +226,7 @@ PAGE* modified_rescue_page(MODIFIED_LIST* modified_list, PTE* pte);
 
 typedef struct {
     DB_LL_NODE* listhead;
-    ULONG64 list_length;
+    volatile ULONG64 list_length;
     CRITICAL_SECTION lock;
 
 } STANDBY_LIST;
@@ -231,19 +246,8 @@ STANDBY_LIST* initialize_standby_list();
  */
 int standby_add_page(PAGE* page, STANDBY_LIST* standby_list);
 
-/**
- * Pops the oldest page from the standby list and returns it
- * 
- * Returns NULL upon any error or if the list is empty
- */
-PAGE* standby_pop_page(STANDBY_LIST* standby_list);
 
-
-/**
- * Rescues the page associated with the given PTE in the standby list, if it is there
- * 
- * Returns a pointer to the rescued page, or NULL upon error or if the page cannot be found
- */
-PAGE* standby_rescue_page(STANDBY_LIST* standby_list, PTE* pte);
+// Standby_pop_page requires access to other PTEs, and therefore the global pagetable, so it is not in
+// this header.
 
 #endif

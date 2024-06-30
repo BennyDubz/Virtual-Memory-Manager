@@ -16,6 +16,10 @@
 
 extern PAGE* page_storage_base;
 
+extern volatile ULONG64 total_available_pages;
+
+extern ULONG64 physical_page_count;
+
 /**
  * GLOBAL DATASTRUCTURES
  */
@@ -44,9 +48,11 @@ extern HANDLE pagetable_to_modified_event;
 
 extern HANDLE modified_to_standby_event;
 
-HANDLE disk_write_available_event;
+extern HANDLE disk_write_available_event;
 
-HANDLE disk_read_available_event;
+extern HANDLE disk_read_available_event;
+
+extern HANDLE disk_open_slots_event;
 
 extern ULONG64 num_child_threads;
 

@@ -12,6 +12,7 @@
 static int initialize_disk_write(DISK* disk);
 static int initialize_disk_read(DISK* disk);
 
+
 /**
  * Initializes the disk and commits the memory for it in the simulating process's virtual address space
  * 
@@ -31,6 +32,8 @@ DISK* initialize_disk() {
         fprintf(stderr, "Unable to virtual alloc memory for the disk base in initialize_disk\n");
         return NULL;
     }
+
+    disk->base_address = disk_base;
     
     // Set all disk slots to free
     for (ULONG64 disk_idx = 0; disk_idx < DISK_STORAGE_SLOTS; disk_idx++) {

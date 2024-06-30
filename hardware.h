@@ -22,7 +22,7 @@
 // This is intentionally a power of two so we can use masking to stay
 // within bounds.
 //
-#define VIRTUAL_ADDRESS_SIZE        MB(16)
+#define VIRTUAL_ADDRESS_SIZE        MB(8)
 
 #define VIRTUAL_ADDRESS_SIZE_IN_UNSIGNED_CHUNKS        (VIRTUAL_ADDRESS_SIZE / sizeof (ULONG_PTR))
 
@@ -30,7 +30,8 @@
 
 #define CACHE_SIZE      KB(16)
 
-#define DISK_SIZE       MB(16)
+#define DISK_SIZE       VIRTUAL_ADDRESS_SIZE
+
 //
 // Deliberately use a physical page pool that is approximately 1% of the
 // virtual address space !

@@ -110,3 +110,24 @@ BOOL is_transition_format(PTE pte) {
 BOOL is_used_pte(PTE pte) {
     return pte.memory_format.frame_number != 0;
 }
+
+
+/**
+ * Returns TRUE if both PTEs are equivalent, FALSE otherwise
+ */
+BOOL ptes_are_equal(PTE pte1, PTE pte2) {
+    if (is_memory_format(pte1) && is_memory_format(pte2)) {
+        return (pte1.memory_format.frame_number == pte2.memory_format.frame_number
+            && pte1.memory_format.age == pte2.memory_format.age);
+    }
+
+    if (is_transition_format(pte1) && is_transition_format(pte2)) {
+        return (pte1.transition_format.frame_number == pte2.transition_format.frame_number);
+    }
+
+    if (is_disk_format(pte1) && is_disk_format(pte2)) {
+        return (pte1.disk_format.pagefile_idx == pte2.disk_format.pagefile_idx);
+    }
+
+    return FALSE;
+}
