@@ -10,11 +10,29 @@
 #include "./hardware.h"
 
 
+#define NUM_USERMODE_THREADS        1
+#define ACCESS_AMOUNT       MB(1)
+
+HANDLE simulation_threads[NUM_USERMODE_THREADS];
+volatile ULONG64 total_fault_failures = 0;
+
+// For passing to each thread for the simulation
+typedef struct {
+    PULONG_PTR vmem_base;
+    ULONG_PTR virtual_address_size;
+} SIM_PARAMS;
+
+int thread_access_random_addresses(void* params);
+
+/**
+ * Initializes the virtual memory state machine simulation and creates threads to access addresses
+ * and stress-test the system
+ */
 void usermode_virtual_memory_simulation () {
-    unsigned i;
+    ULONG64 i;
     BOOL page_faulted;
     PULONG_PTR arbitrary_va;
-    unsigned random_number;
+    ULONG64 random_number;
     PULONG_PTR vmem_base;
     ULONG_PTR virtual_address_size;
 
@@ -25,13 +43,60 @@ void usermode_virtual_memory_simulation () {
 
     ULONG64 virtual_address_size_in_unsigned_chunks = virtual_address_size / sizeof(ULONG_PTR);
 
+    SIM_PARAMS thread_params;
+
+    thread_params.virtual_address_size = virtual_address_size;
+    thread_params.vmem_base = vmem_base;
     srand (time (NULL));
+
+    // Start off all threads
+    for (int user_thread_num = 0; user_thread_num < NUM_USERMODE_THREADS; user_thread_num++) {
+        simulation_threads[user_thread_num] = CreateThread(NULL, 0, 
+                (LPTHREAD_START_ROUTINE) thread_access_random_addresses, (LPVOID) &thread_params, 0, NULL);
+    }
+
+
+    // Wait for thread completion
+    for (int user_thread_num = 0; user_thread_num < NUM_USERMODE_THREADS; user_thread_num++) {
+        WaitForSingleObject(simulation_threads[user_thread_num], INFINITE);
+    }
+    
+    printf ("usermode_virtual_memory_simulation : finished accessing %d random virtual addresses over %d threads\n", ACCESS_AMOUNT * NUM_USERMODE_THREADS, NUM_USERMODE_THREADS);
+    printf ("usermode_virtual_memory_simulation : total of 0x%llx fault failures\n", total_fault_failures);
+
+    //
+    // Now that we're done with our memory we can be a good
+    // citizen and free it.
+    //
+
+    VirtualFree (vmem_base, 0, MEM_RELEASE);
+
+    return;
+}
+
+
+int thread_access_random_addresses(void* params) {
+    ULONG64 i;
+    BOOL page_faulted;
+    PULONG_PTR arbitrary_va;
+    ULONG64 random_number;
+    PULONG_PTR vmem_base;
+    ULONG_PTR virtual_address_size;
+
+
+    SIM_PARAMS* parameters = (SIM_PARAMS*) params;
+
+    virtual_address_size = parameters->virtual_address_size;
+    vmem_base = parameters->vmem_base;
+
+    ULONG64 virtual_address_size_in_unsigned_chunks = virtual_address_size / sizeof(ULONG_PTR);
+
     int fault_result;
     arbitrary_va = NULL;
-    // srand(1);
-    ULONG64 total_fault_failures = 0;
 
-    for (i = 0; i < MB (1); i += 1) {
+    printf("Thread starting\n");
+
+    for (i = 0; i < ACCESS_AMOUNT; i += 1) {
 
         // // Signal aging (temporary)
         // if (i % 8 == 0) {
@@ -40,7 +105,7 @@ void usermode_virtual_memory_simulation () {
 
         // If we fail a page fault, we will want to try the address again and not change it
         if (arbitrary_va == NULL) {
-            random_number = rand () * rand() * rand();
+            random_number = rand () * rand() * rand() * rand() * rand();
 
             random_number %= virtual_address_size_in_unsigned_chunks;
 
@@ -77,18 +142,11 @@ void usermode_virtual_memory_simulation () {
         //BW: ELSE: we mark the relevant PTE as accessed (real hardware would do this for us)
     }
 
-    printf ("usermode_virtual_memory_simulation : finished accessing %u random virtual addresses\n", i);
-    printf ("usermode_virtual_memory_simulation : total of %llx fault failures\n", total_fault_failures);
+    printf("Thread complete\n");
 
-    //
-    // Now that we're done with our memory we can be a good
-    // citizen and free it.
-    //
-
-    VirtualFree (vmem_base, 0, MEM_RELEASE);
-
-    return;
+    return SUCCESS;
 }
+
 
 void main (int argc, char** argv) {
 

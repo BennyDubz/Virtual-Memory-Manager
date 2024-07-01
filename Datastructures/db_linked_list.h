@@ -14,6 +14,7 @@
 typedef struct NODE {
     struct NODE* flink;
     struct NODE* blink;
+    struct NODE* listhead_ptr;
     void* item;
 } DB_LL_NODE;
 
@@ -90,4 +91,4 @@ void* db_pop_from_tail(DB_LL_NODE* listhead);
  * 
  * Returns NULL upon error
  */
-void* db_remove_from_middle(DB_LL_NODE* middle_node);
+void* db_remove_from_middle(DB_LL_NODE* listhead, DB_LL_NODE* middle_node);

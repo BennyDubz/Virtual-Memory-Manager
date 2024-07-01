@@ -22,7 +22,7 @@
 // This is intentionally a power of two so we can use masking to stay
 // within bounds.
 //
-#define VIRTUAL_ADDRESS_SIZE        MB(8)
+#define VIRTUAL_ADDRESS_SIZE        MB(64)
 
 #define VIRTUAL_ADDRESS_SIZE_IN_UNSIGNED_CHUNKS        (VIRTUAL_ADDRESS_SIZE / sizeof (ULONG_PTR))
 

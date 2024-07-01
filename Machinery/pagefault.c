@@ -315,11 +315,13 @@ int pagefault(PULONG_PTR virtual_address) {
 = * 
  */
 ULONG64 wait_count = 0;
+ULONG64 successful_rescue_count = 0;
+ULONG64 successful_disk_read_count = 0;
 int pagefault(PULONG_PTR virtual_address) {
     fault_count++;
-    if (fault_count % 4096 == 0) {
-        printf("Curr fault count %llX\n", fault_count);
-    }
+    // if (fault_count % 4096 == 0) {
+    //     printf("Curr fault count %llX\n", fault_count);
+    // }
 
     /**
      * Temporary ways to induce trimming and aging
@@ -350,14 +352,30 @@ int pagefault(PULONG_PTR virtual_address) {
         allocated_page = handle_unaccessed_pte_fault(local_pte);
     } else if (is_transition_format(local_pte)) {
         allocated_page = handle_transition_pte_fault(local_pte);
+
+        if (allocated_page != NULL) {
+            successful_rescue_count++;
+            if (successful_rescue_count % 4096 == 0) {
+                printf("\tSuccessful rescue count: %llX\n", successful_rescue_count);
+            }
+        }
+
     } else if (is_disk_format(local_pte)) {
         allocated_page = handle_disk_pte_fault(local_pte);
+
+        if (allocated_page != NULL) {
+            successful_disk_read_count++;
+            // if (successful_disk_read_count % 4096 == 0) {
+            //     printf("\tSuccessful disk read count: %llX\n", successful_disk_read_count);
+            // }
+        }
     }
 
     // For whatever reason the relevant handler failed, so we should retry the fault
     if (allocated_page == NULL) {
         return ERROR;
     }
+
 
     CRITICAL_SECTION* pte_lock = pte_to_lock(accessed_pte);
 
@@ -451,11 +469,21 @@ static PAGE* find_available_page() {
         return allocated_page;
     }
 
-    // Now we have to try on the standby list (locks are acquired inside standby_pop_page)
-    if ((allocated_page = standby_pop_page(standby_list)) == NULL) {
+    /**
+     * Now we have to try to get a page from the standby list
+     */
+
+
+    /**
+     * By checking if the length is 0 first, we can avoid contending for the standby list lock and hopefully
+     * have a page more quickly. A page could be added to the standby list in between the checks, but that would
+     * be rare - reducing the standby list contention is going to be more impactful
+     */
+    if ((standby_list->list_length == 0) ||
+        (allocated_page = standby_pop_page(standby_list)) == NULL) {
 
         SetEvent(trimming_event);
-        
+
         wait_count++;
         WaitForSingleObject(waiting_for_pages_event, INFINITE);
 
@@ -526,10 +554,15 @@ static int modified_rescue_page(PAGE* rescue_page) {
         return ERROR;
     }
 
-    if (db_remove_from_middle(rescue_page->modified_page.frame_listnode) == ERROR) {
+    // The trimming thread is in moving this from the modified list to the standby list.
+    // The rescue failing here should hopefully only be temporary
+    if (rescue_page->modified_page.frame_listnode->listhead_ptr != modified_list->listhead) {
         LeaveCriticalSection(&modified_list->lock);
         return ERROR;
     }
+
+    db_remove_from_middle(modified_list->listhead, rescue_page->modified_page.frame_listnode);
+    modified_list->list_length--;
 
     rescue_page->active_page.status = ACTIVE_STATUS;
 
@@ -570,7 +603,20 @@ static int standby_rescue_page(PAGE* rescue_page) {
         return ERROR;
     }
 
-    db_remove_from_middle(rescue_page->standby_page.frame_listnode);
+    // Someone was able to remove the page from the standby list before we reached it
+    if (rescue_page->standby_page.frame_listnode->listhead_ptr != standby_list->listhead) {
+        // In the current implementation, this should not happen
+        DebugBreak();
+        LeaveCriticalSection(&standby_list->lock);
+        return ERROR;
+    }
+
+    db_remove_from_middle(standby_list->listhead, rescue_page->standby_page.frame_listnode);
+    standby_list->list_length--;
+
+    // Since we are rescuing the page, we don't need it on disk right now.
+    // BW: Later, we can take shortcuts adding the page straight to the standby list if it hasn't been modified
+    return_disk_slot(rescue_page->standby_page.pagefile_idx);
 
     rescue_page->active_page.status = ACTIVE_STATUS;
 
@@ -623,6 +669,7 @@ static PAGE* standby_pop_page() {
 
     // We must modify the other PTE to reflect that it is on the disk
     EnterCriticalSection(pte_to_lock(old_pte));
+
     old_pte->disk_format.on_disk = 1;
     old_pte->disk_format.pagefile_idx = popped->standby_page.pagefile_idx;
 

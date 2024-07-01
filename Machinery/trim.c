@@ -195,53 +195,80 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
     while(TRUE) {
         WaitForSingleObject(modified_to_standby_event, INFINITE);
 
-        // num_writing_threads = 0;
-
-        EnterCriticalSection(&modified_list->lock);
-
         num_to_write = min(MAX_PAGES_TO_WRITE, modified_list->list_length);
-        
-        for (ULONG64 curr_page = 0; curr_page < num_to_write; curr_page++) {
-            
-            /**
-             * Note that another thread may be trying to access this exact PTE and rescue it from the modified list,
-             * so if we fail to acquire this PTE lock then we should throw this page at the back of the modified list
-             * and continue (the loop might end here, too)
-             */
-            
-            // We CANNOT pop pages directly since they could be rescued.
+        ULONG64 curr_page = 0;        
+        while (curr_page < num_to_write) {
+            EnterCriticalSection(&modified_list->lock);
+
+            // From this line onward until it is added to the standby list, this page cannot be rescued
             potential_page = (PAGE*) modified_pop_page(modified_list);
 
-            // Since we release the modified list lock at the end, someone else could come in and rescue pages from the
+            // Since we release the modified list lock during this, someone else could come in and rescue pages from the
             // modified list, emptying it, meaning the work here is done until we are signaled again
-            if (potential_page == NULL) break;
+            if (potential_page == NULL) {
+                LeaveCriticalSection(&modified_list->lock);
+                break;
+            }
 
+            /**
+             * Not currently feasible as there must be some way to tell whether the page has been rescued in an atomic
+             * operation once we have acquired the standby lock. In the meantime, we will still hold onto the modified lock
+             * and be forced to make rescues fail while their pages are between the modified and standby lists
+             */
+            #if 0 
+            // Now that we have popped the page from the modified list, we no longer need the lock as we are not
+            // modifying the datastructure. That makes
+            LeaveCriticalSection(&modified_list->lock);
 
+           
             if (write_to_disk(potential_page, &disk_storage_idx) == ERROR) {
-                // fprintf(stderr, "Failed to write pte to disk in thread_modified_to_standby\n");
-                modified_add_page(potential_page, modified_list);
+                EnterCriticalSection(&modified_list->lock);
+
+                /**
+                 * We must check that the page is still in modified status. If it is active (or anything else),
+                 * that means that it has been rescued while we tried to write it to disk. If that is the case,
+                 * we cannot re-add it to the modified list.
+                 */
+                if (potential_page->modified_page.status == MODIFIED_STATUS) {
+                    /**
+                     * We must also protect ourselves against the scenario where the page was rescued, trimmed, and
+                     * added back to the modified list before we were able to acquire the lock. In that case,
+                     * we do not want to add it to the list again as we would have a duplicate.
+                     */
+                    if (potential_page->modified_page.frame_listnode == NULL) {
+                        modified_add_page(potential_page, modified_list);
+                    }
+                }
                 
                 // We will need to wait for more disk slots to be open in order to continue writing to the disk
                 LeaveCriticalSection(&modified_list->lock);
                 WaitForSingleObject(disk_open_slots_event, INFINITE);
-                EnterCriticalSection(&modified_list->lock);
 
                 // We will still want to keep looking
                 curr_page--;
 
                 continue;      
             }
+            #endif
 
-            // Wait times for standby list should be brief, but we do not need the modified list lock in the meantime
-            // so someone else can try to add to or rescue pages from it
-            // LeaveCriticalSection(&modified_list->lock);
+            if (write_to_disk(potential_page, &disk_storage_idx) == ERROR) {
+                
+                // We will want to try again with this page later
+                modified_add_page(potential_page, modified_list);
+                
+                // We will need to wait for more disk slots to be open in order to continue writing to the disk
+                LeaveCriticalSection(&modified_list->lock);
+                WaitForSingleObject(disk_open_slots_event, INFINITE);
 
-            // What if someone tries to find it in modified section in meantime?
+                // We purposefully do not increment curr_page here so that we still try to write pages to disk
+                continue;      
+            }
 
+            LeaveCriticalSection(&modified_list->lock);
+
+            // Remember, as of now the page CANNOT be rescued in this interim
             EnterCriticalSection(&standby_list->lock);
 
-            //BW: Note the gap where this will be in none of the lists - but the PTE
-            // is still in transition format. This means that the rescue could fail.
             potential_page->standby_page.status = STANDBY_STATUS;
             potential_page->standby_page.pagefile_idx = disk_storage_idx;
 
@@ -251,8 +278,9 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
 
             LeaveCriticalSection(&standby_list->lock);
 
+            curr_page++;
         }
-        LeaveCriticalSection(&modified_list->lock);
+
         sb_count++;
     }
     
@@ -443,7 +471,7 @@ int read_from_disk(PAGE* open_page, ULONG64 disk_idx) {
 
     memcpy(read_slot->rw_address, disk_slot_addr, (size_t) PAGE_SIZE);
 
-    // Map the CPU
+    // Unmap the CPU
     if (MapUserPhysicalPages (read_slot->rw_address, 1, NULL) == FALSE) {
         fprintf (stderr, "read_from_disk : could not unmap VA %p\n", read_slot->rw_address);
         DebugBreak();
