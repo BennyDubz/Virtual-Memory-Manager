@@ -168,7 +168,7 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames);
 /**
  * Zeroes out the memory on the physical frame so that it can be reallocated to without privacy loss
  * 
- * Returns SUCCESS if no issues, ERROR otherwise
+ * Returns SUCCESS if there are no issues, ERROR otherwise
  */
 int zero_out_page(PAGE* page);
 

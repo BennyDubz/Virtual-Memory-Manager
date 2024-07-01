@@ -18,9 +18,29 @@
 
 
 ULONG64 fault_count = 0;
-PAGE* rescue_pte(PTE pte);
 
+/**
+ * Function declarations
+ */
+static PAGE* rescue_pte(PTE pte);
 
+static PAGE* handle_unaccessed_pte_fault(PTE local_pte);
+
+static PAGE* handle_transition_pte_fault(PTE local_pte);
+
+static PAGE* handle_disk_pte_fault(PTE local_pte);
+
+static PAGE* find_available_page();
+
+static int standby_rescue_page(PAGE* rescue_page);
+
+static int modified_rescue_page(PAGE* rescue_page);
+
+static PAGE* standby_pop_page();
+
+static void free_frames_add(PAGE* page);
+
+# if 0
 /**
  * Handles the page fault for the given virtual address
  * 
@@ -283,7 +303,7 @@ int pagefault(PULONG_PTR virtual_address) {
     }
     #endif
 }
-
+#endif
 
 
 /**
@@ -294,7 +314,8 @@ int pagefault(PULONG_PTR virtual_address) {
  * PTE was modified by another thread in the meantime
 = * 
  */
-int pagefault2(PULONG_PTR virtual_address) {
+ULONG64 wait_count = 0;
+int pagefault(PULONG_PTR virtual_address) {
     fault_count++;
     if (fault_count % 4096 == 0) {
         printf("Curr fault count %llX\n", fault_count);
@@ -303,13 +324,13 @@ int pagefault2(PULONG_PTR virtual_address) {
     /**
      * Temporary ways to induce trimming and aging
      */
-    if ((total_available_pages < (physical_page_count / 2)) && (fault_count % 16) == 0) {
-        SetEvent(aging_event);
-    }
+    // if ((total_available_pages < (physical_page_count / 2)) && (fault_count % 16) == 0) {
+    //     SetEvent(aging_event);
+    // }
     
-    if ((total_available_pages < (physical_page_count / 3) && (fault_count % 4) == 0)) {
-        SetEvent(trimming_event);
-    }
+    // if ((total_available_pages < (physical_page_count / 3) && (fault_count % 4) == 0)) {
+    //     SetEvent(trimming_event);
+    // }
 
 
     PTE* accessed_pte = va_to_pte(virtual_address);
@@ -323,21 +344,44 @@ int pagefault2(PULONG_PTR virtual_address) {
     PTE local_pte = *accessed_pte;
     PAGE* allocated_page;
 
+    if (is_memory_format(local_pte)) {
+        return SUCCESS;
+    } else if (is_used_pte(local_pte) == FALSE) {
+        allocated_page = handle_unaccessed_pte_fault(local_pte);
+    } else if (is_transition_format(local_pte)) {
+        allocated_page = handle_transition_pte_fault(local_pte);
+    } else if (is_disk_format(local_pte)) {
+        allocated_page = handle_disk_pte_fault(local_pte);
+    }
 
-    EnterCriticalSection(pte_to_lock(accessed_pte));
+    // For whatever reason the relevant handler failed, so we should retry the fault
+    if (allocated_page == NULL) {
+        return ERROR;
+    }
+
+    CRITICAL_SECTION* pte_lock = pte_to_lock(accessed_pte);
+
+    EnterCriticalSection(pte_lock);
     if (ptes_are_equal(local_pte, *accessed_pte) == FALSE) {
 
         /**
+         * Return the page to the free-list and return ERROR
+         * 
          * BW: Later, we need to zero-out pages that were acquired in the failure case
          *  in another thread and re-add them to the free-list
          */ 
 
-
+        free_frames_add(allocated_page);
+        LeaveCriticalSection(pte_lock);
+        return ERROR;
     }
 
+    // Connect the PTE to the pfn through the CPU 
+    connect_pte_to_pfn(accessed_pte, page_to_pfn(allocated_page));
 
-    EnterCriticalSection(pte_to_lock(accessed_pte));
+    LeaveCriticalSection(pte_lock);
 
+    return SUCCESS;
 }   
 
 
@@ -346,7 +390,13 @@ int pagefault2(PULONG_PTR virtual_address) {
  * 
  * Returns a pointer to the page that is allocated to the PTE, or NULL if it fails
  */
-PAGE* handle_unaccessed_pte_fault(PTE local_pte);
+static PAGE* handle_unaccessed_pte_fault(PTE local_pte) {
+
+    /**
+     * In this case, all we need to do is get a valid page and return it - nothing else
+     */
+    return find_available_page();
+}
 
 
 /**
@@ -355,8 +405,9 @@ PAGE* handle_unaccessed_pte_fault(PTE local_pte);
  * 
  * Returns a pointer to the rescued page, or NULL if it could not be rescued
  */
-PAGE* handle_transition_pte_fault(PTE local_pte);
-
+static PAGE* handle_transition_pte_fault(PTE local_pte) {
+    return rescue_pte(local_pte);
+}
 
 
 /**
@@ -365,23 +416,55 @@ PAGE* handle_transition_pte_fault(PTE local_pte);
  * 
  * Returns a pointer to the page with the restored contents on it
  */
-PAGE* handle_disk_pte_fault(PTE local_pte);
+static PAGE* handle_disk_pte_fault(PTE local_pte) {
+    PAGE* allocated_page = find_available_page();
 
+    if (allocated_page == NULL) {
+        return NULL;
+    }
+
+    ULONG64 disk_idx = local_pte.disk_format.pagefile_idx;
+    
+    // Another thread could have rescued this frame ahead of us
+    if (read_from_disk(allocated_page, disk_idx) == ERROR) {
+        // BW: Here, we would want to add it to the zero-out thread!
+        free_frames_add(allocated_page);
+        return NULL;
+    }
+
+    return allocated_page;
+}
 
 
 /**
- * 1. Check if the PTE is used...
+ * Finds an available page from either the free or standby list and returns it
  * 
- * 2. Memory format --> continue
- * 
- * 3. Transition format --> attempt to rescue PTE. If it fails,
- *      then we could be in ANY of the three formats, so we need to check again.
- * 
- * 
- * 
- *  
+ * Returns NULL if there were no pages available at the time
  */
+static PAGE* find_available_page() {
 
+    PAGE* allocated_page;
+
+    // If we succeed on the free list, we don't have to do anything else
+    if ((allocated_page = allocate_free_frame(free_frames)) != NULL) {
+        total_available_pages--;
+        return allocated_page;
+    }
+
+    // Now we have to try on the standby list (locks are acquired inside standby_pop_page)
+    if ((allocated_page = standby_pop_page(standby_list)) == NULL) {
+
+        SetEvent(trimming_event);
+        
+        wait_count++;
+        WaitForSingleObject(waiting_for_pages_event, INFINITE);
+
+        return NULL;
+    }
+
+    total_available_pages--;
+    return allocated_page;
+}
 
 
 /**
@@ -390,7 +473,7 @@ PAGE* handle_disk_pte_fault(PTE local_pte);
  * 
  * Returns a pointer to the popped page upon success, NULL if it could not be found
  */
-PAGE* rescue_pte(PTE pte) {
+static PAGE* rescue_pte(PTE pte) {
 
     ULONG64 pfn = pte.transition_format.frame_number;
 
@@ -418,6 +501,10 @@ PAGE* rescue_pte(PTE pte) {
         }
     }
 
+    /**
+     * At this point, the page was either rescued by another thread or was recycled and given to someone
+     * else. Regardless, the page fault must be re-attempted as this thread's rescue operation failed
+     */
     return NULL;
 }
 
@@ -427,19 +514,22 @@ PAGE* rescue_pte(PTE pte) {
  * 
  * Returns SUCCESS if the rescue page was found and removed, ERROR otherwise
  */
-int modified_rescue_page(PAGE* rescue_page) {
+static int modified_rescue_page(PAGE* rescue_page) {
     if (rescue_page == NULL) {
         fprintf(stderr, "NULL modified list or rescue_page given to modified_rescue_page\n");
     }
     
     EnterCriticalSection(&modified_list->lock);
 
-    if (rescue_page->standby_page.status != MODIFIED_STATUS) {
+    if (rescue_page->modified_page.status != MODIFIED_STATUS) {
         LeaveCriticalSection(&modified_list->lock);
         return ERROR;
     }
 
-    db_remove_from_middle(rescue_page->standby_page.frame_listnode);
+    if (db_remove_from_middle(rescue_page->modified_page.frame_listnode) == ERROR) {
+        LeaveCriticalSection(&modified_list->lock);
+        return ERROR;
+    }
 
     rescue_page->active_page.status = ACTIVE_STATUS;
 
@@ -468,7 +558,7 @@ int modified_rescue_page(PAGE* rescue_page) {
  * 
  * Returns SUCCESS if the rescue page was found and removed, ERROR otherwise
  */
-int standby_rescue_page(PAGE* rescue_page) {
+static int standby_rescue_page(PAGE* rescue_page) {
     if (standby_list == NULL || rescue_page == NULL) {
         fprintf(stderr, "NULL standby list or rescue page given to standby_rescue_page\n");
     }
@@ -483,6 +573,8 @@ int standby_rescue_page(PAGE* rescue_page) {
     db_remove_from_middle(rescue_page->standby_page.frame_listnode);
 
     rescue_page->active_page.status = ACTIVE_STATUS;
+
+    total_available_pages--;
 
     // DB_LL_NODE* curr_node = standby_list->listhead->flink;
     // while (curr_node != standby_list->listhead) {
@@ -512,29 +604,66 @@ int standby_rescue_page(PAGE* rescue_page) {
 
 /**
  * Pops and returns a pointer to the oldest page from the standby list and returns it, 
- * and modifies its old PTE to be in the disk format
+ * and modifies its old PTE to be in the disk format.
  * 
  * Returns NULL upon any error or if the list is empty
  */
-PAGE* standby_pop_page() {
+static PAGE* standby_pop_page() {
+
+    EnterCriticalSection(&standby_list->lock);
 
     PAGE* popped = db_pop_from_tail(standby_list->listhead);
     if (popped == NULL) {
+        LeaveCriticalSection(&standby_list->lock);
         return NULL;
     }
 
     standby_list->list_length -= 1;
-
     PTE* old_pte = popped->standby_page.pte;
 
     // We must modify the other PTE to reflect that it is on the disk
     EnterCriticalSection(pte_to_lock(old_pte));
-
     old_pte->disk_format.on_disk = 1;
     old_pte->disk_format.pagefile_idx = popped->standby_page.pagefile_idx;
+
+    // This ensures that any PTE attempting to rescue this page when it acquires the standby
+    // lock will fail
     popped->active_page.status = ACTIVE_STATUS;
 
     LeaveCriticalSection(pte_to_lock(old_pte));
 
+    total_available_pages--;
+
+    LeaveCriticalSection(&standby_list->lock);
+
     return popped;
 }   
+
+
+/**
+ * Adds the given page to its proper slot in the free list
+ * 
+ * As of now, does NOT zero out the page!
+ * 
+ * Returns SUCCESS if there are no issues, ERROR otherwise
+ */
+static void free_frames_add(PAGE* page) {
+    // Modulo operation based on the pfn to put it alongside other cache-colliding pages
+    int listhead_idx = page_to_pfn(page) % NUM_FRAME_LISTS;
+
+    DB_LL_NODE* relevant_listhead = free_frames->listheads[listhead_idx];
+
+    EnterCriticalSection(&free_frames->list_locks[listhead_idx]);
+
+    page->free_page.frame_number = page_to_pfn(page);
+    page->free_page.status = FREE_STATUS;
+    page->free_page.zeroed_out = 0; // Until we are actually zeroing out frames
+
+    db_insert_node_at_head(relevant_listhead, page->free_page.frame_listnode);
+    free_frames->list_lengths[listhead_idx] += 1;
+    total_available_pages++;
+
+    LeaveCriticalSection(&free_frames->list_locks[listhead_idx]);
+
+    SetEvent(waiting_for_pages_event);
+}

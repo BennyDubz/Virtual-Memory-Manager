@@ -76,6 +76,7 @@ ULONG64 steal_lowest_frame() {
 /**
  * Thread dedicated to trimming PTEs from the pagetable and putting them on the modified list
  */
+ULONG64 trim_count = 0;
 LPTHREAD_START_ROUTINE thread_trimming() {
     ULONG64 ptes_per_lock = pagetable->num_virtual_pages / pagetable->num_locks;
     ULONG64 section_start;
@@ -127,6 +128,7 @@ LPTHREAD_START_ROUTINE thread_trimming() {
 
 
         // Signal that the modified list should be populated
+        trim_count++;
         SetEvent(modified_to_standby_event);
     }
 }
@@ -169,6 +171,7 @@ LPTHREAD_START_ROUTINE thread_aging() {
 /**
  * Thread dedicated to writing pages from the modified list to disk, putting finally adding the pages to standby
  */
+ULONG64 sb_count = 0;
 #define MAX_PAGES_TO_WRITE 16
 LPTHREAD_START_ROUTINE thread_modified_to_standby() {
     // Variables dedicated to finding and extracting pages to write from the modified list 
@@ -179,7 +182,6 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
     PAGE* potential_page;
     // PAGE** pages_currently_writing[MAX_PAGES_TO_WRITE];
     PTE* relevant_PTE;
-    DB_LL_NODE* curr_modified_node;
     ULONG64 disk_storage_idx;
 
     #if 0
@@ -199,9 +201,6 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
 
         num_to_write = min(MAX_PAGES_TO_WRITE, modified_list->list_length);
         
-        
-        curr_modified_node = modified_list->listhead->flink;
-
         for (ULONG64 curr_page = 0; curr_page < num_to_write; curr_page++) {
             
             /**
@@ -227,7 +226,7 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
                 WaitForSingleObject(disk_open_slots_event, INFINITE);
                 EnterCriticalSection(&modified_list->lock);
 
-                // We will still want to 
+                // We will still want to keep looking
                 curr_page--;
 
                 continue;      
@@ -235,7 +234,9 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
 
             // Wait times for standby list should be brief, but we do not need the modified list lock in the meantime
             // so someone else can try to add to or rescue pages from it
-            LeaveCriticalSection(&modified_list->lock);
+            // LeaveCriticalSection(&modified_list->lock);
+
+            // What if someone tries to find it in modified section in meantime?
 
             EnterCriticalSection(&standby_list->lock);
 
@@ -250,12 +251,11 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
 
             LeaveCriticalSection(&standby_list->lock);
 
-            EnterCriticalSection(&modified_list->lock);
         }
-
-        // printf("Successfully added to standby\n");
         LeaveCriticalSection(&modified_list->lock);
+        sb_count++;
     }
+    
 }
 
 
@@ -285,6 +285,8 @@ int connect_pte_to_pfn(PTE* pte, ULONG64 pfn) {
     if (MapUserPhysicalPages (pte_to_va(pte), 1, &pfn) == FALSE) {
 
         fprintf (stderr, "connect_pte_to_pfn : could not map VA %p\n", pte_to_va(pte));
+        DebugBreak();
+
         return ERROR;
     }
 
@@ -334,28 +336,14 @@ int write_to_disk(PAGE* transition_page, ULONG64* disk_idx_storage) {
         return ERROR;
     }
 
-    DISK_RW_SLOT* write_slot = db_pop_from_tail(disk->disk_write_listhead);
+    // DISK_RW_SLOT* write_slot = db_pop_from_tail(disk->disk_write_listhead);
 
-    #if 0 // Not necessary unless we are writing more than one page at a time
     /**
      * We need to find an open disk write slot VA, followed by mapping the pfn from this
      * page to it. This allows us to map the contents of the pfn from the temporary slot
      * to the disk without allowing the user to access the PTE and modify its contents.
      */
-
-    // EnterCriticalSection(&disk->disk_write_list_lock);
-
-    // // We need to try until we get a slot available
-    // while ((write_slot = db_pop_from_tail(disk->disk_write_listhead)) == NULL) {
-    //     LeaveCriticalSection(&disk->disk_write_list_lock);
-
-    //     WaitForSingleObject(disk_write_available_event, INFINITE);
-
-    //     EnterCriticalSection(&disk->disk_write_list_lock);
-    // }
-    // LeaveCriticalSection(&disk->disk_write_list_lock);
-    #endif
-
+    
     ULONG64 pfn = page_to_pfn(transition_page);
 
     // We need to now get an open disk slot...
@@ -369,6 +357,20 @@ int write_to_disk(PAGE* transition_page, ULONG64* disk_idx_storage) {
 
     PULONG_PTR disk_storage_addr = disk_idx_to_addr(disk_storage_slot);
 
+    DISK_RW_SLOT* write_slot;
+    EnterCriticalSection(&disk->disk_write_list_lock);
+
+    // We need to try until we get a slot available
+    while ((write_slot = db_pop_from_tail(disk->disk_write_listhead)) == NULL) {
+        LeaveCriticalSection(&disk->disk_write_list_lock);
+
+        WaitForSingleObject(disk_write_available_event, INFINITE);
+
+        EnterCriticalSection(&disk->disk_write_list_lock);
+    }
+    LeaveCriticalSection(&disk->disk_write_list_lock);
+
+
     // At this point, we know that we have a slot to write to
     // Map the CPU
     if (MapUserPhysicalPages (write_slot->rw_address, 1, &pfn) == FALSE) {
@@ -376,7 +378,6 @@ int write_to_disk(PAGE* transition_page, ULONG64* disk_idx_storage) {
         DebugBreak();
         return ERROR;
     }
-
 
     // Copy from the temporary slot to the disk
     memcpy(disk_storage_addr, write_slot->rw_address, PAGE_SIZE);
@@ -388,15 +389,15 @@ int write_to_disk(PAGE* transition_page, ULONG64* disk_idx_storage) {
         return ERROR;
     }
 
-    db_insert_node_at_head(disk->disk_write_listhead, write_slot->listnode);
+    // db_insert_node_at_head(disk->disk_write_listhead, write_slot->listnode);
 
-    #if 0 // Not necessary unless we are writing more than one page at a time
     // Add the write slot back to the list, and signal anyone waiting
     EnterCriticalSection(&disk->disk_write_list_lock);
+
     db_insert_node_at_head(disk->disk_write_listhead, write_slot->listnode);
     SetEvent(disk_write_available_event);
+
     LeaveCriticalSection(&disk->disk_write_list_lock);
-    #endif
 
     // Store the disk storage slot into the given idx storage
     *disk_idx_storage = disk_storage_slot;
@@ -410,15 +411,28 @@ int write_to_disk(PAGE* transition_page, ULONG64* disk_idx_storage) {
  * 
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
-int read_from_disk(ULONG64 pfn, ULONG64 disk_idx) {
+int read_from_disk(PAGE* open_page, ULONG64 disk_idx) {
     if (disk_idx > DISK_STORAGE_SLOTS) {
         fprintf(stderr, "Disk idx too large in read_from_disk\n");
         return ERROR;
     }
 
+    ULONG64 pfn = page_to_pfn(open_page);
+
     PULONG_PTR disk_slot_addr = disk_idx_to_addr(disk_idx);
 
-    DISK_RW_SLOT* read_slot = db_pop_from_tail(disk->disk_read_listhead);
+    DISK_RW_SLOT* read_slot;
+    EnterCriticalSection(&disk->disk_read_list_lock);
+
+    // We need to try until we get a slot available
+    while ((read_slot = db_pop_from_tail(disk->disk_read_listhead)) == NULL) {
+        LeaveCriticalSection(&disk->disk_read_list_lock);
+
+        WaitForSingleObject(disk_read_available_event, INFINITE);
+
+        EnterCriticalSection(&disk->disk_read_list_lock);
+    }
+    LeaveCriticalSection(&disk->disk_read_list_lock);
 
     // Map the CPU
     if (MapUserPhysicalPages (read_slot->rw_address, 1, &pfn) == FALSE) {
@@ -436,14 +450,21 @@ int read_from_disk(ULONG64 pfn, ULONG64 disk_idx) {
         return ERROR;
     }
 
-    db_insert_node_at_head(disk->disk_read_listhead, read_slot->listnode);
-
     if (return_disk_slot(disk_idx) == ERROR) {
         fprintf(stderr, "Failed to return disk slot to the disk\n");
         return ERROR;
     }
 
+    // Someone may need the slot on the disk
     SetEvent(disk_open_slots_event);
+
+    // Add the read slot back to the list, and signal anyone waiting
+    EnterCriticalSection(&disk->disk_read_list_lock);
+
+    db_insert_node_at_head(disk->disk_read_listhead, read_slot->listnode);
+    SetEvent(disk_read_available_event);
+
+    LeaveCriticalSection(&disk->disk_read_list_lock);
 
     return SUCCESS;
 }

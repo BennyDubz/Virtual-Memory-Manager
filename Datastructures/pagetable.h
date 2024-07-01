@@ -75,7 +75,7 @@ typedef struct {
 
     ULONG64 num_locks;
     CRITICAL_SECTION* pte_locks;
-    ULONG64* valid_pte_counts;
+    volatile ULONG64* valid_pte_counts;
     // LOCK
 } PAGETABLE;
 

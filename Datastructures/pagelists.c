@@ -146,7 +146,7 @@ FREE_FRAMES_LISTS* initialize_free_frames(PAGE* page_storage_base, ULONG64* phys
     for (int pfn_idx = 0; pfn_idx < num_physical_frames; pfn_idx++) {
         ULONG64 frame_number = physical_frame_numbers[pfn_idx];
 
-        // Modulo-operation based on the frame number, not the pte index
+        // Modulo operation based on the pfn to put it alongside other cache-colliding pages
         int listhead_idx = frame_number % NUM_FRAME_LISTS;
 
         DB_LL_NODE* relevant_listhead = free_frames->listheads[listhead_idx];
@@ -213,7 +213,7 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
              */
             local_index++;
             LeaveCriticalSection(&free_frames->list_locks[local_index]);
-
+            continue;
         }
 
         free_frames->list_lengths[free_frames->curr_list_idx] -= 1;

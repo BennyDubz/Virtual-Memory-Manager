@@ -71,7 +71,7 @@ int write_to_disk(PAGE* transition_page, ULONG64* disk_idx_storage);
  * 
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
-int read_from_disk(ULONG64 pfn, ULONG64 disk_idx);
+int read_from_disk(PAGE* open_page, ULONG64 disk_idx);
 
 
 /**
