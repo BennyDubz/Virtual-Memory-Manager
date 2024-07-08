@@ -60,7 +60,7 @@ PULONG_PTR pte_to_va(PTE* pte) {
 /**
  * Returns a pointer to the pagetable's lock governing the given PTE
  */
-CRITICAL_SECTION* pte_to_lock(PTE* pte) {
+PTE_LOCKSECTION* pte_to_locksection(PTE* pte) {
     ULONG64 base_address_pte_list = (ULONG64) pagetable->pte_list;
     ULONG64 pte_address = (ULONG64) pte;
 
@@ -68,7 +68,11 @@ CRITICAL_SECTION* pte_to_lock(PTE* pte) {
 
     LONG64 lock_index = pte_index / (pagetable->num_virtual_pages / pagetable->num_locks);
 
-    return &pagetable->pte_locks[lock_index];
+    if (lock_index >= pagetable->num_locks) {
+        DebugBreak();
+    }
+
+    return &pagetable->pte_locksections[lock_index];
 }
 
 

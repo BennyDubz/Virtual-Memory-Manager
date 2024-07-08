@@ -38,43 +38,50 @@ PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base)
     pagetable->vmem_base = (ULONG64) vmem_base;
 
     // Create empty, invalid PTEs for entire virtual address space
-    for (int virtual_page = 0; virtual_page <= num_virtual_pages; virtual_page++) {
+    for (ULONG64 virtual_page = 0; virtual_page < num_virtual_pages; virtual_page++) {
         PTE new_pte;
         
-        //BW: Ask why valid could be 1 when uninitialized
-        new_pte.memory_format.frame_number = 0;
-        new_pte.memory_format.age = 0;
-        new_pte.memory_format.valid = INVALID;
+        // This leaves the entire PTE empty - signaling it has never been used before
+        new_pte.complete_format = 0;
 
         pte_list[virtual_page] = new_pte;
     }
 
-    ULONG64 num_locks = max(num_virtual_pages >> 8, 1);
+    ULONG64 num_locks = max(num_virtual_pages >> 6, 1);
 
-    CRITICAL_SECTION* pte_locks = (CRITICAL_SECTION*) malloc(sizeof(CRITICAL_SECTION) * num_locks);
+    PTE_LOCKSECTION* pte_locksections = (PTE_LOCKSECTION*) malloc(sizeof(PTE_LOCKSECTION) * num_locks);
 
-    if (pte_locks == NULL) {
-        fprintf(stderr, "Unable to allocate memory for pagetable locks\n");
-        return NULL;
-    }
-
-    ULONG64* valid_pte_counts = (ULONG64*) malloc(sizeof(ULONG64));
-
-    if (valid_pte_counts == NULL) {
-        fprintf(stderr, "Unable to allocate memory for valid_pte_counts\n");
+    if (pte_locksections == NULL) {
+        fprintf(stderr, "Unable to allocate memory for pte locksections\n");
         return NULL;
     }
 
     for (ULONG64 curr_lock = 0; curr_lock < num_locks; curr_lock++) {
-        InitializeCriticalSection(&pte_locks[curr_lock]);
-        valid_pte_counts[curr_lock] = 0;
+        PTE_LOCKSECTION* curr_section = &pte_locksections[curr_lock];
+        InitializeCriticalSection(&curr_section->lock);
+        curr_section->valid_pte_count = 0;
     } 
 
     pagetable->num_locks = num_locks;
-    pagetable->pte_locks = pte_locks;
-    pagetable->valid_pte_counts = valid_pte_counts;
+    pagetable->pte_locksections = pte_locksections;
 
     return pagetable;
+}
+
+
+/**
+ * Returns the contents of the given PTE in one operation indivisibly
+ */
+PTE read_pte_contents(PTE* pte_to_read) {
+    return *(volatile PTE*) pte_to_read;
+}
+
+
+/**
+ * Writes the PTE contents as a single indivisble write to the given PTE pointer
+ */
+void write_pte_contents(PTE* pte_to_write, PTE pte_contents) {
+    *(volatile PTE*) pte_to_write = pte_contents; 
 }
 
 
@@ -91,7 +98,7 @@ BOOL is_memory_format(PTE pte) {
  */
 BOOL is_disk_format(PTE pte) {    
     return (pte.disk_format.always_zero == 0 && \
-        pte.disk_format.on_disk == 1);
+        pte.disk_format.always_zero2 == 0 && pte.disk_format.pagefile_idx != 0);
 }
 
 
@@ -100,15 +107,15 @@ BOOL is_disk_format(PTE pte) {
  */
 BOOL is_transition_format(PTE pte) {
     return (pte.transition_format.always_zero == 0 && \
-        pte.transition_format.always_zero2 == 0);
+        pte.transition_format.is_transition == 1);
 }
 
 
 /**
- * Returns TRUE if the PTE has ever been accessed, FALE otherwise
+ * Returns TRUE if the PTE has ever been accessed, FALSE otherwise
  */
 BOOL is_used_pte(PTE pte) {
-    return pte.memory_format.frame_number != 0;
+    return pte.complete_format != 0;
 }
 
 
@@ -116,18 +123,5 @@ BOOL is_used_pte(PTE pte) {
  * Returns TRUE if both PTEs are equivalent, FALSE otherwise
  */
 BOOL ptes_are_equal(PTE pte1, PTE pte2) {
-    if (is_memory_format(pte1) && is_memory_format(pte2)) {
-        return (pte1.memory_format.frame_number == pte2.memory_format.frame_number
-            && pte1.memory_format.age == pte2.memory_format.age);
-    }
-
-    if (is_transition_format(pte1) && is_transition_format(pte2)) {
-        return (pte1.transition_format.frame_number == pte2.transition_format.frame_number);
-    }
-
-    if (is_disk_format(pte1) && is_disk_format(pte2)) {
-        return (pte1.disk_format.pagefile_idx == pte2.disk_format.pagefile_idx);
-    }
-
-    return FALSE;
+    return (pte1.complete_format == pte2.complete_format);
 }

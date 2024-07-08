@@ -22,10 +22,11 @@
 #define STANDBY_STATUS 2
 #define ACTIVE_STATUS 3
 
+
 #ifndef PAGE_T
 #define PAGE_T
 typedef struct {
-    ULONG64 status:2;
+    volatile ULONG64 status:2;
 
     DB_LL_NODE* frame_listnode;
     ULONG64 frame_number:40;
@@ -39,7 +40,7 @@ typedef struct {
 } FREE_PAGE;
 
 typedef struct {
-    ULONG64 status:2;
+    volatile ULONG64 status:2;
     DB_LL_NODE* frame_listnode;
     PTE* pte;
 
@@ -47,10 +48,9 @@ typedef struct {
 } MODIFIED_PAGE;
 
 typedef struct {
-    ULONG64 status:2;
+    volatile ULONG64 status:2;
     DB_LL_NODE* frame_listnode;
     PTE* pte;
-    //BW: Make more space efficient later - calculate how many bits are needed based off hardware
     ULONG64 pagefile_idx:40; 
 } STANDBY_PAGE;
 
@@ -65,9 +65,12 @@ typedef struct {
  * This is not applicable to the modified list as those pages would only move to the
  * standby list during the race.
  */
+
 typedef struct {
     ULONG64 status:2;
     DB_LL_NODE* frame_listnode;
+    PTE* pte;
+    ULONG64 pagefile_idx:40;
 } ACTIVE_PAGE;
 
 
@@ -142,11 +145,11 @@ typedef struct {
 
     // BW: Note the potential for race conditions keeping track of this!  
     volatile ULONG64 list_lengths[NUM_FRAME_LISTS]; 
-
-    ULONG64 curr_list_idx;
+    volatile ULONG64 total_available;
+    volatile ULONG64 curr_list_idx;
 
     CRITICAL_SECTION list_locks[NUM_FRAME_LISTS];
-    // LOCK
+    
 } FREE_FRAMES_LISTS;
 #endif
 

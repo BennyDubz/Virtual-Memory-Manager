@@ -192,14 +192,16 @@ int init_all(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memory_size_storage
     int return_code;
 
     return_code = init_simulation(vmem_base_storage, virtual_memory_size_storage);
-
+    printf("Initialized simulation\n");
     if (return_code == ERROR) return ERROR;
 
     return_code = init_datastructures();
+    printf("Initialized datastrucures\n");
 
     if (return_code == ERROR) return ERROR;
 
     return_code = init_multithreading();
+    printf("Initialized threads\n");
 
     if (return_code == ERROR) return ERROR;
 
@@ -361,10 +363,11 @@ static int init_datastructures() {
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
 static int init_multithreading() {
+    
 
     //BW: This could later be turned into a manual-reset lock if we are able to write
     // multiple pages to standby simultaneously, but right now we do it one page at a time
-    waiting_for_pages_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+    waiting_for_pages_event = CreateEvent(NULL, TRUE, FALSE, NULL);
 
     aging_event = CreateEvent(NULL, FALSE, FALSE, NULL);
 

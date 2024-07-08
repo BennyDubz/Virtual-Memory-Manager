@@ -28,7 +28,7 @@ PULONG_PTR pte_to_va(PTE* pte);
 /**
  * Returns a pointer to the pagetable's lock governing the given PTE
  */
-CRITICAL_SECTION* pte_to_lock(PTE* pte);
+PTE_LOCKSECTION* pte_to_locksection(PTE* pte);
 
 
 /**

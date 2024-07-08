@@ -40,7 +40,7 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby();
  * 
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
-int connect_pte_to_pfn(PTE* pte, ULONG64 pfn);
+int connect_pte_to_page(PTE* pte, PAGE* open_page);
 
 
 /**
@@ -88,4 +88,4 @@ int allocate_disk_slot(ULONG64* result_storage);
  * 
  * Returns SUCCESS upon no issues, ERROR otherwise
  */
-int return_disk_slot(ULONG64 disk_idx);
+int release_disk_slot(ULONG64 disk_idx);

@@ -57,6 +57,10 @@ PAGE* initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_f
         void* page_region = VirtualAlloc(page_storage_base + curr_pfn, 
                                     sizeof(PAGE), MEM_COMMIT, PAGE_READWRITE);
         
+        if (page_region == NULL) {
+            fprintf(stderr, "Failed to allocate memory for page region in initialize_pages\n");
+            return NULL;
+        }
 
         PAGE* new_page = page_storage_base + curr_pfn;
        
@@ -140,8 +144,6 @@ FREE_FRAMES_LISTS* initialize_free_frames(PAGE* page_storage_base, ULONG64* phys
         InitializeCriticalSection(&free_frames->list_locks[new_list]);
     }
 
-
-
     // Add all the physical frames to their respective free lists
     for (int pfn_idx = 0; pfn_idx < num_physical_frames; pfn_idx++) {
         ULONG64 frame_number = physical_frame_numbers[pfn_idx];
@@ -167,8 +169,10 @@ FREE_FRAMES_LISTS* initialize_free_frames(PAGE* page_storage_base, ULONG64* phys
         free_frame->free_page.status = FREE_STATUS;
         free_frame->free_page.zeroed_out = 1;
 
-        free_frames->list_lengths[listhead_idx] += 1;
+        free_frames->list_lengths[listhead_idx] ++;
     }
+
+    free_frames->total_available = num_physical_frames;
 
     return free_frames;
 }
@@ -178,6 +182,17 @@ FREE_FRAMES_LISTS* initialize_free_frames(PAGE* page_storage_base, ULONG64* phys
  * Returns a page off the free list, if there are any. Otherwise, returns NULL
  */
 PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
+
+    /**
+     * We can do a quick check to see if there are no free frames left before contending for locks
+     * 
+     * We might still be wrong sometimes if a frame is added in before we look, but reducing contention
+     * is more helpful.
+     */
+    if (free_frames->total_available == 0) {
+        return NULL;
+    }
+
     int curr_attempts = 0;
     
     ULONG64 local_index = free_frames->curr_list_idx;
@@ -185,10 +200,9 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
     PAGE* page = NULL;
     while (curr_attempts < NUM_FRAME_LISTS) {
         // Check for empty list - we can quickly check here before acquiring the lock
-        if (free_frames->list_lengths[free_frames->curr_list_idx] == 0) {
+        if (free_frames->list_lengths[local_index] == 0) {
             curr_attempts += 1;
-
-            local_index++;
+            local_index = (local_index + 1) % NUM_FRAME_LISTS;
 
             /**
              * We expect multiple threads to be incrementing this, new starting threads don't start
@@ -200,31 +214,43 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
 
         // By here, the **odds are better** that we will get a free frame, but not guaranteed
         EnterCriticalSection(&free_frames->list_locks[local_index]);
-        DB_LL_NODE* frame_listhead = free_frames->listheads[free_frames->curr_list_idx];
+        DB_LL_NODE* frame_listhead = free_frames->listheads[local_index];
 
         page = (PAGE*) db_pop_from_head(frame_listhead);
 
         // We lost the race condition, release lock and try again with the next one
         if (page == NULL) {
-            free_frames->curr_list_idx = (free_frames->curr_list_idx + 1) % NUM_FRAME_LISTS;
             /**
              * We purposefully do NOT increment curr_attempts, as we want the thread to be able to
              * try again (especially early on if the standby list is still empty)
              */
-            local_index++;
             LeaveCriticalSection(&free_frames->list_locks[local_index]);
+            local_index = (local_index + 1) % NUM_FRAME_LISTS;
+            free_frames->curr_list_idx = (free_frames->curr_list_idx + 1) % NUM_FRAME_LISTS;
             continue;
         }
 
-        free_frames->list_lengths[free_frames->curr_list_idx] -= 1;
+        if (free_frames->list_lengths[local_index] == 0) {
+            DebugBreak();
+        }
+
+
+        free_frames->list_lengths[local_index]--;
+
+        if (free_frames->total_available == 0) {
+            DebugBreak();
+        }
+        
+        InterlockedDecrement64(&free_frames->total_available);
 
         page->active_page.status = ACTIVE_STATUS;
+        // page->active_page.debug_spot = ACTIVE_FROM_FREE;
 
         LeaveCriticalSection(&free_frames->list_locks[local_index]);
 
         break;
     }
-
+    
     return page;
 }
 

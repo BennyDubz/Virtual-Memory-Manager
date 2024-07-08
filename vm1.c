@@ -10,7 +10,7 @@
 #include "./hardware.h"
 
 
-#define NUM_USERMODE_THREADS        1
+#define NUM_USERMODE_THREADS        8
 #define ACCESS_AMOUNT       MB(1)
 
 HANDLE simulation_threads[NUM_USERMODE_THREADS];
@@ -20,9 +20,12 @@ volatile ULONG64 total_fault_failures = 0;
 typedef struct {
     PULONG_PTR vmem_base;
     ULONG_PTR virtual_address_size;
+    ULONG64 seed_addition;
 } SIM_PARAMS;
 
 int thread_access_random_addresses(void* params);
+
+
 
 /**
  * Initializes the virtual memory state machine simulation and creates threads to access addresses
@@ -43,18 +46,20 @@ void usermode_virtual_memory_simulation () {
 
     ULONG64 virtual_address_size_in_unsigned_chunks = virtual_address_size / sizeof(ULONG_PTR);
 
-    SIM_PARAMS thread_params;
+    SIM_PARAMS thread_params[NUM_USERMODE_THREADS];
 
-    thread_params.virtual_address_size = virtual_address_size;
-    thread_params.vmem_base = vmem_base;
-    srand (time (NULL));
+    #ifdef DEBUG_CHECKING
+    printf("Debug checking is on\n");
+    #endif
 
     // Start off all threads
     for (int user_thread_num = 0; user_thread_num < NUM_USERMODE_THREADS; user_thread_num++) {
+        thread_params[user_thread_num].virtual_address_size = virtual_address_size;
+        thread_params[user_thread_num].vmem_base = vmem_base;
+        thread_params[user_thread_num].seed_addition = user_thread_num * 100;
         simulation_threads[user_thread_num] = CreateThread(NULL, 0, 
-                (LPTHREAD_START_ROUTINE) thread_access_random_addresses, (LPVOID) &thread_params, 0, NULL);
+                (LPTHREAD_START_ROUTINE) thread_access_random_addresses, (LPVOID) &thread_params[user_thread_num], 0, NULL);
     }
-
 
     // Wait for thread completion
     for (int user_thread_num = 0; user_thread_num < NUM_USERMODE_THREADS; user_thread_num++) {
@@ -91,10 +96,11 @@ int thread_access_random_addresses(void* params) {
 
     ULONG64 virtual_address_size_in_unsigned_chunks = virtual_address_size / sizeof(ULONG_PTR);
 
+    srand(time(NULL) + parameters->seed_addition);
     int fault_result;
     arbitrary_va = NULL;
 
-    printf("Thread starting\n");
+    printf("Thread starting \n");
 
     for (i = 0; i < ACCESS_AMOUNT; i += 1) {
 
@@ -125,6 +131,10 @@ int thread_access_random_addresses(void* params) {
 
             arbitrary_va = NULL;
 
+            if (i % 4096 == 0) {
+                PRINT_F("i is %llx on one thread\n", i);
+            }
+
         } __except (EXCEPTION_EXECUTE_HANDLER) {
 
             page_faulted = TRUE;
@@ -132,6 +142,9 @@ int thread_access_random_addresses(void* params) {
 
         if (page_faulted) {
             fault_result = pagefault(arbitrary_va);
+
+            // We will not try a unique random address again, so we do not incrment i
+            i--; 
 
             //BW: This is likely a temporary solution, we will want to further separate the usermode code
             if (fault_result == ERROR) {

@@ -35,15 +35,19 @@ DISK* initialize_disk() {
 
     disk->base_address = disk_base;
     
-    // Set all disk slots to free
-    for (ULONG64 disk_idx = 0; disk_idx < DISK_STORAGE_SLOTS; disk_idx++) {
+    /**
+     * We set all of the disk slots to be free initially, EXCEPT disk slot 0
+     * as it may cause us to believe a PTE is unaccessed when it is really on disk
+     */
+    disk->disk_slot_statuses[0] = DISK_USEDSLOT;
+    for (ULONG64 disk_idx = 1; disk_idx < DISK_STORAGE_SLOTS; disk_idx++) {
         disk->disk_slot_statuses[disk_idx] = DISK_FREESLOT;
     }
 
     /**
      * Initialize disk slot locks
      */
-    ULONG64 num_locks = DISK_STORAGE_SLOTS >> 8;
+    ULONG64 num_locks = max(DISK_STORAGE_SLOTS >> 8, 1);
     CRITICAL_SECTION* disk_slot_locks = (CRITICAL_SECTION*) malloc(sizeof(CRITICAL_SECTION) * num_locks);
 
     if (disk_slot_locks == NULL) {
@@ -62,7 +66,11 @@ DISK* initialize_disk() {
 
     for (ULONG64 lock_num = 0; lock_num < num_locks; lock_num++) {
         InitializeCriticalSection(&disk_slot_locks[lock_num]);
-        disk_open_slots[lock_num] = slots_per_lock;
+        if (lock_num == 0) {
+            disk_open_slots[lock_num] = slots_per_lock - 1;
+        } else {
+            disk_open_slots[lock_num] = slots_per_lock;
+        }
     }
 
     disk->num_locks = num_locks;

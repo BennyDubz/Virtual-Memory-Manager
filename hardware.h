@@ -7,6 +7,17 @@
 
 #include "./macros.h"
 #include <windows.h>
+#include <stdio.h>
+
+
+
+// #define DEBUG_CHECKING      0
+#ifdef DEBUG_CHECKING
+#define PRINT_F printf
+#else
+#define PRINT_F 
+#endif 
+
 
 // Representing how many powers of 2 large the pages are in bytes
 #define PAGE_POWER                  12 
@@ -22,7 +33,7 @@
 // This is intentionally a power of two so we can use masking to stay
 // within bounds.
 //
-#define VIRTUAL_ADDRESS_SIZE        MB(64)
+#define VIRTUAL_ADDRESS_SIZE        MB(16)
 
 #define VIRTUAL_ADDRESS_SIZE_IN_UNSIGNED_CHUNKS        (VIRTUAL_ADDRESS_SIZE / sizeof (ULONG_PTR))
 
@@ -30,7 +41,7 @@
 
 #define CACHE_SIZE      KB(16)
 
-#define DISK_SIZE       VIRTUAL_ADDRESS_SIZE
+#define DISK_SIZE       VIRTUAL_ADDRESS_SIZE * 2
 
 //
 // Deliberately use a physical page pool that is approximately 1% of the

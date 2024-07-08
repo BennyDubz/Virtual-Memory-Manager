@@ -18,6 +18,8 @@
 #define DISK_USEDSLOT 0
 #define DISK_FREESLOT 1
 
+#define DISK_IDX_NOTUSED 0
+
 #ifndef DISK_T
 #define DISK_T
 

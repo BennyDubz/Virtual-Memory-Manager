@@ -12,6 +12,8 @@
 #define INVALID 0
 #define VALID 1
 
+
+
 //TODO: Think about various types of structs we would have in here
 // Each would have a status, but then they would have their own 
 
@@ -34,7 +36,7 @@ typedef struct {
     ULONG64 always_zero:1;
     ULONG64 pagefile_idx:40;
     // Will always be one for this structure
-    ULONG64 on_disk:1;
+    ULONG64 always_zero2:1;
 } DISK_PTE;
 
 
@@ -46,8 +48,8 @@ typedef struct {
 typedef struct {
     ULONG64 always_zero:1;
     ULONG64 frame_number:40;
-    // It is not on the disk yet, so this is zero
-    ULONG64 always_zero2:1;
+    // It is not on the disk yet, so this is always 1
+    ULONG64 is_transition:1;
 } TRANSITION_PTE;
 
 
@@ -57,6 +59,9 @@ typedef struct {
         VALID_PTE memory_format;
         DISK_PTE disk_format;
         TRANSITION_PTE transition_format;
+
+        // We can check if this is zero to see if the PTE have been used before
+        ULONG64 complete_format;
     };
 } PTE;
 
@@ -68,14 +73,20 @@ typedef struct {
 // #define PAGETABLE_NUMLOCKS ((VIRTUAL_ADDRESS_SIZE / PAGE_SIZE) >> 8)
 
 typedef struct {
+    CRITICAL_SECTION lock;
+    ULONG64 valid_pte_count;
+} PTE_LOCKSECTION;
+
+typedef struct {
     PTE* pte_list;
     ULONG64 num_virtual_pages;
     // To allow calculations from PTEs to virtual addresses and vice verca
     ULONG64 vmem_base;
 
     ULONG64 num_locks;
-    CRITICAL_SECTION* pte_locks;
-    volatile ULONG64* valid_pte_counts;
+    PTE_LOCKSECTION* pte_locksections;
+    // CRITICAL_SECTION* pte_locks;
+    // volatile ULONG64* valid_pte_counts;
     // LOCK
 } PAGETABLE;
 
@@ -92,6 +103,17 @@ typedef struct {
  */
 PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base);
 
+
+/**
+ * Returns the contents of the given PTE in one operation indivisibly
+ */
+PTE read_pte_contents(PTE* pte_to_read);
+
+
+/**
+ * Writes the PTE contents as a single indivisble write to the given PTE pointer
+ */
+void write_pte_contents(PTE* pte_to_write, PTE pte_contents);
 
 /**
  * Returns TRUE if the PTE is in the memory format, FALSE otherwise

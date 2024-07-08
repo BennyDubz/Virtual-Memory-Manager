@@ -3,14 +3,13 @@
 # June 19th, 2024
 
 CC=cl
-CFLAGS=/Zi /EHsc /I.
-
+CFLAGS=/Zi /EHsc /I. #-DDEBUG_CHECKING=1
 
 #### HEADERS ####
 DATASTRUCTURES_H = Datastructures/pagelists.h Datastructures/pagetable.h Datastructures/db_linked_list.h \
        Datastructures/disk.h
 
-MACHINERY_H = Machinery/pagefault.h Machinery/trim.h Machinery/conversions.h
+MACHINERY_H = Machinery/pagefault.h Machinery/trim.h Machinery/conversions.h Machinery/debug_checks.h
 
 OTHER_H = hardware.h macros.h globals.h init.h
 
@@ -21,7 +20,7 @@ DEPS = $(DATASTRUCTURES_H) $(MACHINERY_H) $(OTHER_H)
 DATASTRUCTURES_O = Datastructures/pagelists.obj Datastructures/db_linked_list.obj Datastructures/pagetable.obj \
       Datastructures/disk.obj
 
-MACHINERY_O = Machinery/pagefault.obj Machinery/trim.obj Machinery/conversions.obj
+MACHINERY_O = Machinery/pagefault.obj Machinery/trim.obj Machinery/conversions.obj Machinery/debug_checks.obj
 
 OTHER_O = init.obj vm1.obj
 
@@ -56,6 +55,9 @@ Machinery/pagefault.obj: Machinery/pagefault.c $(DEPS)
 	$(CC) $(CFLAGS) /c /Fo:$@ $<
 
 Machinery/trim.obj: Machinery/trim.c $(DEPS)
+	$(CC) $(CFLAGS) /c /Fo:$@ $<
+
+Machinery/debug_checks.obj: Machinery/debug_checks.c $(DEPS)
 	$(CC) $(CFLAGS) /c /Fo:$@ $<
 
 Machinery/conversions.obj: Machinery/conversions.c $(DEPS)
