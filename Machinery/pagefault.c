@@ -9,9 +9,11 @@
 #include "../globals.h"
 #include "../macros.h"
 #include "./trim.h"
+#include "./disk_operations.h"
 #include "./conversions.h"
 #include "./debug_checks.h"
 #include "../Datastructures/datastructures.h"
+#include "./pagefault.h"
 
 
 /**
@@ -24,11 +26,11 @@ ULONG64 fault_count = 0;
 /**
  * Function declarations
  */
-static PAGE* handle_unaccessed_pte_fault(PTE local_pte);
+static int handle_unaccessed_pte_fault(PTE local_pte, PAGE** result_page_storage);
 
-static PAGE* handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64* disk_idx_storage);
+static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64* disk_idx_storage, PAGE** result_page_storage);
 
-static PAGE* handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64* disk_idx_storage);
+static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64* disk_idx_storage, PAGE** result_page_storage);
 
 static PAGE* find_available_page();
 
@@ -56,7 +58,8 @@ volatile ULONG64 successful_rescue_count = 0;
 volatile ULONG64 successful_disk_read_count = 0;
 int pagefault(PULONG_PTR virtual_address) {
     InterlockedIncrement64(&fault_count);
-    if (fault_count % KB(32) == 0) {
+
+    if (fault_count % KB(64) == 0) {
         printf("Curr fault count 0x%llX\n", fault_count);
     }
 
@@ -76,51 +79,43 @@ int pagefault(PULONG_PTR virtual_address) {
 
     if (accessed_pte == NULL) {
         fprintf(stderr, "Unable to find the accessed PTE\n");
-        return ERROR;
+        return REJECTION_FAIL;
     }
 
     // Make a copy of the PTE in order to perform the fault
     PTE local_pte = read_pte_contents(accessed_pte);
-    PAGE* allocated_page;
+    PAGE* allocated_page = NULL;
     ULONG64 disk_idx;
     CRITICAL_SECTION* pte_lock = &pte_to_locksection(accessed_pte)->lock;
+    int handler_result;
 
     if (is_memory_format(local_pte)) {
         return SUCCESS;
     } else if (is_used_pte(local_pte) == FALSE) {
-        allocated_page = handle_unaccessed_pte_fault(local_pte);
 
+        if ((handler_result = handle_unaccessed_pte_fault(local_pte, &allocated_page)) != SUCCESS) {
+            return handler_result;
+        }
         // There is no disk index for this page, but this allows us to quickly check whether to return a
         // disk slot later
         disk_idx = DISK_IDX_NOTUSED;
     } else if (is_transition_format(local_pte)) {
-        allocated_page = handle_transition_pte_fault(local_pte, accessed_pte, &disk_idx);
 
-
-        if (allocated_page != NULL) {
-            InterlockedIncrement64(&successful_rescue_count);
-            if (successful_rescue_count % 4096 == 0) {
-                PRINT_F("\tSuccessful rescue count: %llX\n", successful_rescue_count);
-            }
-        } 
+        if ((handler_result = handle_transition_pte_fault(local_pte, accessed_pte, &disk_idx, &allocated_page)) != SUCCESS) {
+            return handler_result;
+        }
 
     } else if (is_disk_format(local_pte)) {
-        allocated_page = handle_disk_pte_fault(local_pte, accessed_pte, &disk_idx);
 
-        if (allocated_page != NULL) {
-            InterlockedIncrement64(&successful_disk_read_count);
-            // printf("\tany page is_disk_format %p\n", allocated_page);
-            #ifdef DEBUG_CHECKING
-            if (successful_disk_read_count % 4096 == 0) {
-                PRINT_F("\tSuccessful disk read count: %llX\n", successful_disk_read_count);
-            }
-            #endif
+        if ((handler_result = handle_disk_pte_fault(local_pte, accessed_pte, &disk_idx, &allocated_page)) != SUCCESS) {
+            return handler_result;
         }
+
     }
 
     // For whatever reason the relevant handler failed, so we should retry the fault
     if (allocated_page == NULL) {
-        return ERROR;
+        DebugBreak();
     }
 
 
@@ -145,13 +140,9 @@ int pagefault(PULONG_PTR virtual_address) {
              *  in another thread and re-add them to the free-list
              */ 
 
-            /**
-             * 
-             */
-
             LeaveCriticalSection(pte_lock);
             free_frames_add(allocated_page);
-            return ERROR;
+            return RACE_CONDITION_FAIL;
         }
     }
 
@@ -172,28 +163,35 @@ int pagefault(PULONG_PTR virtual_address) {
     connect_pte_to_page(accessed_pte, allocated_page);
 
     #ifdef DEBUG_CHECKING
-    if (pfn_is_single_allocated(page_to_pfn(allocated_page)) == FALSE) {
+    if (pfn_is_single_allocated(page_to_pfn(page_storage)) == FALSE) {
         DebugBreak();
     }
     #endif
 
     LeaveCriticalSection(pte_lock);
 
-    return SUCCESS;
+    return SUCCESSFUL_FAULT;
 }   
 
 
 /**
  * Handles a pagefault for a PTE that has never been accessed before
  * 
- * Returns a pointer to the page that is allocated to the PTE, or NULL if it fails
+ * Writes the p, or NULL if it fails
  */
-static PAGE* handle_unaccessed_pte_fault(PTE local_pte) {
+static int handle_unaccessed_pte_fault(PTE local_pte, PAGE** result_page_storage) {
 
     /**
      * In this case, all we need to do is get a valid page and return it - nothing else
      */
-    return find_available_page();
+    PAGE* allocated_page = find_available_page();
+
+    if (allocated_page == NULL) {
+        return NO_AVAILABLE_PAGES_FAIL;
+    }
+
+    *result_page_storage = allocated_page;
+    return SUCCESS;
 }
 
 
@@ -206,8 +204,17 @@ static PAGE* handle_unaccessed_pte_fault(PTE local_pte) {
  * Changes disk_idx_storage to be the disk index of the page if it was rescued from standby,
  * and is set to DISK_IDX_NOTUSED if it was rescued from modified to signify that it is invalid.
  */
-static PAGE* handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64* disk_idx_storage) {
-    return rescue_pte(local_pte, accessed_pte, disk_idx_storage);
+static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64* disk_idx_storage, PAGE** result_page_storage) {
+    
+    PAGE* rescued_page = rescue_pte(local_pte, accessed_pte, disk_idx_storage);
+
+    if (rescued_page == NULL) {
+        return RESCUE_FAIL;
+    }
+
+    *result_page_storage = rescued_page;
+
+    return SUCCESS;
 }
 
 
@@ -218,13 +225,13 @@ static PAGE* handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG
  * Returns a pointer to the page with the restored contents on it, and stores the
  * disk index that it was at in disk_idx_storage
  */
-static PAGE* handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64* disk_idx_storage) {
+static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64* disk_idx_storage, PAGE** result_page_storage) {
     CRITICAL_SECTION* pte_lock = &pte_to_locksection(accessed_pte)->lock;
 
     PAGE* allocated_page = find_available_page();
 
     if (allocated_page == NULL) {
-        return NULL;
+        return NO_AVAILABLE_PAGES_FAIL;
     }
 
     ULONG64 disk_idx = local_pte.disk_format.pagefile_idx;
@@ -240,7 +247,7 @@ static PAGE* handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64* di
          */ 
         LeaveCriticalSection(pte_lock);
         free_frames_add(allocated_page);
-        return NULL;
+        return RACE_CONDITION_FAIL;
     }
     
     /**
@@ -257,12 +264,13 @@ static PAGE* handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64* di
 
         // BW: Here, we would want to add it to the zero-out thread!
         free_frames_add(allocated_page);
-        return NULL;
+        return DISK_FAIL;
     }
 
     *disk_idx_storage = disk_idx;
+    *result_page_storage = allocated_page;
 
-    return allocated_page;
+    return SUCCESS;
 }
 
 
@@ -518,10 +526,6 @@ static PAGE* standby_pop_page() {
         DebugBreak();
     }
     #endif
-
-    if (pfn_is_single_allocated(page_to_pfn(recycled_page)) == FALSE) {
-        DebugBreak();
-    }
 
     write_pte_contents(old_pte, pte_contents);
 

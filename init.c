@@ -273,13 +273,13 @@ static int init_simulation(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memor
     // to illustrate how we can manage the illusion.
     //
 
-    virtual_address_size = 64 * physical_page_count * PAGE_SIZE;
+    virtual_address_size = VIRTUAL_ADDRESS_SIZE;
 
     //
     // Round down to a PAGE_SIZE boundary.
     //
 
-    virtual_address_size &= ~PAGE_SIZE;
+    // virtual_address_size &= ~PAGE_SIZE;
 
     virtual_address_size_in_unsigned_chunks =
                         virtual_address_size / sizeof (ULONG_PTR);

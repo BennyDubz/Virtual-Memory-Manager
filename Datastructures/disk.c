@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <windows.h>
 #include "./disk.h"
+#include "./custom_sync.h"
 
 static int initialize_disk_write(DISK* disk);
 static int initialize_disk_read(DISK* disk);
@@ -35,14 +36,27 @@ DISK* initialize_disk() {
 
     disk->base_address = disk_base;
     
+    
+    UCHAR* disk_slot_statuses = (UCHAR*) malloc(sizeof(UCHAR) * DISK_STORAGE_SLOTS);
+
+    if (disk_slot_statuses == NULL) {
+        fprintf(stderr, "Unable to allocate memory for disk slots in initialize_disks\n");
+        return NULL;
+    }
+    printf("Making %d disk slots\n", DISK_STORAGE_SLOTS);
+
     /**
      * We set all of the disk slots to be free initially, EXCEPT disk slot 0
-     * as it may cause us to believe a PTE is unaccessed when it is really on disk
+     * as it may cause us to believe a PTE is unaccessed when it is really on disk.
+     * 
+     * This is because the all other fields of the disk format PTE may be 0, so if the disk_idx
+     * stored in the PTE was also 0, we may confuse it.
      */
-    disk->disk_slot_statuses[0] = DISK_USEDSLOT;
+    disk_slot_statuses[0] = DISK_USEDSLOT;
     for (ULONG64 disk_idx = 1; disk_idx < DISK_STORAGE_SLOTS; disk_idx++) {
-        disk->disk_slot_statuses[disk_idx] = DISK_FREESLOT;
+        disk_slot_statuses[disk_idx] = DISK_FREESLOT;
     }
+    disk->disk_slot_statuses = disk_slot_statuses;
 
     /**
      * Initialize disk slot locks
@@ -65,7 +79,7 @@ DISK* initialize_disk() {
     ULONG64 slots_per_lock = DISK_STORAGE_SLOTS / num_locks;
 
     for (ULONG64 lock_num = 0; lock_num < num_locks; lock_num++) {
-        InitializeCriticalSection(&disk_slot_locks[lock_num]);
+        initialize_lock(&disk_slot_locks[lock_num]);
         if (lock_num == 0) {
             disk_open_slots[lock_num] = slots_per_lock - 1;
         } else {
@@ -145,7 +159,7 @@ static int initialize_disk_write(DISK* disk) {
         db_insert_node_at_head(disk_write_listhead, disk_w_node);
     }
 
-    InitializeCriticalSection(&disk->disk_write_list_lock);
+    initialize_lock(&disk->disk_write_list_lock);
     disk->disk_write_listhead = disk_write_listhead;
 
     return SUCCESS;
@@ -198,7 +212,7 @@ static int initialize_disk_read(DISK* disk) {
         db_insert_node_at_head(disk_read_listhead, disk_r_node);
     }
 
-    InitializeCriticalSection(&disk->disk_read_list_lock);
+    initialize_lock(&disk->disk_read_list_lock);
     disk->disk_read_listhead = disk_read_listhead;
 
     return SUCCESS;

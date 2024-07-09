@@ -29,22 +29,34 @@
 #define DOWN_TO_PAGE_NUM(x) (x >> PAGE_POWER)
 
 
-//
-// This is intentionally a power of two so we can use masking to stay
-// within bounds.
-//
+#ifndef LARGE_SIM
+
+/**
+ * SMALL SIMULATION
+ */
 #define VIRTUAL_ADDRESS_SIZE        MB(16)
 
 #define VIRTUAL_ADDRESS_SIZE_IN_UNSIGNED_CHUNKS        (VIRTUAL_ADDRESS_SIZE / sizeof (ULONG_PTR))
-
-// #define NUMBER_OF_VIRTUAL_PAGES     (VIRTUAL_ADDRESS_SIZE / PAGE_SIZE)
 
 #define CACHE_SIZE      KB(16)
 
 #define DISK_SIZE       VIRTUAL_ADDRESS_SIZE * 2
 
-//
-// Deliberately use a physical page pool that is approximately 1% of the
-// virtual address space !
-//
-#define NUMBER_OF_PHYSICAL_PAGES   ((VIRTUAL_ADDRESS_SIZE / PAGE_SIZE) / 64)
+#define NUMBER_OF_PHYSICAL_PAGES   ((VIRTUAL_ADDRESS_SIZE / PAGE_SIZE) / 3)
+
+
+#else
+
+/**
+ * LARGE SIMULATION
+ */
+#define VIRTUAL_ADDRESS_SIZE        GB(1)
+
+#define VIRTUAL_ADDRESS_SIZE_IN_UNSIGNED_CHUNKS        (VIRTUAL_ADDRESS_SIZE / sizeof (ULONG_PTR))
+
+#define CACHE_SIZE      MB(1)
+
+#define DISK_SIZE       VIRTUAL_ADDRESS_SIZE * 2
+
+#define NUMBER_OF_PHYSICAL_PAGES   ((VIRTUAL_ADDRESS_SIZE / PAGE_SIZE) / 3)
+#endif

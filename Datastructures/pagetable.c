@@ -11,6 +11,7 @@
 #include <assert.h>
 #include "./pagetable.h"
 #include "../hardware.h"
+#include "./custom_sync.h"
 
 /**
  * Initializes the pagetable with all VALID_PTE entries, but all have the valid bit set to 0
@@ -58,7 +59,7 @@ PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base)
 
     for (ULONG64 curr_lock = 0; curr_lock < num_locks; curr_lock++) {
         PTE_LOCKSECTION* curr_section = &pte_locksections[curr_lock];
-        InitializeCriticalSection(&curr_section->lock);
+        initialize_lock(&curr_section->lock);
         curr_section->valid_pte_count = 0;
     } 
 

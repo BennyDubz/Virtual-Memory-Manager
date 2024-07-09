@@ -3,13 +3,21 @@
 # June 19th, 2024
 
 CC=cl
-CFLAGS=/Zi /EHsc /I. #-DDEBUG_CHECKING=1
+
+# Custom flags
+LOCK_SPINNING_FLAGS=-DLOCK_SPINNING=1
+DEBUG_FLAGS=-DDEBUG_CHECKING=1
+LARGE_SIM_FLAGS=-DLARGE_SIM=1
+LENIENT_DISK_FLAGS=-DLENIENT_DISK=1
+
+CFLAGS=/Zi /EHsc /I.
 
 #### HEADERS ####
 DATASTRUCTURES_H = Datastructures/pagelists.h Datastructures/pagetable.h Datastructures/db_linked_list.h \
-       Datastructures/disk.h
+       Datastructures/disk.h Datastructures/custom_sync.h
 
-MACHINERY_H = Machinery/pagefault.h Machinery/trim.h Machinery/conversions.h Machinery/debug_checks.h
+MACHINERY_H = Machinery/pagefault.h Machinery/trim.h Machinery/conversions.h Machinery/debug_checks.h \
+		Machinery/disk_operations.h
 
 OTHER_H = hardware.h macros.h globals.h init.h
 
@@ -18,9 +26,10 @@ DEPS = $(DATASTRUCTURES_H) $(MACHINERY_H) $(OTHER_H)
 
 #### OBJECTS ####
 DATASTRUCTURES_O = Datastructures/pagelists.obj Datastructures/db_linked_list.obj Datastructures/pagetable.obj \
-      Datastructures/disk.obj
+      	Datastructures/disk.obj Datastructures/custom_sync.obj
 
-MACHINERY_O = Machinery/pagefault.obj Machinery/trim.obj Machinery/conversions.obj Machinery/debug_checks.obj
+MACHINERY_O = Machinery/pagefault.obj Machinery/trim.obj Machinery/conversions.obj Machinery/debug_checks.obj \
+		Machinery/disk_operations.obj
 
 OTHER_O = init.obj vm1.obj
 
@@ -31,12 +40,29 @@ OBJ = $(DATASTRUCTURES_O) $(MACHINERY_O) $(OTHER_O)
 vm.exe: $(OBJ)
 	$(CC) $(CFLAGS) /Fevm.exe /Fo:. $^
 
+#### Custom targets ####
+large: CFLAGS += $(LARGE_SIM_FLAGS)
+large: vm.exe
+
+lenient_disk: CFLAGS += $(LENIENT_DISK_FLAGS)
+lenient_disk: vm.exe
+
+lock_spinning: CFLAGS += $(LOCK_SPINNING_FLAGS)
+lock_spinning: vm.exe
+
+debug: CFLAGS += $(DEBUG_FLAGS)
+debug: vm.exe
+
+lock_spinning_debug: CFLAGS += $(LOCK_SPINNING_FLAGS) $(DEBUG_FLAGS)
+lock_spinning_debug: vm.exe
 
 #### Other Targets ####
 .PHONY: clean
 
 clean:
 	del /f *.exe *.obj *.pdb
+	del /f Datastructures\*.obj
+	del /f Machinery\*.obj
 
 #### Compilation rules for individual files ####
 Datastructures/pagelists.obj: Datastructures/pagelists.c $(DEPS)
@@ -51,6 +77,9 @@ Datastructures/pagetable.obj: Datastructures/pagetable.c $(DEPS)
 Datastructures/disk.obj: Datastructures/disk.c $(DEPS)
 	$(CC) $(CFLAGS) /c /Fo:$@ $<
 
+Datastructures/custom_sync.obj: Datastructures/custom_sync.c $(DEPS)
+	$(CC) $(CFLAGS) /c /Fo:$@ $<
+
 Machinery/pagefault.obj: Machinery/pagefault.c $(DEPS)
 	$(CC) $(CFLAGS) /c /Fo:$@ $<
 
@@ -63,9 +92,11 @@ Machinery/debug_checks.obj: Machinery/debug_checks.c $(DEPS)
 Machinery/conversions.obj: Machinery/conversions.c $(DEPS)
 	$(CC) $(CFLAGS) /c /Fo:$@ $<
 
+Machinery/disk_operations.obj: Machinery/disk_operations.c $(DEPS)
+	$(CC) $(CFLAGS) /c /Fo:$@ $<
+
 init.obj: init.c $(DEPS)
 	$(CC) $(CFLAGS) /c /Fo:$@ $<
 
 vm1.obj: vm1.c $(DEPS)
 	$(CC) $(CFLAGS) /c /Fo:$@ $<
-

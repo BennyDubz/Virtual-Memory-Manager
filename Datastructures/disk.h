@@ -41,7 +41,7 @@ typedef struct {
      *  be able to be initialized at the beginning of the simulation
      */
     PULONG_PTR base_address;
-    UCHAR disk_slot_statuses[DISK_STORAGE_SLOTS];
+    UCHAR* disk_slot_statuses;
 
     CRITICAL_SECTION* disk_slot_locks;
     ULONG64 num_locks;

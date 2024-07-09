@@ -10,6 +10,7 @@
 #include "./db_linked_list.h"
 #include "./pagelists.h"
 #include "../macros.h"
+#include "./custom_sync.h"
 
 /**
  * ###########################
@@ -141,7 +142,7 @@ FREE_FRAMES_LISTS* initialize_free_frames(PAGE* page_storage_base, ULONG64* phys
         free_frames->list_lengths[new_list] = 0;
         free_frames->curr_list_idx = 0;
 
-        InitializeCriticalSection(&free_frames->list_locks[new_list]);
+        initialize_lock(&free_frames->list_locks[new_list]);
     }
 
     // Add all the physical frames to their respective free lists
@@ -305,7 +306,7 @@ MODIFIED_LIST* initialize_modified_list() {
     modified_list->listhead = mod_listhead;
     modified_list->list_length = 0;
 
-    InitializeCriticalSection(&modified_list->lock);
+    initialize_lock(&modified_list->lock);
 
     return modified_list;
 }
@@ -380,7 +381,7 @@ STANDBY_LIST* initialize_standby_list() {
     standby_list->listhead = mod_listhead;
     standby_list->list_length = 0;
 
-    InitializeCriticalSection(&standby_list->lock);
+    initialize_lock(&standby_list->lock);
 
     return standby_list;
 }

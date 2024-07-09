@@ -4,6 +4,7 @@
 #include <excpt.h>
 #include <stdbool.h>
 #include <assert.h>
+#include <time.h>
 
 #include "./init.h"
 #include "./Machinery/pagefault.h"
@@ -15,6 +16,7 @@
 
 HANDLE simulation_threads[NUM_USERMODE_THREADS];
 volatile ULONG64 total_fault_failures = 0;
+volatile ULONG64 fault_results[NUM_FAULT_RETURN_VALS];
 
 // For passing to each thread for the simulation
 typedef struct {
@@ -52,6 +54,30 @@ void usermode_virtual_memory_simulation () {
     printf("Debug checking is on\n");
     #endif
 
+    #ifdef LOCK_SPINNING
+    printf("Lock spinning is on for performance analysis\n");
+    #endif
+
+    #ifdef SMALL_SIM
+    printf("Running small simulation\n");
+    #endif
+
+    #ifdef LARGE_SIM
+    printf("Running large simulation\n");
+    #endif
+
+    #ifdef LENIENT_DISK
+    printf("No simulated disk slowdown: lenient disk is on\n");
+    #endif
+
+    clock_t timer;
+    timer = clock();
+
+    // Initialize fault failure tracking array
+    for (int i = 0; i < NUM_FAULT_RETURN_VALS; i++) {
+        fault_results[i] = 0;
+    }
+
     // Start off all threads
     for (int user_thread_num = 0; user_thread_num < NUM_USERMODE_THREADS; user_thread_num++) {
         thread_params[user_thread_num].virtual_address_size = virtual_address_size;
@@ -64,10 +90,28 @@ void usermode_virtual_memory_simulation () {
     // Wait for thread completion
     for (int user_thread_num = 0; user_thread_num < NUM_USERMODE_THREADS; user_thread_num++) {
         WaitForSingleObject(simulation_threads[user_thread_num], INFINITE);
-    }
+    }   
     
-    printf ("usermode_virtual_memory_simulation : finished accessing %d random virtual addresses over %d threads\n", ACCESS_AMOUNT * NUM_USERMODE_THREADS, NUM_USERMODE_THREADS);
-    printf ("usermode_virtual_memory_simulation : total of 0x%llx fault failures\n", total_fault_failures);
+
+    total_fault_failures = 0;
+    // Ignore successful faults
+    for (int i = 1; i < NUM_FAULT_RETURN_VALS; i++) {
+        total_fault_failures += fault_results[i];
+    }
+
+    timer = clock() - timer;
+    double time_taken = (double) (timer) / CLOCKS_PER_SEC;
+    printf("usermode_virtual_memory_simulation : finished accessing %d random virtual addresses over %d threads\n", ACCESS_AMOUNT * NUM_USERMODE_THREADS, NUM_USERMODE_THREADS);
+    printf("usermode_virtual_memory_simulation : total of %lld fault failures\n", total_fault_failures);
+    printf("usermode_virtual_memory_simulation : total CPU time was %f seconds\n", time_taken);
+    printf("usermode_virtual_memory_simulation : fault breakdown:\n");
+
+    printf("\tSuccessful faults: %lld\n", fault_results[SUCCESSFUL_FAULT]);
+    printf("\tFailures due to rejection (invalid address): %lld\n", fault_results[REJECTION_FAIL]);
+    printf("\tFailures due to lack of available pages: %lld\n", fault_results[NO_AVAILABLE_PAGES_FAIL]);
+    printf("\tFailures due to failed rescues of transition PTEs: %lld\n", fault_results[RESCUE_FAIL]);
+    printf("\tFailures due to disk waiting: %lld\n", fault_results[RESCUE_FAIL]);
+    printf("\tFailures due to races between user threads: %lld\n", fault_results[RACE_CONDITION_FAIL]);
 
     //
     // Now that we're done with our memory we can be a good
@@ -143,14 +187,11 @@ int thread_access_random_addresses(void* params) {
         if (page_faulted) {
             fault_result = pagefault(arbitrary_va);
 
+            InterlockedIncrement64(&fault_results[fault_result]);
+
             // We will not try a unique random address again, so we do not incrment i
             i--; 
 
-            //BW: This is likely a temporary solution, we will want to further separate the usermode code
-            if (fault_result == ERROR) {
-                total_fault_failures++;
-                // printf("Fault failed - retrying fault\n");
-            }
         } 
         //BW: ELSE: we mark the relevant PTE as accessed (real hardware would do this for us)
     }
