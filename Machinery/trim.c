@@ -168,7 +168,7 @@ LPTHREAD_START_ROUTINE thread_aging() {
  * Thread dedicated to writing pages from the modified list to disk, putting finally adding the pages to standby
  */
 ULONG64 sb_count = 0;
-#define MAX_PAGES_TO_WRITE 64
+#define MAX_PAGES_TO_WRITE 256
 LPTHREAD_START_ROUTINE thread_modified_to_standby() {
     // Variables dedicated to finding and extracting pages to write from the modified list 
     ULONG64 section_start;
@@ -181,7 +181,7 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
     ULONG64 disk_storage_idx;
 
     #if 0
-    // Variables dedicated to handling splitting off threads to write pages disk
+    // Variables  dedicated to handling splitting off threads to write pages disk
     ULONG64 num_writing_threads;
     ULONG64 disk_idx_storage_space[MAX_PAGES_TO_WRITE];
     HANDLE worker_writing_threads[MAX_PAGES_TO_WRITE];
@@ -281,12 +281,13 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
             standby_add_page(potential_page, standby_list);
             InterlockedIncrement64(&total_available_pages);
 
-            SetEvent(waiting_for_pages_event);
+            // SetEvent(waiting_for_pages_event);
 
             LeaveCriticalSection(&standby_list->lock);
 
             curr_page++;
         }
+        SetEvent(waiting_for_pages_event);
 
         sb_count++;
     }

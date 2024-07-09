@@ -134,7 +134,8 @@ int pagefault(PULONG_PTR virtual_address) {
         if (ptes_are_equal(local_pte, *accessed_pte) == FALSE) {
 
             /**
-             * Return the page to the free-list and return ERROR
+             * Return the page to the free-list and return RACE_CONDITION_FAIL
+             * as the PTE changed from under the thread
              * 
              *  BW: Later, we need to zero-out pages that were acquired in the failure case
              *  in another thread and re-add them to the free-list

@@ -110,7 +110,7 @@ void usermode_virtual_memory_simulation () {
     printf("\tFailures due to rejection (invalid address): %lld\n", fault_results[REJECTION_FAIL]);
     printf("\tFailures due to lack of available pages: %lld\n", fault_results[NO_AVAILABLE_PAGES_FAIL]);
     printf("\tFailures due to failed rescues of transition PTEs: %lld\n", fault_results[RESCUE_FAIL]);
-    printf("\tFailures due to disk waiting: %lld\n", fault_results[RESCUE_FAIL]);
+    printf("\tFailures due to disk waiting: %lld\n", fault_results[DISK_FAIL]);
     printf("\tFailures due to races between user threads: %lld\n", fault_results[RACE_CONDITION_FAIL]);
 
     //
