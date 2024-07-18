@@ -13,12 +13,23 @@
 
 #define DISK_STORAGE_SLOTS (DISK_SIZE / PAGE_SIZE)
 #define DISK_WRITE_SLOTS 8
-#define DISK_READ_SLOTS 8
+#define DISK_READ_SLOTS 256
+#define DISK_REFRESH_BOUNDARY (DISK_READ_SLOTS / 2)
+
+#define DISK_READ_OPEN 0
+#define DISK_READ_USED 1
+#define DISK_READ_NEEDS_FLUSH 2 // We will clear all of these slots to 0 simultaneously
+
+// For the large disk write slot
+#define MAX_PAGES_WRITABLE 256
+
 
 #define DISK_USEDSLOT 0
 #define DISK_FREESLOT 1
 
 #define DISK_IDX_NOTUSED 0
+
+
 
 #ifndef DISK_T
 #define DISK_T
@@ -46,6 +57,12 @@ typedef struct {
     CRITICAL_SECTION* disk_slot_locks;
     ULONG64 num_locks;
     ULONG64* open_slot_counts;
+    ULONG64 total_available_slots;
+
+    /**
+     * To support batched writing, we will have a special virtual address that can map in many physical pages
+     */
+    PULONG_PTR disk_large_write_slot;
 
     /**
      * We will have unique virtual addresses dedicated to reading and writing from the disk
@@ -55,8 +72,20 @@ typedef struct {
     DB_LL_NODE* disk_write_listhead;
     CRITICAL_SECTION disk_write_list_lock;
 
-    DB_LL_NODE* disk_read_listhead;
-    CRITICAL_SECTION disk_read_list_lock;
+    /**
+     * We maintain the disk read slots in their own array that we can use
+     * interlocked operations on to claim and mark them.
+     * 
+     * This allows us to only have to clear/unmap disk read slots infrequently,
+     * saving constant calls to MapUserPhysicalPagesScatter
+     */
+    volatile long disk_read_slot_statues[DISK_READ_SLOTS];
+    PULONG_PTR disk_read_base_addr;
+    volatile ULONG64 num_available_read_slots;
+
+    // DB_LL_NODE* disk_read_listhead;
+    // CRITICAL_SECTION disk_read_list_lock;
+
 } DISK;
 
 #endif
@@ -65,6 +94,9 @@ typedef struct {
 /**
  * Initializes the disk and commits the memory for it in the simulating process's virtual address space
  * 
+ * Takes in the MEM_EXTENDED_PARAMETER so that the disk reading/writing operations can
+ * work in the simulation using MapUserPhysicalPages alongside shared pages.
+ * 
  * Returns NULL upon any error
  */
-DISK* initialize_disk();
+DISK* initialize_disk(MEM_EXTENDED_PARAMETER* vmem_parameters);

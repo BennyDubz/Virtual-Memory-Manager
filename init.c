@@ -24,6 +24,10 @@
 // Allows us to access the windows permission libraries so that we can actually get physical frames
 #pragma comment(lib, "advapi32.lib")
 
+#if SUPPORT_MULTIPLE_VA_TO_SAME_PAGE
+#pragma comment(lib, "onecore.lib")
+#endif
+
 // ########## DEFINED GLOBALS ##########
 
 /**
@@ -49,6 +53,11 @@ STANDBY_LIST* standby_list;
 
 MODIFIED_LIST* modified_list;
 
+#if DEBUG_PAGELOCK
+PAGE_LOGSTRUCT page_log[LOG_SIZE];
+
+volatile ULONG64 log_idx;
+#endif
 
 /**
  * GLOBAL SYNCHRONIZATION
@@ -88,9 +97,11 @@ BOOL obtained_pages;
 PULONG_PTR physical_page_numbers;
 ULONG_PTR virtual_address_size;
 ULONG_PTR virtual_address_size_in_unsigned_chunks;
+MEM_EXTENDED_PARAMETER vmem_parameters;
 
 
-static BOOL
+
+BOOL
 GetPrivilege  (
     VOID
     )
@@ -175,6 +186,40 @@ GetPrivilege  (
     return TRUE;
 }
 
+#if SUPPORT_MULTIPLE_VA_TO_SAME_PAGE
+
+HANDLE
+CreateSharedMemorySection (
+    VOID
+    )
+{
+    HANDLE section;
+    MEM_EXTENDED_PARAMETER parameter = { 0 };
+
+    //
+    // Create an AWE section.  Later we deposit pages into it and/or
+    // return them.
+    //
+
+    parameter.Type = MemSectionExtendedParameterUserPhysicalFlags;
+    parameter.ULong = 0;
+
+    section = CreateFileMapping2 (INVALID_HANDLE_VALUE,
+                                  NULL,
+                                  SECTION_MAP_READ | SECTION_MAP_WRITE,
+                                  PAGE_READWRITE,
+                                  SEC_RESERVE,
+                                  0,
+                                  NULL,
+                                  &parameter,
+                                  1);
+
+    return section;
+}
+
+#endif
+
+
 static int init_simulation(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memory_size_storage);
 static int init_datastructures();
 static int init_multithreading();
@@ -234,7 +279,18 @@ static int init_simulation(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memor
         return ERROR;
     }    
 
+    #if SUPPORT_MULTIPLE_VA_TO_SAME_PAGE
+    printf("We are supporting multiple VA's to the same page\n");
+    physical_page_handle = CreateSharedMemorySection();
+
+    if (physical_page_handle == NULL) {
+        printf ("CreateSharedMemorySection failed, error %#x\n", GetLastError());
+        return ERROR;
+    }
+    #else
     physical_page_handle = GetCurrentProcess ();
+
+    #endif
 
     physical_page_count = NUMBER_OF_PHYSICAL_PAGES;
 
@@ -284,10 +340,34 @@ static int init_simulation(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memor
     virtual_address_size_in_unsigned_chunks =
                         virtual_address_size / sizeof (ULONG_PTR);
 
+    #if SUPPORT_MULTIPLE_VA_TO_SAME_PAGE
+
+    // vmem_parameters = { 0 };
+
+    //
+    // Allocate a MEM_PHYSICAL region that is "connected" to the AWE section
+    // created above.
+    //
+
+    vmem_parameters.Type = MemExtendedParameterUserPhysicalHandle;
+    vmem_parameters.Handle = physical_page_handle;
+
+    vmem_base = VirtualAlloc2 (NULL,
+                       NULL,
+                       virtual_address_size,
+                       MEM_RESERVE | MEM_PHYSICAL,
+                       PAGE_READWRITE,
+                       &vmem_parameters,
+                       1);
+
+    #else
+
     vmem_base = VirtualAlloc (NULL,
-                      virtual_address_size,
-                      MEM_RESERVE | MEM_PHYSICAL,
-                      PAGE_READWRITE);
+                        virtual_address_size,
+                        MEM_RESERVE | MEM_PHYSICAL,
+                        PAGE_READWRITE);
+
+    #endif
 
     if (vmem_base == NULL) {
         printf ("init : could not reserve memory for usermode simulation\n");
@@ -333,8 +413,12 @@ static int init_datastructures() {
     }
 
     total_available_pages = physical_page_count;
+    #if SUPPORT_MULTIPLE_VA_TO_SAME_PAGE
+    disk = initialize_disk(&vmem_parameters);
+    #else
+    disk = initialize_disk(NULL);
+    #endif
 
-    disk = initialize_disk();
     if (disk == NULL) {
         fprintf(stderr, "Unable to allocate memory for disk\n");
         return ERROR;
@@ -351,6 +435,11 @@ static int init_datastructures() {
         fprintf(stderr, "Unable to initialize modified list\n");
         return ERROR;
     }
+
+    #if DEBUG_PAGELOCK
+    page_log;
+    log_idx = 0;
+    #endif
 
     return SUCCESS;
 }
@@ -379,7 +468,8 @@ static int init_multithreading() {
 
     disk_write_available_event = CreateEvent(NULL, FALSE, FALSE, NULL);
 
-    disk_read_available_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+    // This event should be used infrequently, but we will allow all threads to proceed when it triggers
+    disk_read_available_event = CreateEvent(NULL, TRUE, FALSE, NULL);
 
     disk_open_slots_event = CreateEvent(NULL, FALSE, FALSE, NULL);
 

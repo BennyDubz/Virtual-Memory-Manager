@@ -47,6 +47,9 @@ large: vm.exe
 lenient_disk: CFLAGS += $(LENIENT_DISK_FLAGS)
 lenient_disk: vm.exe
 
+large_lenient: CFLAGS += $(LARGE_SIM_FLAGS) $(LENIENT_DISK_FLAGS)
+large_lenient: vm.exe
+
 lock_spinning: CFLAGS += $(LOCK_SPINNING_FLAGS)
 lock_spinning: vm.exe
 

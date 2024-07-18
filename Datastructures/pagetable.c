@@ -48,7 +48,7 @@ PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base)
         pte_list[virtual_page] = new_pte;
     }
 
-    ULONG64 num_locks = max(num_virtual_pages >> 6, 1);
+    ULONG64 num_locks = max(num_virtual_pages >> 4, 1);
 
     PTE_LOCKSECTION* pte_locksections = (PTE_LOCKSECTION*) malloc(sizeof(PTE_LOCKSECTION) * num_locks);
 

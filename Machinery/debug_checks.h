@@ -36,3 +36,17 @@ BOOL pfn_is_single_allocated(ULONG64 pfn);
  * To be called whenever we make a PTE valid or invalid
  */
 BOOL pte_valid_count_check(PTE* accessed_pte);
+
+
+/**
+ * Logs the page's information into the global circular log structure
+ */
+void log_page_status(PAGE* page);
+
+
+/**
+ * Nicely collects all the VA's info - its PTE, page, etc, when we fail on a VA
+ * 
+ * Debugbreaks the program with all values as local variables for the debugger
+ */
+void debug_break_all_va_info(PULONG_PTR arbitrary_va);

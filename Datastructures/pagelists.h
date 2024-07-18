@@ -6,6 +6,10 @@
  * 
  */
 
+
+// If this is 1, then we will use normal critical sections instead of just the bit
+#define DEBUG_PAGELOCK 0
+
 #include <windows.h>
 #include "../hardware.h"
 #include "./db_linked_list.h"
@@ -17,71 +21,63 @@
  * #################################################
  */
 
-#define FREE_STATUS 0
-#define MODIFIED_STATUS 1
-#define STANDBY_STATUS 2
-#define ACTIVE_STATUS 3
+#define ZEROED_PAGE 0
+#define FREE_STATUS 1
+#define MODIFIED_STATUS 2
+#define STANDBY_STATUS 3
+#define ACTIVE_STATUS 4
+
+
+#define PAGE_UNLOCKED 0
+#define PAGE_LOCKED 1
+
+#define PAGE_NOT_BEING_WRITTEN 0
+#define PAGE_BEING_WRITTEN 1
+
+#define PAGE_NOT_BEING_TRIMMED 0
+#define PAGE_BEING_TRIMMED 1
+
+#define PAGE_NOT_IN_DISK_BATCH 0
+#define PAGE_IN_DISK_BATCH 1
 
 
 #ifndef PAGE_T
 #define PAGE_T
-typedef struct {
-    volatile ULONG64 status:2;
-
-    DB_LL_NODE* frame_listnode;
-    ULONG64 frame_number:40;
-    /**
-     * Whether the page has been cleaned out before it was freed by the previous VA using it
-     * 
-     * We need to zero out pages that are going to a different process than the one it was at before
-     */
-    ULONG64 zeroed_out:1; 
-
-} FREE_PAGE;
 
 typedef struct {
-    volatile ULONG64 status:2;
-    DB_LL_NODE* frame_listnode;
-    PTE* pte;
-
-    ULONG64 modified_again:1;
-} MODIFIED_PAGE;
-
-typedef struct {
-    volatile ULONG64 status:2;
-    DB_LL_NODE* frame_listnode;
-    PTE* pte;
+    ULONG64 status:3;
     ULONG64 pagefile_idx:40; 
-} STANDBY_PAGE;
-
-/**
- * The purpose of this is to help resolve race conditions when rescuing
- * pages from the standby list.
- * 
- * If a transition PTE's corresponding page is swapped to the ACTIVE_STATUS
- * by the time it is able to acquire the standby lock, then it must have
- * been taken out from under them. 
- * 
- * This is not applicable to the modified list as those pages would only move to the
- * standby list during the race.
- */
-
-typedef struct {
-    ULONG64 status:2;
-    DB_LL_NODE* frame_listnode;
+    ULONG64 writing_to_disk:1;
+    /**
+     * We need this bit to avoid a specific race condition:
+     * 
+     * If we trim a page, begin popping pages from modified to eventually write to disk,
+     * then it is rescued and trimmed again, it can end up in a disk batch twice. With this bit,
+     * we are able to ensure that we do not re-add it to the disk_batch
+     */
+    ULONG64 in_disk_batch:1;
     PTE* pte;
-    ULONG64 pagefile_idx:40;
-} ACTIVE_PAGE;
-
-
-typedef struct {
-    union {
-        FREE_PAGE free_page;
-        MODIFIED_PAGE modified_page;
-        STANDBY_PAGE standby_page;
-        ACTIVE_PAGE active_page;
-    };
+    long page_lock;
+    #if DEBUG_PAGELOCK
+    CRITICAL_SECTION dev_page_lock;
+    ULONG64 holding_threadid;
+    #endif
+    DB_LL_NODE* frame_listnode;
 } PAGE;
+
+
+#if DEBUG_PAGELOCK
+typedef struct {
+    PAGE* actual_page;
+    PAGE page_copy;
+    PVOID stack_trace[8];
+    ULONG64 pfn;
+    PTE* linked_pte;
+    PTE linked_pte_copy;
+    ULONG64 thread_id;
+} PAGE_LOGSTRUCT;
+#endif
+
 #endif
 
 /**
@@ -117,7 +113,6 @@ BOOL page_is_modified(PAGE page);
  * Returns TRUE if the page is in the standby status, FALSE otherwise
  */
 BOOL page_is_standby(PAGE page);
-
 
 
 /**

@@ -10,16 +10,19 @@
 #include "./disk.h"
 #include "./custom_sync.h"
 
-static int initialize_disk_write(DISK* disk);
-static int initialize_disk_read(DISK* disk);
+static int initialize_disk_write(DISK* disk, MEM_EXTENDED_PARAMETER* vmem_parameters);
+static int initialize_disk_read(DISK* disk, MEM_EXTENDED_PARAMETER* vmem_parameters);
 
 
 /**
  * Initializes the disk and commits the memory for it in the simulating process's virtual address space
  * 
+ * Takes in the MEM_EXTENDED_PARAMETER so that the disk reading/writing operations can
+ * work in the simulation using MapUserPhysicalPages alongside shared pages.
+ * 
  * Returns NULL upon any error
  */
-DISK* initialize_disk() {
+DISK* initialize_disk(MEM_EXTENDED_PARAMETER* vmem_parameters) {
     DISK* disk = (DISK*) malloc(sizeof(DISK));
 
     if (disk == NULL) {
@@ -61,7 +64,7 @@ DISK* initialize_disk() {
     /**
      * Initialize disk slot locks
      */
-    ULONG64 num_locks = max(DISK_STORAGE_SLOTS >> 8, 1);
+    ULONG64 num_locks = max(DISK_STORAGE_SLOTS >> 4, 1);
     CRITICAL_SECTION* disk_slot_locks = (CRITICAL_SECTION*) malloc(sizeof(CRITICAL_SECTION) * num_locks);
 
     if (disk_slot_locks == NULL) {
@@ -90,6 +93,7 @@ DISK* initialize_disk() {
     disk->num_locks = num_locks;
     disk->disk_slot_locks = disk_slot_locks;
     disk->open_slot_counts = disk_open_slots;
+    disk->total_available_slots = DISK_STORAGE_SLOTS;
 
     /**
      * Create special virtual addresses and PTEs for writing to the disk
@@ -99,12 +103,12 @@ DISK* initialize_disk() {
      * the hold time on them should be very brief.
      */
     
-    if (initialize_disk_write(disk) == ERROR) {
+    if (initialize_disk_write(disk, vmem_parameters) == ERROR) {
         fprintf(stderr, "Failed to initialize disk write in initialize_disk\n");
         return NULL;
     }
 
-    if (initialize_disk_read(disk) == ERROR) {
+    if (initialize_disk_read(disk, vmem_parameters) == ERROR) {
         fprintf(stderr, "Failed to initialize disk write in initialize_disk\n");
         return NULL;
     }
@@ -118,10 +122,16 @@ DISK* initialize_disk() {
  * 
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
-static int initialize_disk_write(DISK* disk) {
+static int initialize_disk_write(DISK* disk, MEM_EXTENDED_PARAMETER* vmem_parameters) {
     // We want the virtual memory to be separate from the user address space
-    PULONG_PTR disk_write_base = VirtualAlloc(NULL, PAGE_SIZE * DISK_WRITE_SLOTS, 
+    PULONG_PTR disk_write_base;
+    if (vmem_parameters == NULL) {
+        disk_write_base = VirtualAlloc(NULL, PAGE_SIZE * DISK_WRITE_SLOTS, 
                         MEM_PHYSICAL | MEM_RESERVE, PAGE_READWRITE);
+    } else {
+        disk_write_base = VirtualAlloc2(NULL, NULL, PAGE_SIZE * DISK_WRITE_SLOTS,
+                        MEM_PHYSICAL | MEM_RESERVE, PAGE_READWRITE, vmem_parameters, 1);
+    }
     
     if (disk_write_base == NULL) {
         fprintf(stderr, "Unable to virtual alloc memory for disk_write_base in initialize_disk\n");
@@ -162,6 +172,25 @@ static int initialize_disk_write(DISK* disk) {
     initialize_lock(&disk->disk_write_list_lock);
     disk->disk_write_listhead = disk_write_listhead;
 
+    /**
+     * We also virtual alloc a large virtual address space to support large, batched writes
+     */
+    PULONG_PTR disk_large_write_slot;
+    
+    if (vmem_parameters == NULL) {
+        disk_large_write_slot = VirtualAlloc(NULL, PAGE_SIZE * MAX_PAGES_WRITABLE, 
+                        MEM_PHYSICAL | MEM_RESERVE, PAGE_READWRITE); 
+    } else {
+        disk_large_write_slot = VirtualAlloc2(NULL, NULL, PAGE_SIZE * MAX_PAGES_WRITABLE,
+                        MEM_PHYSICAL | MEM_RESERVE, PAGE_READWRITE, vmem_parameters, 1);
+    }
+    
+    if (disk_large_write_slot == NULL) {
+        fprintf(stderr, "Failed to virtual alloc the large disk write slot\n");
+        return ERROR;
+    }
+    disk->disk_large_write_slot = disk_large_write_slot;
+
     return SUCCESS;
 }
 
@@ -171,16 +200,38 @@ static int initialize_disk_write(DISK* disk) {
  * 
  * Return SUCCESS if there are no issues, ERROR otherwise
  */
-static int initialize_disk_read(DISK* disk) {
-    // We want the virtual memory to be separate from the user address space
-    PULONG_PTR disk_read_base = VirtualAlloc(NULL, PAGE_SIZE * DISK_READ_SLOTS, 
+static int initialize_disk_read(DISK* disk, MEM_EXTENDED_PARAMETER* vmem_parameters) {
+    
+    /**
+     * We want the disk read/write slots to have separate virtual address ranges from the user
+     * in our simulation. If vmem_parameters is NULL, then we can simply do a normal VirtualAlloc.
+     * 
+     * Otherwise, we need to use VirtualAlloc2 in order to adjust to the requirements of
+     * SUPPORT_MULTIPLE_VA_TO_PAGE being on
+     */
+    PULONG_PTR disk_read_base;
+    if (vmem_parameters == NULL) {
+        disk_read_base = VirtualAlloc(NULL, PAGE_SIZE * DISK_READ_SLOTS, 
                         MEM_PHYSICAL | MEM_RESERVE, PAGE_READWRITE);
+    } else {
+        disk_read_base = VirtualAlloc2(NULL, NULL, PAGE_SIZE * DISK_READ_SLOTS,
+                        MEM_PHYSICAL | MEM_RESERVE, PAGE_READWRITE, vmem_parameters, 1);
+    }
+
     
     if (disk_read_base == NULL) {
         fprintf(stderr, "Unable to virtual alloc memory for disk_read_base in initialize_disk\n");
         return ERROR;
     }
 
+    disk->disk_read_base_addr = disk_read_base;
+    for (ULONG64 slot_num = 0; slot_num < DISK_READ_SLOTS; slot_num++) {
+        disk->disk_read_slot_statues[slot_num] = DISK_READ_OPEN;
+    }
+
+    disk->num_available_read_slots = DISK_READ_SLOTS;
+
+    #if 0
     DB_LL_NODE* disk_read_listhead = db_create_list();
 
     if (disk_read_listhead == NULL) {
@@ -214,6 +265,7 @@ static int initialize_disk_read(DISK* disk) {
 
     initialize_lock(&disk->disk_read_list_lock);
     disk->disk_read_listhead = disk_read_listhead;
+    #endif
 
     return SUCCESS;
 }

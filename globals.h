@@ -33,6 +33,13 @@ extern STANDBY_LIST* standby_list;
 
 extern MODIFIED_LIST* modified_list;
 
+#define LOG_SIZE 512
+#if DEBUG_PAGELOCK
+extern PAGE_LOGSTRUCT page_log[LOG_SIZE];
+
+extern volatile ULONG64 log_idx;
+#endif
+
 
 /**
  * GLOBAL SYNCHRONIZATION

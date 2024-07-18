@@ -28,6 +28,9 @@
 #define DOWN_TO_PAGE_ADDR(x) (x & ~(PAGE_SIZE - 1))
 #define DOWN_TO_PAGE_NUM(x) (x >> PAGE_POWER)
 
+// Whether we can map multiple virtual addresses to the same page
+#define SUPPORT_MULTIPLE_VA_TO_SAME_PAGE 1
+
 
 #ifndef LARGE_SIM
 

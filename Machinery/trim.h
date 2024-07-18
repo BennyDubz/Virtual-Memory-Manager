@@ -50,42 +50,21 @@ int connect_pte_to_page(PTE* pte, PAGE* open_page);
 int disconnect_pte_from_cpu(PTE* pte);
 
 
-// /**
-//  * Writes the given PTE to the disk, and stores the resulting disk_idx in disk_idx_storage
-//  * 
-//  * Returns the disk index if there are no issues, ERROR otherwise
-//  */
-// int write_to_disk(PTE* pte, ULONG64* disk_idx_storage);
-
 /**
- * A thread dedicated to writing the given page to the disk. Writes the resulting
- * disk storage index into the given pointer disk_idx_storage.
- * 
- * Returns SUCCESS if we write the page to disk, ERROR otherwise
+ * Spins until the pagelock for the given page can be acquired and returns
  */
-int write_to_disk(PAGE* transition_page, ULONG64* disk_idx_storage);
+void acquire_pagelock(PAGE* page);
 
 
 /**
- * Fetches the memory from the disk index and puts it onto the open page
- * 
- * Returns SUCCESS if there are no issues, ERROR otherwise
+ * Releases the pagelock for other threads to use
  */
-int read_from_disk(PAGE* open_page, ULONG64 disk_idx);
+void release_pagelock(PAGE* page);
 
 
 /**
- * Writes an open disk idx into the result storage pointer
+ * Tries to acquire the pagelock without any spinning. 
  * 
- * Returns SUCCESS if we successfully wrote a disk idx, ERROR otherwise (may be empty)
- * 
+ * Returns TRUE if successful, FALSE otherwise
  */
-int allocate_disk_slot(ULONG64* result_storage);
-
-
-/**
- * Modifies the bitmap on the disk to indicate the given disk slot is free
- * 
- * Returns SUCCESS upon no issues, ERROR otherwise
- */
-int release_disk_slot(ULONG64 disk_idx);
+BOOL try_acquire_pagelock(PAGE* page);

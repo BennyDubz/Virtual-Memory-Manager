@@ -70,6 +70,12 @@ PAGE* initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_f
             return NULL;
         }
 
+        new_page->page_lock = PAGE_UNLOCKED;
+
+        #if DEBUG_PAGELOCK
+        InitializeCriticalSection(&new_page->dev_page_lock);
+        #endif
+
         /**
          * By creating the listnodes here up front as well, we ensure we do not have to malloc them 
          * later on down the road. If we were unable to allocate memory to a node to add
@@ -82,8 +88,7 @@ PAGE* initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_f
             return NULL;
         }
         
-        new_page->free_page.frame_listnode = page_listnode;
-        new_page->free_page.frame_number = curr_pfn;
+        new_page->frame_listnode = page_listnode;
     }
 
 
@@ -95,7 +100,7 @@ PAGE* initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_f
  * Returns TRUE if the page is in the free status, FALSE otherwise
  */
 BOOL page_is_free(PAGE page) {
-    return page.free_page.status == FREE_STATUS;
+    return page.status == FREE_STATUS;
 }
 
 
@@ -103,7 +108,7 @@ BOOL page_is_free(PAGE page) {
  * Returns TRUE if the page is in the modified status, FALSE otherwise
  */
 BOOL page_is_modified(PAGE page) {
-    return page.modified_page.status == MODIFIED_STATUS;
+    return page.status == MODIFIED_STATUS;
 }
 
 
@@ -111,9 +116,70 @@ BOOL page_is_modified(PAGE page) {
  * Returns TRUE if the page is in the standby status, FALSE otherwise
  */
 BOOL page_is_standby(PAGE page) {
-    return page.standby_page.status == STANDBY_STATUS;
+    return page.status == STANDBY_STATUS;
 }
 
+
+#if 0
+/**
+ * Spins until the pagelock for the given page can be acquired and returns
+ */
+void acquire_pagelock(PAGE* page) {
+
+    #if DEBUG_PAGELOCK
+    EnterCriticalSection(&page->dev_page_lock);
+    page->page_lock = PAGE_LOCKED;
+    page->holding_threadid = GetCurrentThreadId();
+    return;
+    #endif
+
+    unsigned old_lock_status;
+    while(TRUE) {
+        old_lock_status = InterlockedCompareExchange(&page->page_lock, PAGE_LOCKED, PAGE_UNLOCKED);
+        if (old_lock_status == PAGE_UNLOCKED) break;
+    }
+}
+
+
+/**
+ * Releases the pagelock for other threads to use
+ */
+void release_pagelock(PAGE* page) {
+    #if DEBUG_PAGELOCK
+    if (page->holding_threadid != GetCurrentThreadId()) {
+        DebugBreak();
+    }
+    page->page_lock = PAGE_UNLOCKED;
+    page->holding_threadid = 0;
+    LeaveCriticalSection(&page->dev_page_lock);
+    return;
+    #endif
+
+    if (InterlockedCompareExchange(&page->page_lock, PAGE_UNLOCKED, PAGE_LOCKED) != PAGE_LOCKED) {
+        DebugBreak();
+    };
+}
+
+
+/**
+ * Tries to acquire the pagelock without any spinning. 
+ * 
+ * Returns TRUE if successful, FALSE otherwise
+ */
+BOOL try_acquire_pagelock(PAGE* page) {
+    #if DEBUG_PAGELOCK
+    if (TryEnterCriticalSection(&page->dev_page_lock)) {
+        page->page_lock = PAGE_LOCKED;
+        page->holding_threadid = GetCurrentThreadId();
+        return TRUE;
+    } else {
+        return FALSE;
+    }
+    #endif
+    return InterlockedCompareExchange(&page->page_lock, PAGE_LOCKED, PAGE_UNLOCKED) == PAGE_UNLOCKED;
+
+}
+#endif
 
 /**
  * ##########################
@@ -162,13 +228,12 @@ FREE_FRAMES_LISTS* initialize_free_frames(PAGE* page_storage_base, ULONG64* phys
         }
 
         // Add the already allocated frame listnode to the free list
-        if (db_insert_node_at_head(relevant_listhead, free_frame->free_page.frame_listnode) == ERROR) {
+        if (db_insert_node_at_head(relevant_listhead, free_frame->frame_listnode) == ERROR) {
             fprintf(stderr, "Failed to insert free frame in its list\n");
             return NULL;
         }
 
-        free_frame->free_page.status = FREE_STATUS;
-        free_frame->free_page.zeroed_out = 1;
+        free_frame->status = FREE_STATUS;
 
         free_frames->list_lengths[listhead_idx] ++;
     }
@@ -243,9 +308,6 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
         }
         
         InterlockedDecrement64(&free_frames->total_available);
-
-        page->active_page.status = ACTIVE_STATUS;
-        // page->active_page.debug_spot = ACTIVE_FROM_FREE;
 
         LeaveCriticalSection(&free_frames->list_locks[local_index]);
 
@@ -323,8 +385,8 @@ int modified_add_page(PAGE* page, MODIFIED_LIST* modified_list) {
         return ERROR;
     }
 
-    page->modified_page.status = MODIFIED_STATUS;
-    db_insert_node_at_head(modified_list->listhead, page->modified_page.frame_listnode);
+    page->status = MODIFIED_STATUS;
+    db_insert_node_at_head(modified_list->listhead, page->frame_listnode);
     modified_list->list_length += 1;
 
     return SUCCESS;
@@ -398,8 +460,8 @@ int standby_add_page(PAGE* page, STANDBY_LIST* standby_list) {
         return ERROR;
     }
     
-    page->standby_page.status = STANDBY_STATUS;
-    db_insert_node_at_head(standby_list->listhead, page->modified_page.frame_listnode);
+    page->status = STANDBY_STATUS;
+    db_insert_node_at_head(standby_list->listhead, page->frame_listnode);
     standby_list->list_length += 1;
 
     return SUCCESS;

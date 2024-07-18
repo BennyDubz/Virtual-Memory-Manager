@@ -9,9 +9,11 @@
 #include "./init.h"
 #include "./Machinery/pagefault.h"
 #include "./hardware.h"
+#include "./Machinery/debug_checks.h"
 
 
-#define NUM_USERMODE_THREADS        8
+#define NUM_USERMODE_THREADS        2
+#define MAX_CONSECUTIVE_ACCESSES    64
 #define ACCESS_AMOUNT       MB(1)
 
 HANDLE simulation_threads[NUM_USERMODE_THREADS];
@@ -123,7 +125,6 @@ void usermode_virtual_memory_simulation () {
     return;
 }
 
-
 int thread_access_random_addresses(void* params) {
     ULONG64 i;
     BOOL page_faulted;
@@ -144,22 +145,37 @@ int thread_access_random_addresses(void* params) {
     int fault_result;
     arbitrary_va = NULL;
 
-    printf("Thread starting \n");
+    int consecutive_accesses = 0;   
 
+    printf("Thread starting \n");
     for (i = 0; i < ACCESS_AMOUNT; i += 1) {
 
-        // // Signal aging (temporary)
-        // if (i % 8 == 0) {
-        //     SetEvent(aging_event);
-        // }
-
-        // If we fail a page fault, we will want to try the address again and not change it
+        if (consecutive_accesses == 0) {
+            arbitrary_va = NULL;
+        }
+        
+        /**
+         * We want to make consecutive accesses very common. If we are doing consecutive accesses, we will increment the VA
+         * into the next page
+         */
+        if (consecutive_accesses != 0 && page_faulted == FALSE) {
+            if ((ULONG64) arbitrary_va + PAGE_SIZE < (ULONG64) vmem_base + VIRTUAL_ADDRESS_SIZE) {
+                arbitrary_va += (PAGE_SIZE / sizeof(ULONG_PTR));
+            } else {
+                arbitrary_va = NULL;
+            }
+            consecutive_accesses --;
+        }
+        
         if (arbitrary_va == NULL) {
+
             random_number = rand () * rand() * rand() * rand() * rand();
 
             random_number %= virtual_address_size_in_unsigned_chunks;
 
             arbitrary_va = vmem_base + random_number;
+
+            consecutive_accesses = rand() % MAX_CONSECUTIVE_ACCESSES;
         }
 
         //
@@ -170,14 +186,16 @@ int thread_access_random_addresses(void* params) {
         page_faulted = FALSE;
 
         __try {
+            //BW: Switch to this when we are actually zeroing-out pages
+            #if 0
+            // if (*arbitrary_va == 0) {
+            //     *arbitrary_va = (ULONG_PTR) arbitrary_va;
+            // } else if((ULONG_PTR) *arbitrary_va != (ULONG_PTR) arbitrary_va) {
+            //     debug_break_all_va_info(arbitrary_va);
+            // }
+            #endif
 
             *arbitrary_va = (ULONG_PTR) arbitrary_va;
-
-            arbitrary_va = NULL;
-
-            if (i % 4096 == 0) {
-                PRINT_F("i is %llx on one thread\n", i);
-            }
 
         } __except (EXCEPTION_EXECUTE_HANDLER) {
 
@@ -191,8 +209,15 @@ int thread_access_random_addresses(void* params) {
 
             // We will not try a unique random address again, so we do not incrment i
             i--; 
+        } else {
+            /**
+             * This is purely to simulate editing access bits in the PTE, which normally the CPU does for us
+             * 
+             * We have to do this ourselves at the beginning of the pagefault
+             */
 
-        } 
+            // pagefault(arbitrary_va);
+        }
         //BW: ELSE: we mark the relevant PTE as accessed (real hardware would do this for us)
     }
 

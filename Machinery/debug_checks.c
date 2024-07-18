@@ -84,11 +84,13 @@ BOOL pfn_is_single_allocated(ULONG64 pfn) {
     BOOL found = FALSE;
     ULONG64 section_start;
     ULONG64 ptes_per_lock = pagetable->num_virtual_pages / pagetable->num_locks;
+    // May be useful when in the debugger
+    PTE* first_pte_found;
     PTE* curr_pte;
 
     PAGE* curr_page = pfn_to_page(pfn);
 
-    if (curr_page->free_page.status == FREE_STATUS) {
+    if (curr_page->status == FREE_STATUS) {
         DebugBreak();
     }
 
@@ -111,7 +113,7 @@ BOOL pfn_is_single_allocated(ULONG64 pfn) {
                     DebugBreak();                
                     return FALSE;
                 }
-
+                first_pte_found = curr_pte;
                 found = TRUE;
             }
 
@@ -156,9 +158,6 @@ BOOL pte_valid_count_check(PTE* accessed_pte) {
         if (is_memory_format(curr_pte)) valid_count++;
     }
 
-    // printf("Start index: %llX\n", start_idx);
-    // printf("Final index: %llX\n", start_idx + ptes_per_lock);
-
     if (valid_count != stored_count) {
         DebugBreak();
         return FALSE;
@@ -166,4 +165,50 @@ BOOL pte_valid_count_check(PTE* accessed_pte) {
 
 
     return TRUE;
+}
+
+
+/**
+ * Logs the page's information into the global circular log structure
+ */
+void log_page_status(PAGE* page) {
+
+    #if DEBUG_PAGELOCK
+    ULONG64 curr_log_idx = InterlockedIncrement64(&log_idx) % LOG_SIZE;
+
+    PAGE_LOGSTRUCT log_struct;
+    log_struct.actual_page = page;
+    log_struct.page_copy = *page;
+    CaptureStackBackTrace(0, 8, log_struct.stack_trace, NULL);
+    log_struct.pfn = page_to_pfn(page);
+    log_struct.linked_pte = page->pte;
+    if (page->pte != NULL) {
+        log_struct.linked_pte_copy = *page->pte;
+    }
+    log_struct.thread_id = GetCurrentThreadId();
+
+    page_log[curr_log_idx] = log_struct;
+    #endif
+}
+
+
+/**
+ * Nicely collects all the VA's info - its PTE, page, etc, when we fail on a VA
+ * 
+ * Debugbreaks the program with all values as local variables for the debugger
+ * 
+ */
+void debug_break_all_va_info(PULONG_PTR arbitrary_va) {
+    PTE* relevant_pte = va_to_pte(arbitrary_va);
+    PULONG_PTR pte_va = pte_to_va(relevant_pte);
+
+    PAGE* relevant_page = pfn_to_page(relevant_pte->memory_format.frame_number);
+
+    PULONG_PTR last_used_disk_slot;
+
+    if (relevant_page->pagefile_idx != 0) {
+        last_used_disk_slot = disk_idx_to_addr(relevant_page->pagefile_idx);
+    }
+
+    DebugBreak();
 }

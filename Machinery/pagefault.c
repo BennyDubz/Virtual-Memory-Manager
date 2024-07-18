@@ -6,6 +6,7 @@
  */
 
 #include <stdio.h>
+#include <assert.h>
 #include "../globals.h"
 #include "../macros.h"
 #include "./trim.h"
@@ -34,13 +35,15 @@ static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64* disk
 
 static PAGE* find_available_page();
 
-static PAGE* rescue_pte(PTE local_pte, PTE* accessed_pte, ULONG64* disk_idx_storage);
+static int rescue_page(PAGE* page, ULONG64* disk_idx_storage);
 
-static int standby_rescue_page(PTE* accessed_pte, PAGE* rescue_page, ULONG64* disk_idx_storage);
+static int modified_rescue_page(PAGE* page);
 
-static int modified_rescue_page(PTE* accessed_pte, PAGE* rescue_page);
+static int standby_rescue_page(PAGE* page, ULONG64* disk_idx_storage);
 
 static PAGE* standby_pop_page();
+
+static void release_unneeded_page(PAGE* page);
 
 static void free_frames_add(PAGE* page);
 
@@ -65,12 +68,8 @@ int pagefault(PULONG_PTR virtual_address) {
 
     /**
      * Temporary ways to induce trimming and aging
-     */
-    // if ((total_available_pages < (physical_page_count / 2)) && (fault_count % 16) == 0) {
-    //     SetEvent(aging_event);
-    // }
-    
-    if ((total_available_pages < (physical_page_count / 3) && (fault_count % 2) == 0)) {
+     */    
+    if ((total_available_pages < (physical_page_count / 3) && (fault_count % 32) == 0)) {
         SetEvent(trimming_event);
     }
 
@@ -118,6 +117,13 @@ int pagefault(PULONG_PTR virtual_address) {
         DebugBreak();
     }
 
+    #if DEBUG_PAGELOCK
+    assert(allocated_page->holding_threadid == GetCurrentThreadId());
+    #endif
+    assert(allocated_page->page_lock == PAGE_LOCKED);
+    assert(allocated_page->status != ACTIVE_STATUS);
+    
+
 
     /**
      * Only a single thread faulting on the disk PTE will end up here, and it will already 
@@ -142,34 +148,71 @@ int pagefault(PULONG_PTR virtual_address) {
              */ 
 
             LeaveCriticalSection(pte_lock);
-            free_frames_add(allocated_page);
+            release_unneeded_page(allocated_page);
             return RACE_CONDITION_FAIL;
         }
     }
 
+    if (is_transition_format(local_pte) == FALSE && allocated_page->status == STANDBY_STATUS) {
+        if (is_transition_format(*allocated_page->pte) == FALSE) {
+            DebugBreak();
+        }
+    }
 
-    allocated_page->active_page.status = ACTIVE_STATUS;
-    allocated_page->active_page.pte = accessed_pte;
+    // We may need to edit the old PTE, in which case, we want a copy so we can still find it
+    PAGE allocated_page_old = *allocated_page;
+
+    allocated_page->status = ACTIVE_STATUS;
+    allocated_page->pte = accessed_pte;
 
     // BW: Temporary until we are differentiating between reads and writes and can try to re-trim them
     // quickly by saving the disk index
-    allocated_page->active_page.pagefile_idx = DISK_IDX_NOTUSED;
+    allocated_page->pagefile_idx = DISK_IDX_NOTUSED;
 
     // BW: Again, we are returning ALL disk slots for now
     if (disk_idx != DISK_IDX_NOTUSED) {
-        release_disk_slot(disk_idx);
+        release_single_disk_slot(disk_idx);
     }
 
     // Connect the PTE to the pfn through the CPU 
     connect_pte_to_page(accessed_pte, allocated_page);
 
     #ifdef DEBUG_CHECKING
-    if (pfn_is_single_allocated(page_to_pfn(page_storage)) == FALSE) {
-        DebugBreak();
+    if ((is_transition_format(local_pte) == FALSE && allocated_page_old.status == STANDBY_STATUS) == FALSE) {
+
+        if (pfn_is_single_allocated(page_to_pfn(allocated_page)) == FALSE) {
+            DebugBreak();
+        }
     }
     #endif
 
     LeaveCriticalSection(pte_lock);
+
+    /**
+     * We need to modify the other PTE associated with the standby page now that we are committing
+     * 
+     * The worst case is that other threads are spinning on the pagelock in transition format waiting for this to happen,
+     * and they will need to retry the fault as their PTE will be in disk format
+     */
+    if (is_transition_format(local_pte) == FALSE && allocated_page_old.status == STANDBY_STATUS) {
+        PTE* old_pte = allocated_page_old.pte;
+        ULONG64 pfn = page_to_pfn(allocated_page);
+
+        if (is_transition_format(*old_pte) == FALSE) {
+            DebugBreak();
+        }
+
+        PTE pte_contents;
+        pte_contents.complete_format = 0;
+        // The other disk format specific entries are zero - so we do not need to set them
+        pte_contents.disk_format.pagefile_idx = allocated_page_old.pagefile_idx;
+
+        EnterCriticalSection(&pte_to_locksection(old_pte)->lock);
+        write_pte_contents(old_pte, pte_contents);
+        LeaveCriticalSection(&pte_to_locksection(old_pte)->lock);
+    }
+
+    release_pagelock(allocated_page);
 
     return SUCCESSFUL_FAULT;
 }   
@@ -197,25 +240,43 @@ static int handle_unaccessed_pte_fault(PTE local_pte, PAGE** result_page_storage
 
 
 /**
- * Handles a pagefault for a PTE that is in transition format - it is either
- * in the modified or standby list
+ * Handles a pagefault for a PTE in transition format
  * 
- * Returns a pointer to the rescued page, or NULL if it could not be rescued.
+ * Writes the rescued page into result_page_storage, and the disk index into the disk_idx_storage if applicable,
+ * otherwise, DISK_IDX_NOTUSED is written into it
  * 
- * Changes disk_idx_storage to be the disk index of the page if it was rescued from standby,
- * and is set to DISK_IDX_NOTUSED if it was rescued from modified to signify that it is invalid.
+ * Returns SUCCESS if there are no issues, or RESCUE_FAIL otherwise
  */
 static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64* disk_idx_storage, PAGE** result_page_storage) {
-    
-    PAGE* rescued_page = rescue_pte(local_pte, accessed_pte, disk_idx_storage);
+    ULONG64 pfn = local_pte.transition_format.frame_number;
 
-    if (rescued_page == NULL) {
+    PAGE* page_to_rescue = pfn_to_page(pfn);
+
+    // After we acquire the pagelock, if the page is rescuable then we should always be able to succeed
+    acquire_pagelock(page_to_rescue);
+
+    // We lost the race to rescue this PTE - whether it was stolen from under us or someone else saved it
+    if (page_to_rescue->pte != accessed_pte || page_to_rescue->status == ACTIVE_STATUS) {
+        release_pagelock(page_to_rescue);
         return RESCUE_FAIL;
     }
 
-    *result_page_storage = rescued_page;
+    // We now try to rescue the page from the modified or standby list
+    if (rescue_page(page_to_rescue, disk_idx_storage) == ERROR) {
+        DebugBreak();
+        release_pagelock(page_to_rescue);
+        return RESCUE_FAIL;
+    }
 
-    return SUCCESS;
+    *result_page_storage = page_to_rescue;
+
+    assert(page_to_rescue->page_lock == PAGE_LOCKED);
+    assert(page_to_rescue->status != ACTIVE_STATUS);
+    #if DEBUG_PAGELOCK
+    assert(page_to_rescue->holding_threadid == GetCurrentThreadId());
+    #endif
+
+    return SUCCESS;    
 }
 
 
@@ -229,6 +290,7 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64
 static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64* disk_idx_storage, PAGE** result_page_storage) {
     CRITICAL_SECTION* pte_lock = &pte_to_locksection(accessed_pte)->lock;
 
+    // We also now hold the allocated pagelock
     PAGE* allocated_page = find_available_page();
 
     if (allocated_page == NULL) {
@@ -239,6 +301,9 @@ static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64* disk
 
     EnterCriticalSection(pte_lock);
 
+    assert(allocated_page->page_lock == PAGE_LOCKED);
+    assert(allocated_page->status != ACTIVE_STATUS);
+
     if (ptes_are_equal(local_pte, *accessed_pte) == FALSE) {
         /**
          * Return the page to the free-list and return NULL
@@ -247,7 +312,7 @@ static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64* disk
          *  in another thread and re-add them to the free-list
          */ 
         LeaveCriticalSection(pte_lock);
-        free_frames_add(allocated_page);
+        release_unneeded_page(allocated_page);
         return RACE_CONDITION_FAIL;
     }
     
@@ -260,16 +325,20 @@ static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64* disk
      */
 
     // Another thread could have rescued this frame ahead of us
-    if (read_from_disk(allocated_page, disk_idx) == ERROR) {
+    if (read_page_from_disk(allocated_page, disk_idx) == ERROR) {
         LeaveCriticalSection(pte_lock);
 
         // BW: Here, we would want to add it to the zero-out thread!
-        free_frames_add(allocated_page);
+        release_unneeded_page(allocated_page);
         return DISK_FAIL;
     }
 
     *disk_idx_storage = disk_idx;
     *result_page_storage = allocated_page;
+
+    assert(allocated_page->page_lock == PAGE_LOCKED);
+    assert(allocated_page->status != ACTIVE_STATUS);
+
 
     return SUCCESS;
 }
@@ -288,21 +357,16 @@ static PAGE* find_available_page() {
     if ((allocated_page = allocate_free_frame(free_frames)) != NULL) {
         
         InterlockedDecrement64(&total_available_pages);
+        acquire_pagelock(allocated_page);
+        #if DEBUG_PAGELOCK
+        assert(allocated_page->holding_threadid == GetCurrentThreadId());
+        #endif
         return allocated_page;
     }
 
     /**
      * Now we have to try to get a page from the standby list
      */
-
-
-    /**
-     * By checking if the length is 0 first, we can avoid contending for the standby list lock and hopefully
-     * have a page more quickly. A page could be added to the standby list in between the checks, but that would
-     * be rare - reducing the standby list contention is going to be more impactful
-     */
-    // if ((standby_list->list_length == 0) ||
-    //     (allocated_page = standby_pop_page(standby_list)) == NULL) {
     
     if ((allocated_page = standby_pop_page(standby_list)) == NULL) {
         ResetEvent(waiting_for_pages_event);
@@ -315,59 +379,41 @@ static PAGE* find_available_page() {
         return NULL;
     }
 
-    InterlockedDecrement64(&total_available_pages);
+    #if DEBUG_PAGELOCK
+    assert(allocated_page->holding_threadid == GetCurrentThreadId());
+    #endif
+
+    // The pagelock is acquired in standby_pop_page
     return allocated_page;
 }
 
-
 /**
- * For the given PTE, find its associated page in the modified or standby list
- * and return it.
+ * Rescues the given page from the modified or standby list and stores its relevant disk index in the given pointer, if applicable
  * 
- * Returns a pointer to the recycled_page page upon success, NULL if it could not be found
+ * Returns SUCCESS if the page is rescued, ERROR otherwise
  */
-static PAGE* rescue_pte(PTE local_pte, PTE* accessed_pte, ULONG64* disk_idx_storage) {
+static int rescue_page(PAGE* page, ULONG64* disk_idx_storage) {
 
-    ULONG64 pfn = local_pte.transition_format.frame_number;
-
-    PAGE* rescue_page = pfn_to_page(pfn);
-    
-    /**
-     * Here, we are exposed to a possible race condition where we could rescue a modified page right
-     * when it is being added to standby. Therefore, we must also try the standby list right after
-     * sequentially. If we succeeded, the page will not be in the standby format.
-     */
-    if (page_is_modified(*rescue_page)) {
-        if (modified_rescue_page(accessed_pte, rescue_page) == SUCCESS) {
-            *disk_idx_storage = DISK_IDX_NOTUSED;
-            return rescue_page;
+    if (page_is_modified(*page)) {
+        if (modified_rescue_page(page) == ERROR) {
+            return ERROR;
         }
-    } 
-    
-
-    /**
-     * Again, we could have a race condition where we try to get the page from the standby list
-     * just as it is given to someone else. So if it fails, we know that this PTE was unlucky
-     * and will have to get a new page entirely.
-     */
-    if (page_is_standby(*rescue_page)){
-        if (standby_rescue_page(accessed_pte, rescue_page, disk_idx_storage) == SUCCESS) {
-            return rescue_page;
-        }
+        *disk_idx_storage = DISK_IDX_NOTUSED;
+        assert(page->page_lock == PAGE_LOCKED);
+        assert(page->status == MODIFIED_STATUS);
+        return SUCCESS;
     }
 
+    if (page_is_standby(*page)) {
+        if (standby_rescue_page(page, disk_idx_storage) == ERROR) {
+            return ERROR;
+        }
+        assert(page->page_lock == PAGE_LOCKED);
+        assert(page->status == STANDBY_STATUS);
+        return SUCCESS;
+    }
 
-    // if (rescue_page->active_page.status == ACTIVE_STATUS) {
-    //     DebugBreak();
-    // }
-
-    /**
-     * At this point, the page was either rescued by another thread or was recycled and given to someone
-     * else. Regardless, the page fault must be re-attempted as this thread's rescue operation failed
-     */
-    PRINT_F("Rescue failed on pfn %llX\n", local_pte.transition_format.frame_number);
-    *disk_idx_storage = DISK_IDX_NOTUSED;
-    return NULL;
+    return ERROR;
 }
 
 
@@ -376,44 +422,24 @@ static PAGE* rescue_pte(PTE local_pte, PTE* accessed_pte, ULONG64* disk_idx_stor
  * 
  * Returns SUCCESS if the rescue page was found and removed, ERROR otherwise
  */
-static int modified_rescue_page(PTE* accessed_pte, PAGE* rescue_page) {
-    if (rescue_page == NULL) {
-        fprintf(stderr, "NULL modified list or rescue_page given to modified_rescue_page\n");
+static int modified_rescue_page(PAGE* page) {
+    // The page is not in the modified list, but is instead being written to disk, but we can still take it
+    if (page->writing_to_disk == PAGE_BEING_WRITTEN) {
+        page->writing_to_disk = PAGE_NOT_BEING_WRITTEN;
+        return SUCCESS;
     }
-    
+
     EnterCriticalSection(&modified_list->lock);
 
-    if (rescue_page->modified_page.status != MODIFIED_STATUS) {
+    if (db_remove_from_middle(modified_list->listhead, page->frame_listnode) == ERROR) {
         LeaveCriticalSection(&modified_list->lock);
+        DebugBreak();
         return ERROR;
     }
 
-    // The trimming thread is in moving this from the modified list to the standby list.
-    // The rescue failing here should hopefully only be temporary
-    if (rescue_page->modified_page.frame_listnode->listhead_ptr != modified_list->listhead) {
-        LeaveCriticalSection(&modified_list->lock);
-        return ERROR;
-    }
-
-    if (rescue_page->modified_page.pte != accessed_pte) {
-        LeaveCriticalSection(&modified_list->lock);
-        return ERROR;
-    }
-
-    db_remove_from_middle(modified_list->listhead, rescue_page->modified_page.frame_listnode);
     modified_list->list_length--;
 
-    rescue_page->active_page.status = ACTIVE_STATUS;
-
-
     LeaveCriticalSection(&modified_list->lock);
-
-    #ifdef DEBUG_CHECKING
-    int dbg_result;
-    if ((dbg_result = page_is_isolated(rescue_page)) != ISOLATED) {
-        DebugBreak();
-    }
-    #endif
 
     return SUCCESS;
 }
@@ -424,67 +450,21 @@ static int modified_rescue_page(PTE* accessed_pte, PAGE* rescue_page) {
  * 
  * Returns SUCCESS if the rescue page was found and removed, ERROR otherwise
  */
-static int standby_rescue_page(PTE* accessed_pte, PAGE* rescue_page, ULONG64* disk_idx_storage) {
-    if (standby_list == NULL || rescue_page == NULL) {
-        fprintf(stderr, "NULL standby list or rescue page given to standby_rescue_page\n");
-    }
-
+static int standby_rescue_page(PAGE* page, ULONG64* disk_idx_storage) {
     EnterCriticalSection(&standby_list->lock);
 
-    if (rescue_page->standby_page.status != STANDBY_STATUS) {
+    if (db_remove_from_middle(standby_list->listhead, page->frame_listnode) == ERROR) {
         LeaveCriticalSection(&standby_list->lock);
-        return ERROR;
-    }
-
-    // Someone was able to remove the page from the standby list before we reached it
-    if (rescue_page->standby_page.frame_listnode->listhead_ptr != standby_list->listhead) {
-        // In the current implementation, this should not happen
         DebugBreak();
-        LeaveCriticalSection(&standby_list->lock);
         return ERROR;
     }
 
-    /**
-     * Take pointer of the PTE and compare it to the rescue page's PTE, if they differ,
-     * return ERROR.
-     */
-    if (rescue_page->standby_page.pte != accessed_pte) {
-        LeaveCriticalSection(&standby_list->lock);
-        return ERROR;
-    }
-
-    db_remove_from_middle(standby_list->listhead, rescue_page->standby_page.frame_listnode);
     standby_list->list_length--;
-
-    // Since we are rescuing the page, we don't need it on disk right now.
-    // BW: Later, we can take shortcuts adding the page straight to the standby list if it hasn't been modified
-
-    ULONG64 disk_idx = rescue_page->standby_page.pagefile_idx;
-
-    if (disk->disk_slot_statuses[disk_idx] == DISK_FREESLOT) {
-        DebugBreak();
-    }
-
-    rescue_page->active_page.status = ACTIVE_STATUS;
-
     InterlockedDecrement64(&total_available_pages);
 
     LeaveCriticalSection(&standby_list->lock);
 
-    #ifdef DEBUG_CHECKING
-    int dbg_result;
-    if ((dbg_result = page_is_isolated(rescue_page)) != ISOLATED) {
-        DebugBreak();
-    }
-    #endif
-
-    // Set the disk idx storage to where the standby page's information used to be stored
-    *disk_idx_storage = rescue_page->standby_page.pagefile_idx;
-
-    // EnterCriticalSection(disk_idx_to_lock(disk_idx));
-    // release_disk_slot(disk_idx);
-    // LeaveCriticalSection(disk_idx_to_lock(disk_idx));
-
+    *disk_idx_storage = page->pagefile_idx;
     return SUCCESS;
 }
 
@@ -497,58 +477,85 @@ static int standby_rescue_page(PTE* accessed_pte, PAGE* rescue_page, ULONG64* di
  */
 static PAGE* standby_pop_page() {
 
-    EnterCriticalSection(&standby_list->lock);
-
-    PAGE* recycled_page = db_pop_from_tail(standby_list->listhead);
-    
-    // Standby list is empty
-    if (recycled_page == NULL) {
-        LeaveCriticalSection(&standby_list->lock);
+    // Preemptively check that the list is empty
+    if (standby_list->list_length == 0) {
         return NULL;
     }
 
-    standby_list->list_length -= 1;
+    PAGE* potential_page = NULL;
+    while (potential_page == NULL) {
+        EnterCriticalSection(&standby_list->lock);
 
-    // Prepare to update the old PTE to reflect that it is on disk
-    PTE* old_pte = recycled_page->standby_page.pte;
-    PTE pte_contents;
-    pte_contents.complete_format = 0;
-    pte_contents.disk_format.always_zero = 0;
-    pte_contents.disk_format.pagefile_idx = recycled_page->standby_page.pagefile_idx;
-    pte_contents.disk_format.always_zero2 = 0;
+        potential_page = (PAGE*) standby_list->listhead->blink->item;
 
-    CRITICAL_SECTION* old_pte_lock = &pte_to_locksection(old_pte)->lock;
+        // The list is empty
+        if (potential_page == NULL) {
+            LeaveCriticalSection(&standby_list->lock);
+            return NULL;
+        }
 
-    // We must modify the other PTE to reflect that it is on the disk
-    EnterCriticalSection(old_pte_lock);
+        // Someone may be trying to rescue it, if they are - we have to back off
+        if (try_acquire_pagelock(potential_page) == FALSE) {
+            LeaveCriticalSection(&standby_list->lock);
+            potential_page = NULL;
+            continue;
+        }
 
-    #ifdef DEBUG_CHECKING
-    if (pfn_is_single_allocated(page_to_pfn(recycled_page)) == FALSE) {
-        DebugBreak();
+
+        #if DEBUG_PAGELOCK
+        assert(potential_page->holding_threadid == GetCurrentThreadId());
+        #endif
+        // We remove the page from the list now
+        db_pop_from_tail(standby_list->listhead);
+
+        DB_LL_NODE* start = standby_list->listhead->flink;
+
+        standby_list->list_length--;
+        InterlockedDecrement64(&total_available_pages);
+
+        LeaveCriticalSection(&standby_list->lock);
     }
-    #endif
 
-    write_pte_contents(old_pte, pte_contents);
 
-    LeaveCriticalSection(old_pte_lock);
-
-    // This ensures that any PTE attempting to rescue this page when it acquires the standby
-    // lock will fail
-    recycled_page->active_page.status = ACTIVE_STATUS;
-
-    InterlockedDecrement64(&total_available_pages);
-
-    LeaveCriticalSection(&standby_list->lock);
-
-    #ifdef DEBUG_CHECKING
-    int dbg_result;
-    if ((dbg_result = page_is_isolated(recycled_page)) != ISOLATED) {
-        DebugBreak();
-    }
-    #endif
-
-    return recycled_page;
+    /**
+     * By here, we have the required page and its lock. 
+     * 
+     * However, we have NOT made any irreversible changes. This will allow us to return the page to the standby list?
+     */
+    return potential_page;    
 }   
+
+
+/**
+ * Returns the given page to its appropriate list after it is revealed we no longer need it
+ * 
+ * Assumes that we have the pagelock
+ */
+static void release_unneeded_page(PAGE* page) {
+    if (page->status == STANDBY_STATUS) {
+        EnterCriticalSection(&standby_list->lock);
+
+        standby_add_page(page, standby_list);
+
+        InterlockedIncrement64(&total_available_pages);
+
+        LeaveCriticalSection(&standby_list->lock);
+    } else if (page->status == MODIFIED_STATUS) {
+        EnterCriticalSection(&modified_list->lock);
+
+        modified_add_page(page, modified_list);
+
+        InterlockedIncrement64(&total_available_pages);
+
+        LeaveCriticalSection(&modified_list->lock);
+    } else if (page->status == FREE_STATUS) {
+        free_frames_add(page);
+    }
+
+    assert(page->page_lock == PAGE_LOCKED);
+    release_pagelock(page);
+
+}
 
 
 /**
@@ -559,7 +566,6 @@ static PAGE* standby_pop_page() {
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
 static void free_frames_add(PAGE* page) {
-    // printf("Returning page %p\n", page);
     // Modulo operation based on the pfn to put it alongside other cache-colliding pages
     int listhead_idx = page_to_pfn(page) % NUM_FRAME_LISTS;
 
@@ -574,11 +580,9 @@ static void free_frames_add(PAGE* page) {
 
     EnterCriticalSection(&free_frames->list_locks[listhead_idx]);
 
-    page->free_page.frame_number = page_to_pfn(page);
-    page->free_page.status = FREE_STATUS;
-    page->free_page.zeroed_out = 0; // Until we are actually zeroing out frames
+    page->status = FREE_STATUS;
 
-    db_insert_node_at_head(relevant_listhead, page->free_page.frame_listnode);
+    db_insert_node_at_head(relevant_listhead, page->frame_listnode);
     free_frames->list_lengths[listhead_idx]++;
     
     InterlockedIncrement64(&total_available_pages);
@@ -586,6 +590,4 @@ static void free_frames_add(PAGE* page) {
     InterlockedIncrement64(&free_frames->total_available);
 
     LeaveCriticalSection(&free_frames->list_locks[listhead_idx]);
-
-    SetEvent(waiting_for_pages_event);
 }
