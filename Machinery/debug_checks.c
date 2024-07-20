@@ -206,6 +206,10 @@ void debug_break_all_va_info(PULONG_PTR arbitrary_va) {
 
     PULONG_PTR last_used_disk_slot;
 
+    PULONG_PTR other_va = (PULONG_PTR) *arbitrary_va;
+
+    PTE* other_pte = va_to_pte(other_va);
+
     if (relevant_page->pagefile_idx != 0) {
         last_used_disk_slot = disk_idx_to_addr(relevant_page->pagefile_idx);
     }

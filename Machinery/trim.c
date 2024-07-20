@@ -343,6 +343,8 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
 
             // Now, the page can be modified and added to the standby list
             curr_page->pagefile_idx = disk_batch.disk_indices[i];
+            PULONG_PTR disk_addr = disk_idx_to_addr(disk_batch.disk_indices[i]);
+            PULONG_PTR expected_va = pte_to_va(curr_page->pte);
             curr_page->writing_to_disk = PAGE_NOT_BEING_WRITTEN;
             curr_page->in_disk_batch = PAGE_NOT_IN_DISK_BATCH;
 

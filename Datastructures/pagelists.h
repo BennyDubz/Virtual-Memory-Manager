@@ -164,6 +164,14 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames);
 
 
 /**
+ * Tries to allocate batch_size number of free frames and put them sequentially in page_storage
+ * 
+ * Returns the number of pages successfully allocated and put into the page_storage
+ */
+ULONG64 allocate_batch_free_frames(FREE_FRAMES_LISTS* free_frames, PAGE* page_storage, ULONG64 batch_size);
+
+
+/**
  * Zeroes out the memory on the physical frame so that it can be reallocated to without privacy loss
  * 
  * Returns SUCCESS if there are no issues, ERROR otherwise

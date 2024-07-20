@@ -111,8 +111,9 @@ PULONG_PTR disk_idx_to_addr(ULONG64 disk_idx) {
         fprintf(stderr, "NULL diskbase or invalid disk_idx given to disk_idx_to_addr\n");
         return NULL;
     }
-
-    return disk->base_address + ((disk_idx / sizeof(PULONG_PTR)) * PAGE_SIZE);
+    
+    // After changing this, we had weird sim issue?
+    return disk->base_address + (disk_idx * PAGE_SIZE / sizeof(PULONG_PTR));
 }
 
 

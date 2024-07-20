@@ -17,6 +17,7 @@
 #include "./Datastructures/datastructures.h"
 #include "./Machinery/pagefault.h"
 #include "./Machinery/trim.h"
+#include "./Machinery/zero_operations.h"
 #include "./init.h"
 #include "./globals.h"
 #include "./hardware.h"
@@ -435,6 +436,17 @@ static int init_datastructures() {
         fprintf(stderr, "Unable to initialize modified list\n");
         return ERROR;
     }
+    #if SUPPORT_MULTIPLE_VA_TO_SAME_PAGE
+    if (initialize_page_zeroing(&vmem_parameters) == ERROR) {
+        fprintf(stderr, "Unable to initialize page zeroing structures\n");
+        return ERROR;
+    }
+    #else
+    if (initialize_page_zeroing(NULL) == ERROR) {
+        fprintf(stderr, "Unable to initialize page zeroing structures\n");
+        return ERROR;
+    }
+    #endif
 
     #if DEBUG_PAGELOCK
     page_log;

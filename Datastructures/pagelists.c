@@ -262,6 +262,7 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
     int curr_attempts = 0;
     
     ULONG64 local_index = free_frames->curr_list_idx;
+    BOOL found_first_nonempty_list = FALSE;
 
     PAGE* page = NULL;
     while (curr_attempts < NUM_FRAME_LISTS) {
@@ -274,7 +275,7 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
              * We expect multiple threads to be incrementing this, new starting threads don't start
              * on empty slots
              */
-            free_frames->curr_list_idx = (free_frames->curr_list_idx + 1) % NUM_FRAME_LISTS;
+            // free_frames->curr_list_idx = (free_frames->curr_list_idx + 1) % NUM_FRAME_LISTS;
             continue;
         }
 
@@ -292,8 +293,13 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
              */
             LeaveCriticalSection(&free_frames->list_locks[local_index]);
             local_index = (local_index + 1) % NUM_FRAME_LISTS;
-            free_frames->curr_list_idx = (free_frames->curr_list_idx + 1) % NUM_FRAME_LISTS;
+            // free_frames->curr_list_idx = (free_frames->curr_list_idx + 1) % NUM_FRAME_LISTS;
             continue;
+        }
+
+        if (found_first_nonempty_list == FALSE) {
+            free_frames->curr_list_idx = local_index;
+            found_first_nonempty_list = TRUE;
         }
 
         if (free_frames->list_lengths[local_index] == 0) {
@@ -316,6 +322,93 @@ PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
     
     return page;
 }
+
+
+/**
+ * Tries to allocate batch_size number of free frames and put them sequentially in page_storage
+ * 
+ * Returns the number of pages successfully allocated and put into the page_storage, but does
+ * NOT acquire the pagelocks ahead of time
+ */
+ULONG64 allocate_batch_free_frames(FREE_FRAMES_LISTS* free_frames, PAGE** page_storage, ULONG64 batch_size) {
+    // Free frames is empty
+    if (free_frames->total_available == 0) {
+        return 0;
+    }
+
+    ULONG64 oldest_failure_idx = INFINITE;
+    ULONG64 num_allocated = 0;
+    ULONG64 local_index = free_frames->curr_list_idx;
+    BOOL found_first_nonempty_list = FALSE;
+    PAGE* curr_page;
+
+
+    /**
+     * We will continue until we have either looped around and failed on all of the lists,
+     * or until we have allocated the number of pages that we want
+     */
+    while (local_index != oldest_failure_idx && num_allocated < batch_size) {
+        if (free_frames->list_lengths[local_index] == 0) {
+            // If this is our first failure in this loop of grabbing pages, set the failure index
+            if (oldest_failure_idx != INFINITE) {
+                oldest_failure_idx = local_index;
+            }
+
+            local_index = (local_index + 1) % NUM_FRAME_LISTS;
+
+            continue;
+        }
+
+        // By here, the **odds are better** that we will get a free frame, but not guaranteed
+        EnterCriticalSection(&free_frames->list_locks[local_index]);
+        DB_LL_NODE* frame_listhead = free_frames->listheads[local_index];
+
+        curr_page = (PAGE*) db_pop_from_head(frame_listhead);
+
+        // We lost the race condition, release lock and try again with the next one
+        if (curr_page == NULL) {
+            /**
+             * We purposefully do NOT increment curr_attempts, as we want the thread to be able to
+             * try again (especially early on if the standby list is still empty)
+             */
+            LeaveCriticalSection(&free_frames->list_locks[local_index]);
+
+            if (oldest_failure_idx != INFINITE) {
+                oldest_failure_idx = local_index;
+            }
+            local_index = (local_index + 1) % NUM_FRAME_LISTS;
+            
+            // free_frames->curr_list_idx = (free_frames->curr_list_idx + 1) % NUM_FRAME_LISTS;
+            continue;
+        }
+
+        if (found_first_nonempty_list == FALSE) {
+            free_frames->curr_list_idx = local_index;
+            found_first_nonempty_list = TRUE;
+        }
+
+        if (free_frames->list_lengths[local_index] == 0) {
+            DebugBreak();
+        }
+
+
+        free_frames->list_lengths[local_index]--;
+
+        if (free_frames->total_available == 0) {
+            DebugBreak();
+        }
+        
+        InterlockedDecrement64(&free_frames->total_available);
+
+        LeaveCriticalSection(&free_frames->list_locks[local_index]);
+
+        page_storage[num_allocated] = curr_page;
+        num_allocated++;
+    }
+
+    return num_allocated;
+}
+
 
 
 /**

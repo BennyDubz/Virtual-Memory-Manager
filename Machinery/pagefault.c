@@ -15,6 +15,7 @@
 #include "./debug_checks.h"
 #include "../Datastructures/datastructures.h"
 #include "./pagefault.h"
+#include "./zero_operations.h"
 
 
 /**
@@ -153,10 +154,10 @@ int pagefault(PULONG_PTR virtual_address) {
         }
     }
 
-    if (is_transition_format(local_pte) == FALSE && allocated_page->status == STANDBY_STATUS) {
-        if (is_transition_format(*allocated_page->pte) == FALSE) {
-            DebugBreak();
-        }
+    BOOL zeroed = FALSE;
+    if (allocated_page->status != ZEROED_PAGE && is_used_pte(local_pte) == FALSE) {
+        zeroed = TRUE;
+        zero_out_pages(&allocated_page, 1);
     }
 
     // We may need to edit the old PTE, in which case, we want a copy so we can still find it
@@ -176,6 +177,10 @@ int pagefault(PULONG_PTR virtual_address) {
 
     // Connect the PTE to the pfn through the CPU 
     connect_pte_to_page(accessed_pte, allocated_page);
+
+    // if (is_disk_format(local_pte)) {
+    //     DebugBreak();
+    // }
 
     #ifdef DEBUG_CHECKING
     if ((is_transition_format(local_pte) == FALSE && allocated_page_old.status == STANDBY_STATUS) == FALSE) {
@@ -482,7 +487,38 @@ static PAGE* standby_pop_page() {
         return NULL;
     }
 
-    PAGE* potential_page = NULL;
+    BOOL pagelock_acquired = FALSE;
+    PAGE* potential_page;
+    while (pagelock_acquired == FALSE) {
+        potential_page = (PAGE*) standby_list->listhead->blink->item;
+
+        // Check if the standby list is empty
+        if (potential_page == NULL) return NULL;
+
+        pagelock_acquired = try_acquire_pagelock(potential_page);
+
+        if (pagelock_acquired && potential_page != (PAGE*) standby_list->listhead->blink->item) {
+            release_pagelock(potential_page);
+            pagelock_acquired = FALSE;
+            continue;
+        }
+    
+    }
+
+    EnterCriticalSection(&standby_list->lock);
+
+    #if DEBUG_PAGELOCK
+    assert(potential_page->holding_threadid == GetCurrentThreadId());
+    #endif
+    // We remove the page from the list now
+    db_pop_from_tail(standby_list->listhead);
+    standby_list->list_length--;
+
+    LeaveCriticalSection(&standby_list->lock);
+
+    InterlockedDecrement64(&total_available_pages);
+
+    #if 0
     while (potential_page == NULL) {
         EnterCriticalSection(&standby_list->lock);
 
@@ -515,7 +551,7 @@ static PAGE* standby_pop_page() {
 
         LeaveCriticalSection(&standby_list->lock);
     }
-
+    #endif
 
     /**
      * By here, we have the required page and its lock. 
@@ -524,6 +560,66 @@ static PAGE* standby_pop_page() {
      */
     return potential_page;    
 }   
+
+
+/**
+ * Tries to pop batch_size pages from the standby list. Returns the number of pages successfully allocated
+ */
+static ULONG64 standby_pop_batch(PAGE** page_storage, ULONG64 batch_size) {
+
+    PAGE* curr_page;
+    
+    /**
+     * Acquire the pagelock for the very first page in the list, once we have done this, 
+     * we can walk down the list and acquire the other needed pagelocks
+     */
+    BOOL pagelock_acquired = FALSE;
+    PAGE* first_page;
+    while (pagelock_acquired == FALSE) {
+        first_page = (PAGE*) standby_list->listhead->blink->item;
+
+        // Check if the standby list is empty
+        if (first_page == NULL) return 0;
+
+        pagelock_acquired = try_acquire_pagelock(first_page);
+
+        if (pagelock_acquired && first_page != (PAGE*) standby_list->listhead->blink->item) {
+            release_pagelock(first_page);
+            pagelock_acquired = FALSE;
+            continue;
+        }
+    }
+
+    ULONG64 num_allocated = 1;
+    curr_page = first_page;
+    DB_LL_NODE* curr_node = curr_page->frame_listnode;
+    PAGE* potential_page = (PAGE*) curr_node->blink->item;
+
+    while (num_allocated < batch_size && potential_page != NULL) {
+        
+        pagelock_acquired = try_acquire_pagelock(potential_page);
+
+        // Once we have the lock, we need to ensure that it is still inside the standby list
+        if (pagelock_acquired && potential_page == (PAGE*) curr_node->blink->item) {
+            curr_node = potential_page->frame_listnode;
+            num_allocated++;
+        }
+
+        potential_page = (PAGE*) curr_node->blink->item;
+    }
+
+    /**
+     * Now, we have the pagelocks of all of the pages that we need to use
+     */
+    EnterCriticalSection(&standby_list->lock);
+    for (ULONG64 allocation = 0; allocation < num_allocated; allocation++) {
+        page_storage[allocation] = db_pop_from_tail(standby_list->listhead);
+        standby_list->list_length--;
+    }
+    LeaveCriticalSection(&standby_list->lock);
+
+    return num_allocated;
+}
 
 
 /**

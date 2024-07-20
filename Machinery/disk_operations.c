@@ -206,10 +206,10 @@ static void release_disk_readslot(ULONG64 disk_read_idx) {
  */
 PULONG_PTR refresh_read_addresses[DISK_READ_SLOTS];
 volatile long* refresh_read_status_slots[DISK_READ_SLOTS];
-long refresh_ongoing = FALSE;
+long disk_refresh_ongoing = FALSE; // We use the long for interlocked operation parameters
 static void refresh_disk_readslots() {
     // Synchronize whether we or someone else is refreshing the diskslots
-    long old_val = InterlockedOr(&refresh_ongoing, TRUE);
+    long old_val = InterlockedOr(&disk_refresh_ongoing, TRUE);
 
     if (old_val == TRUE) {
         return;
@@ -246,7 +246,7 @@ static void refresh_disk_readslots() {
         InterlockedAnd(refresh_read_status_slots[disk_status_refresh], DISK_READ_OPEN);
     }
 
-    InterlockedAnd(&refresh_ongoing, FALSE);
+    InterlockedAnd(&disk_refresh_ongoing, FALSE);
 }
 
 
@@ -284,7 +284,7 @@ int read_page_from_disk(PAGE* open_page, ULONG64 disk_idx) {
          * Right now, we will try immediately again if the refresh is ongoing - since it may have refreshed pages behind us
          * otherwise, if a refresh is not ongoing, we will do it ourselves
          */
-        if (refresh_ongoing == FALSE) {
+        if (disk_refresh_ongoing == FALSE) {
             // If another thread beat us to it, this will return almost immediately
             refresh_disk_readslots();
         }
@@ -345,7 +345,7 @@ int read_page_from_disk(PAGE* open_page, ULONG64 disk_idx) {
     release_disk_readslot(disk_read_idx);
     
     // If we are running low on disk read slots, attempt to refresh the disk slots
-    if (disk->num_available_read_slots < DISK_REFRESH_BOUNDARY && refresh_ongoing == FALSE) {
+    if (disk->num_available_read_slots < DISK_REFRESH_BOUNDARY && disk_refresh_ongoing == FALSE) {
         // If someone else is already doing it (race condition) - we will return almost immediately
         refresh_disk_readslots();
     }

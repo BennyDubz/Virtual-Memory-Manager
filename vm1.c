@@ -12,7 +12,7 @@
 #include "./Machinery/debug_checks.h"
 
 
-#define NUM_USERMODE_THREADS        2
+#define NUM_USERMODE_THREADS        8
 #define MAX_CONSECUTIVE_ACCESSES    64
 #define ACCESS_AMOUNT       MB(1)
 
@@ -187,15 +187,13 @@ int thread_access_random_addresses(void* params) {
 
         __try {
             //BW: Switch to this when we are actually zeroing-out pages
-            #if 0
-            // if (*arbitrary_va == 0) {
-            //     *arbitrary_va = (ULONG_PTR) arbitrary_va;
-            // } else if((ULONG_PTR) *arbitrary_va != (ULONG_PTR) arbitrary_va) {
-            //     debug_break_all_va_info(arbitrary_va);
-            // }
-            #endif
+            if (*arbitrary_va == 0) {
+                *arbitrary_va = (ULONG_PTR) arbitrary_va;
+            } else if((ULONG_PTR) *arbitrary_va != (ULONG_PTR) arbitrary_va) {
+                debug_break_all_va_info(arbitrary_va);
+            }
 
-            *arbitrary_va = (ULONG_PTR) arbitrary_va;
+            // *arbitrary_va = (ULONG_PTR) arbitrary_va;
 
         } __except (EXCEPTION_EXECUTE_HANDLER) {
 
