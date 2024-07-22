@@ -27,6 +27,8 @@ extern PAGETABLE* pagetable;
 
 extern DISK* disk;
 
+extern ZEROED_PAGES_LISTS* zero_lists;
+
 extern FREE_FRAMES_LISTS* free_frames;
 
 extern STANDBY_LIST* standby_list;
@@ -54,6 +56,8 @@ extern HANDLE trimming_event;
 extern HANDLE pagetable_to_modified_event;
 
 extern HANDLE modified_to_standby_event;
+
+extern HANDLE zero_pages_event;
 
 extern HANDLE disk_write_available_event;
 

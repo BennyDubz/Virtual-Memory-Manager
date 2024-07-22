@@ -182,6 +182,68 @@ BOOL try_acquire_pagelock(PAGE* page) {
 #endif
 
 /**
+ * #######################################
+ * ZEROED PAGES LIST STRUCTS AND FUNCTIONS
+ * #######################################
+ */
+
+/**
+ * Initializes the zeroed frame lists with all of the initial physical memory in the system
+ * 
+ * Returns a pointer to the zero lists if successful, NULL otherwise
+ */
+ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR physical_frame_numbers, ULONG64 num_physical_frames) {
+    ZEROED_PAGES_LISTS* zeroed_lists = (ZEROED_PAGES_LISTS*) malloc(sizeof(ZEROED_PAGES_LISTS));
+
+    if (zeroed_lists == NULL) {
+        fprintf(stderr, "Unable to allocate memory for zeroed_lists");
+        return NULL;
+    }
+
+    // Create all the individual listheads
+    for (int new_list = 0; new_list < NUM_CACHE_SLOTS; new_list++) {
+        DB_LL_NODE* new_listhead = db_create_list();
+        zeroed_lists->listheads[new_list] = new_listhead;
+        zeroed_lists->list_lengths[new_list] = 0;
+        zeroed_lists->curr_list_idx = 0;
+
+        initialize_lock(&zeroed_lists->list_locks[new_list]);
+    }
+
+    // Add all the physical frames to their respective free lists
+    for (int pfn_idx = 0; pfn_idx < num_physical_frames; pfn_idx++) {
+        ULONG64 frame_number = physical_frame_numbers[pfn_idx];
+
+        // Modulo operation based on the pfn to put it alongside other cache-colliding pages
+        int listhead_idx = frame_number % NUM_CACHE_SLOTS;
+
+        DB_LL_NODE* relevant_listhead = zeroed_lists->listheads[listhead_idx];
+        
+        PAGE* zero_frame = page_storage_base + frame_number;
+
+        if (zero_frame == NULL) {
+            fprintf(stderr, "Unable to find the page associated with the pfn in initialize_zeroed_lists\n");
+            return NULL;
+        }
+
+        // Add the already allocated frame listnode to the free list
+        if (db_insert_node_at_head(relevant_listhead, zero_frame->frame_listnode) == ERROR) {
+            fprintf(stderr, "Failed to insert zero_frame in its list\n");
+            return NULL;
+        }
+
+        zero_frame->status = ZERO_STATUS;
+
+        zeroed_lists->list_lengths[listhead_idx] ++;
+    }
+
+    zeroed_lists->total_available = num_physical_frames;
+
+    return zeroed_lists;
+}
+
+
+/**
  * ##########################
  * FREE FRAMES LIST FUNCTIONS
  * ##########################
@@ -189,11 +251,11 @@ BOOL try_acquire_pagelock(PAGE* page) {
 
 
 /**
- * Given the new pagetable, create free frames lists that contain all of the physical frames
+ * Creates the free frames list structure and its associated listheads and locks
  * 
  * Returns a memory allocated pointer to a FREE_FRAMES_LISTS struct, or NULL if an error occurs
  */
-FREE_FRAMES_LISTS* initialize_free_frames(PAGE* page_storage_base, ULONG64* physical_frame_numbers, ULONG64 num_physical_frames) {
+FREE_FRAMES_LISTS* initialize_free_frames() {
     FREE_FRAMES_LISTS* free_frames = (FREE_FRAMES_LISTS*) malloc(sizeof(FREE_FRAMES_LISTS));
 
     if (free_frames == NULL) {
@@ -202,7 +264,7 @@ FREE_FRAMES_LISTS* initialize_free_frames(PAGE* page_storage_base, ULONG64* phys
     }
 
     // Create all the individual listheads
-    for (int new_list = 0; new_list < NUM_FRAME_LISTS; new_list++) {
+    for (int new_list = 0; new_list < NUM_CACHE_SLOTS; new_list++) {
         DB_LL_NODE* new_listhead = db_create_list();
         free_frames->listheads[new_list] = new_listhead;
         free_frames->list_lengths[new_list] = 0;
@@ -211,223 +273,9 @@ FREE_FRAMES_LISTS* initialize_free_frames(PAGE* page_storage_base, ULONG64* phys
         initialize_lock(&free_frames->list_locks[new_list]);
     }
 
-    // Add all the physical frames to their respective free lists
-    for (int pfn_idx = 0; pfn_idx < num_physical_frames; pfn_idx++) {
-        ULONG64 frame_number = physical_frame_numbers[pfn_idx];
-
-        // Modulo operation based on the pfn to put it alongside other cache-colliding pages
-        int listhead_idx = frame_number % NUM_FRAME_LISTS;
-
-        DB_LL_NODE* relevant_listhead = free_frames->listheads[listhead_idx];
-
-        PAGE* free_frame = page_storage_base + frame_number;
-
-        if (free_frame == NULL) {
-            fprintf(stderr, "Unable to find the page associated with the pfn in initialize_free_frames\n");
-            return NULL;
-        }
-
-        // Add the already allocated frame listnode to the free list
-        if (db_insert_node_at_head(relevant_listhead, free_frame->frame_listnode) == ERROR) {
-            fprintf(stderr, "Failed to insert free frame in its list\n");
-            return NULL;
-        }
-
-        free_frame->status = FREE_STATUS;
-
-        free_frames->list_lengths[listhead_idx] ++;
-    }
-
-    free_frames->total_available = num_physical_frames;
+    free_frames->total_available = 0;
 
     return free_frames;
-}
-
-
-/**
- * Returns a page off the free list, if there are any. Otherwise, returns NULL
- */
-PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames) {
-
-    /**
-     * We can do a quick check to see if there are no free frames left before contending for locks
-     * 
-     * We might still be wrong sometimes if a frame is added in before we look, but reducing contention
-     * is more helpful.
-     */
-    if (free_frames->total_available == 0) {
-        return NULL;
-    }
-
-    int curr_attempts = 0;
-    
-    ULONG64 local_index = free_frames->curr_list_idx;
-    BOOL found_first_nonempty_list = FALSE;
-
-    PAGE* page = NULL;
-    while (curr_attempts < NUM_FRAME_LISTS) {
-        // Check for empty list - we can quickly check here before acquiring the lock
-        if (free_frames->list_lengths[local_index] == 0) {
-            curr_attempts += 1;
-            local_index = (local_index + 1) % NUM_FRAME_LISTS;
-
-            /**
-             * We expect multiple threads to be incrementing this, new starting threads don't start
-             * on empty slots
-             */
-            // free_frames->curr_list_idx = (free_frames->curr_list_idx + 1) % NUM_FRAME_LISTS;
-            continue;
-        }
-
-        // By here, the **odds are better** that we will get a free frame, but not guaranteed
-        EnterCriticalSection(&free_frames->list_locks[local_index]);
-        DB_LL_NODE* frame_listhead = free_frames->listheads[local_index];
-
-        page = (PAGE*) db_pop_from_head(frame_listhead);
-
-        // We lost the race condition, release lock and try again with the next one
-        if (page == NULL) {
-            /**
-             * We purposefully do NOT increment curr_attempts, as we want the thread to be able to
-             * try again (especially early on if the standby list is still empty)
-             */
-            LeaveCriticalSection(&free_frames->list_locks[local_index]);
-            local_index = (local_index + 1) % NUM_FRAME_LISTS;
-            // free_frames->curr_list_idx = (free_frames->curr_list_idx + 1) % NUM_FRAME_LISTS;
-            continue;
-        }
-
-        if (found_first_nonempty_list == FALSE) {
-            free_frames->curr_list_idx = local_index;
-            found_first_nonempty_list = TRUE;
-        }
-
-        if (free_frames->list_lengths[local_index] == 0) {
-            DebugBreak();
-        }
-
-
-        free_frames->list_lengths[local_index]--;
-
-        if (free_frames->total_available == 0) {
-            DebugBreak();
-        }
-        
-        InterlockedDecrement64(&free_frames->total_available);
-
-        LeaveCriticalSection(&free_frames->list_locks[local_index]);
-
-        break;
-    }
-    
-    return page;
-}
-
-
-/**
- * Tries to allocate batch_size number of free frames and put them sequentially in page_storage
- * 
- * Returns the number of pages successfully allocated and put into the page_storage, but does
- * NOT acquire the pagelocks ahead of time
- */
-ULONG64 allocate_batch_free_frames(FREE_FRAMES_LISTS* free_frames, PAGE** page_storage, ULONG64 batch_size) {
-    // Free frames is empty
-    if (free_frames->total_available == 0) {
-        return 0;
-    }
-
-    ULONG64 oldest_failure_idx = INFINITE;
-    ULONG64 num_allocated = 0;
-    ULONG64 local_index = free_frames->curr_list_idx;
-    BOOL found_first_nonempty_list = FALSE;
-    PAGE* curr_page;
-
-
-    /**
-     * We will continue until we have either looped around and failed on all of the lists,
-     * or until we have allocated the number of pages that we want
-     */
-    while (local_index != oldest_failure_idx && num_allocated < batch_size) {
-        if (free_frames->list_lengths[local_index] == 0) {
-            // If this is our first failure in this loop of grabbing pages, set the failure index
-            if (oldest_failure_idx != INFINITE) {
-                oldest_failure_idx = local_index;
-            }
-
-            local_index = (local_index + 1) % NUM_FRAME_LISTS;
-
-            continue;
-        }
-
-        // By here, the **odds are better** that we will get a free frame, but not guaranteed
-        EnterCriticalSection(&free_frames->list_locks[local_index]);
-        DB_LL_NODE* frame_listhead = free_frames->listheads[local_index];
-
-        curr_page = (PAGE*) db_pop_from_head(frame_listhead);
-
-        // We lost the race condition, release lock and try again with the next one
-        if (curr_page == NULL) {
-            /**
-             * We purposefully do NOT increment curr_attempts, as we want the thread to be able to
-             * try again (especially early on if the standby list is still empty)
-             */
-            LeaveCriticalSection(&free_frames->list_locks[local_index]);
-
-            if (oldest_failure_idx != INFINITE) {
-                oldest_failure_idx = local_index;
-            }
-            local_index = (local_index + 1) % NUM_FRAME_LISTS;
-            
-            // free_frames->curr_list_idx = (free_frames->curr_list_idx + 1) % NUM_FRAME_LISTS;
-            continue;
-        }
-
-        if (found_first_nonempty_list == FALSE) {
-            free_frames->curr_list_idx = local_index;
-            found_first_nonempty_list = TRUE;
-        }
-
-        if (free_frames->list_lengths[local_index] == 0) {
-            DebugBreak();
-        }
-
-
-        free_frames->list_lengths[local_index]--;
-
-        if (free_frames->total_available == 0) {
-            DebugBreak();
-        }
-        
-        InterlockedDecrement64(&free_frames->total_available);
-
-        LeaveCriticalSection(&free_frames->list_locks[local_index]);
-
-        page_storage[num_allocated] = curr_page;
-        num_allocated++;
-    }
-
-    return num_allocated;
-}
-
-
-
-/**
- * Zeroes out the memory on the physical frame so that it can be reallocated without privacy loss
- * 
- * Returns SUCCESS if no issues, ERROR otherwise
- */
-int zero_out_page(PAGE* page) {
-    if (page == NULL) {
-        fprintf(stderr, "NULL page given to zero out page\n");
-        return ERROR;
-    }
-
-    /**
-     * Have a few addresses to pop from that we use temporarily to map the pfn to
-     * so that we can memset() them to zero.
-     */
-
-    return SUCCESS;
 }
 
 

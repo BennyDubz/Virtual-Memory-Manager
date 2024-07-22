@@ -25,7 +25,7 @@ int page_is_isolated(PAGE* page) {
     DB_LL_NODE* curr_node;
 
     // Check the free lists
-    for (ULONG64 free_list = 0; free_list < NUM_FRAME_LISTS; free_list++) {
+    for (ULONG64 free_list = 0; free_list < NUM_CACHE_SLOTS; free_list++) {
         EnterCriticalSection(&free_frames->list_locks[free_list]);
 
         curr_node = free_frames->listheads[free_list]->flink;

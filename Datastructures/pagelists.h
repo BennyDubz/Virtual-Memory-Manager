@@ -8,7 +8,7 @@
 
 
 // If this is 1, then we will use normal critical sections instead of just the bit
-#define DEBUG_PAGELOCK 0
+#define DEBUG_PAGELOCK 1
 
 #include <windows.h>
 #include "../hardware.h"
@@ -21,7 +21,7 @@
  * #################################################
  */
 
-#define ZEROED_PAGE 0
+#define ZERO_STATUS 0
 #define FREE_STATUS 1
 #define MODIFIED_STATUS 2
 #define STANDBY_STATUS 3
@@ -114,6 +114,45 @@ BOOL page_is_modified(PAGE page);
  */
 BOOL page_is_standby(PAGE page);
 
+/**
+ * #######################################
+ * ZEROED PAGES LIST STRUCTS AND FUNCTIONS
+ * #######################################
+ */
+
+// We want to have frames go into different cache slots if we allocate several at a time
+#define NUM_CACHE_SLOTS (CACHE_SIZE / PAGE_SIZE)
+
+#ifndef ZERO_LISTS_T
+#define ZERO_LISTS_T
+
+/**
+ * An array of zero lists whose length corresponds to the size of the cache
+ * 
+ * 1. You'd want to walk the list of zero lists to pull out a frame at a time - such that all are in different cache slots
+ * 
+ * 2. Say for a 64kb cache, it can hold 16 frames in the cache. We can have an array of 16 zero lists corresponding
+ *      to each cache slot
+ */
+typedef struct {
+    DB_LL_NODE* listheads[NUM_CACHE_SLOTS];
+
+    volatile ULONG64 list_lengths[NUM_CACHE_SLOTS]; 
+    volatile ULONG64 total_available;
+    volatile ULONG64 curr_list_idx;
+
+    CRITICAL_SECTION list_locks[NUM_CACHE_SLOTS];
+    
+} ZEROED_PAGES_LISTS;
+#endif
+
+
+/**
+ * Initializes the zeroed frame lists with all of the initial physical memory in the system
+ * 
+ * Returns a pointer to the zero lists if successful, NULL otherwise
+ */
+ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR physical_frame_numbers, ULONG64 num_physical_frames);
 
 /**
  * ######################################
@@ -121,62 +160,31 @@ BOOL page_is_standby(PAGE page);
  * ######################################
  */
 
-
-// We want to have frames go into different cache slots if we allocate several at a time
-#define NUM_FRAME_LISTS (CACHE_SIZE / PAGE_SIZE)
-
 #ifndef FREE_FRAMES_T
 #define FREE_FRAMES_T
 /**
  * An array of free lists whose length corresponds to the size of the cache
- * 
- * 1. You'd want to walk the list of free lists to pull free frames, such that all are in different cache slots
- * 
- * 2. Say for a 64kb cache, it can hold 16 frames in the cache. We can have an array of 16 free lists corresponding
- *      to each cache slot
  */
 typedef struct {
-    DB_LL_NODE* listheads[NUM_FRAME_LISTS];
+    DB_LL_NODE* listheads[NUM_CACHE_SLOTS];
 
     // BW: Note the potential for race conditions keeping track of this!  
-    volatile ULONG64 list_lengths[NUM_FRAME_LISTS]; 
+    volatile ULONG64 list_lengths[NUM_CACHE_SLOTS]; 
     volatile ULONG64 total_available;
     volatile ULONG64 curr_list_idx;
 
-    CRITICAL_SECTION list_locks[NUM_FRAME_LISTS];
+    CRITICAL_SECTION list_locks[NUM_CACHE_SLOTS];
     
 } FREE_FRAMES_LISTS;
 #endif
 
 
 /**
- * Given the new pagetable, create free frames lists that contain all of the physical frames
+ * Creates the free frames list structure and its associated listheads and locks
  * 
  * Returns a memory allocated pointer to a FREE_FRAMES_LISTS struct, or NULL if an error occurs
  */
-FREE_FRAMES_LISTS* initialize_free_frames(PAGE* page_storage_base, PULONG_PTR physical_frame_numbers, ULONG64 num_physical_frames);
-
-
-/**
- * Returns a page off the free list, if there are any. Otherwise, returns NULL
- */
-PAGE* allocate_free_frame(FREE_FRAMES_LISTS* free_frames);
-
-
-/**
- * Tries to allocate batch_size number of free frames and put them sequentially in page_storage
- * 
- * Returns the number of pages successfully allocated and put into the page_storage
- */
-ULONG64 allocate_batch_free_frames(FREE_FRAMES_LISTS* free_frames, PAGE* page_storage, ULONG64 batch_size);
-
-
-/**
- * Zeroes out the memory on the physical frame so that it can be reallocated to without privacy loss
- * 
- * Returns SUCCESS if there are no issues, ERROR otherwise
- */
-int zero_out_page(PAGE* page);
+FREE_FRAMES_LISTS* initialize_free_frames();
 
 
 /**

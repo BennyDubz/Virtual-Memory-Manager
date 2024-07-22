@@ -12,7 +12,7 @@
 #include "./Machinery/debug_checks.h"
 
 
-#define NUM_USERMODE_THREADS        8
+#define NUM_USERMODE_THREADS        2
 #define MAX_CONSECUTIVE_ACCESSES    64
 #define ACCESS_AMOUNT       MB(1)
 

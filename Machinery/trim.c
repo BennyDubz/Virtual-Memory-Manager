@@ -11,6 +11,7 @@
 #include "../globals.h"
 #include "./conversions.h"
 #include "./debug_checks.h"
+#include "./pagelist_operations.h"
 #include "../Datastructures/datastructures.h"
 #include "./disk_operations.h"
 #include "./trim.h"
@@ -45,10 +46,13 @@ LPTHREAD_START_ROUTINE thread_trimming() {
     PTE_LOCKSECTION* curr_pte_locksection;
     ULONG64 curr_pfn;
     PAGE* curr_page = NULL;
+    ULONG64 total_trimmed;
 
 
     while(TRUE) {
         WaitForSingleObject(trimming_event, INFINITE);
+        total_trimmed = 0;
+
         // Go through each lock section and increment all valid PTEs
         for (ULONG64 lock_section = 0; lock_section < pagetable->num_locks; lock_section++) {            
             section_start = lock_section * ptes_per_lock;
@@ -59,6 +63,7 @@ LPTHREAD_START_ROUTINE thread_trimming() {
             if (curr_pte_locksection->valid_pte_count == 0) continue;
 
             BOOL acquire_pte_lock = TRUE;
+
 
             for (ULONG64 pte_idx = section_start; pte_idx < section_start + ptes_per_lock; pte_idx++) {
                 /**
@@ -78,6 +83,7 @@ LPTHREAD_START_ROUTINE thread_trimming() {
 
 
                 curr_pte = &pagetable->pte_list[pte_idx];
+
 
                 assert(curr_pte_locksection == pte_to_locksection(curr_pte));
 
@@ -139,10 +145,8 @@ LPTHREAD_START_ROUTINE thread_trimming() {
                 }
                 #endif
 
-                
-                /**
-                 * Somehow, we have a race condition where we held the modified listlock?
-                 */
+                total_trimmed++;
+
                 EnterCriticalSection(&modified_list->lock);  
       
 
@@ -164,6 +168,9 @@ LPTHREAD_START_ROUTINE thread_trimming() {
 
         // Signal that the modified list should be populated
         trim_count++;
+
+        // printf("trimmed %llx\n", total_trimmed);
+
         SetEvent(modified_to_standby_event);
     }
 }
@@ -333,6 +340,7 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
             }
 
         }
+        ULONG64 num_pages_added = 0;
 
         EnterCriticalSection(&standby_list->lock);
 
@@ -341,10 +349,10 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
             // If someone else has the pagelock, they must be trying to rescue it right now!
             if (curr_page == NULL) continue;
 
+            num_pages_added++;
+
             // Now, the page can be modified and added to the standby list
             curr_page->pagefile_idx = disk_batch.disk_indices[i];
-            PULONG_PTR disk_addr = disk_idx_to_addr(disk_batch.disk_indices[i]);
-            PULONG_PTR expected_va = pte_to_va(curr_page->pte);
             curr_page->writing_to_disk = PAGE_NOT_BEING_WRITTEN;
             curr_page->in_disk_batch = PAGE_NOT_IN_DISK_BATCH;
 
@@ -352,8 +360,9 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
                 DebugBreak();
             }
 
-            InterlockedIncrement64(&total_available_pages);
         }
+
+        InterlockedAdd64(&total_available_pages, num_pages_added);
 
         LeaveCriticalSection(&standby_list->lock);
 
@@ -366,113 +375,13 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
                 release_pagelock(curr_page);
             }
         }
-
-
-        #if 0
-        ULONG64 curr_page = 0;        
-        while (curr_page < num_to_write) {
-            EnterCriticalSection(&modified_list->lock);
-
-            // From this line onward until it is added to the standby list, this page cannot be rescued
-            potential_page = (PAGE*) modified_pop_page(modified_list);
-
-            // Since we release the modified list lock during this, someone else could come in and rescue pages from the
-            // modified list, emptying it, meaning the work here is done until we are signaled again
-            if (potential_page == NULL) {
-                LeaveCriticalSection(&modified_list->lock);
-                break;
-            }
-
-            /**
-             * Not currently feasible as there must be some way to tell whether the page has been rescued in an atomic
-             * operation once we have acquired the standby lock. In the meantime, we will still hold onto the modified lock
-             * and be forced to make rescues fail while their pages are between the modified and standby lists
-             */
-            #if 0 
-            // Now that we have popped the page from the modified list, we no longer need the lock as we are not
-            // modifying the datastructure. That makes
-            LeaveCriticalSection(&modified_list->lock);
-
-           
-            if (write_page_to_disk(potential_page, &disk_storage_idx) == ERROR) {
-                EnterCriticalSection(&modified_list->lock);
-
-                /**
-                 * We must check that the page is still in modified status. If it is active (or anything else),
-                 * that means that it has been rescued while we tried to write it to disk. If that is the case,
-                 * we cannot re-add it to the modified list.
-                 */
-                if (potential_page->status == MODIFIED_STATUS) {
-                    /**
-                     * We must also protect ourselves against the scenario where the page was rescued, trimmed, and
-                     * added back to the modified list before we were able to acquire the lock. In that case,
-                     * we do not want to add it to the list again as we would have a duplicate.
-                     */
-                    if (potential_page->frame_listnode == NULL) {
-                        modified_add_page(potential_page, modified_list);
-                    }
-                }
-                
-                // We will need to wait for more disk slots to be open in order to continue writing to the disk
-                LeaveCriticalSection(&modified_list->lock);
-                WaitForSingleObject(disk_open_slots_event, INFINITE);
-
-                // We will still want to keep looking
-                curr_page--;
-
-                continue;      
-            }
-            #endif
-
-            if (write_page_to_disk(potential_page, &disk_storage_idx) == ERROR) {
-                
-                // We will want to try again with this page later
-                modified_add_page(potential_page, modified_list);
-                
-                // We will need to wait for more disk slots to be open in order to continue writing to the disk
-                LeaveCriticalSection(&modified_list->lock);
-                WaitForSingleObject(disk_open_slots_event, INFINITE);
-
-                // We purposefully do not increment curr_page here so that we still try to write pages to disk
-                continue;      
-            }
-
-            /**
-             * re-acquire page lock
-             * Ensure that it is still inactive, if it isn't, then
-             */
-            LeaveCriticalSection(&modified_list->lock);
-
-            #ifdef DEBUG_CHECKING
-            int dbg_result;
-            if ((dbg_result = page_is_isolated(pfn_to_page(curr_page))) != ISOLATED) {
-                DebugBreak();
-            }
-            #endif
-
-            // Remember, as of now the page CANNOT be rescued in this interim
-            EnterCriticalSection(&standby_list->lock);
-
-            potential_page->pagefile_idx = disk_storage_idx;
-
-            standby_add_page(potential_page, standby_list);
-            InterlockedIncrement64(&total_available_pages);
-
-            // SetEvent(waiting_for_pages_event);
-
-            LeaveCriticalSection(&standby_list->lock);
-
-            curr_page++;
-        }
-        #endif
+    
         SetEvent(waiting_for_pages_event);
 
         sb_count++;
     }
     
 }
-
-
 
 
 /**
@@ -588,65 +497,3 @@ int disconnect_va_batch_from_cpu(void** virtual_addresses, ULONG64 num_ptes) {
 }
 
 
-/**
- * Spins until the pagelock for the given page can be acquired and returns
- */
-void acquire_pagelock(PAGE* page) {
-
-    #if DEBUG_PAGELOCK
-    EnterCriticalSection(&page->dev_page_lock);
-    log_page_status(page);
-    page->page_lock = PAGE_LOCKED;
-    page->holding_threadid = GetCurrentThreadId();
-    return;
-    #endif
-
-    unsigned old_lock_status;
-    while(TRUE) {
-        old_lock_status = InterlockedCompareExchange(&page->page_lock, PAGE_LOCKED, PAGE_UNLOCKED);
-        if (old_lock_status == PAGE_UNLOCKED) break;
-    }
-}
-
-
-/**
- * Releases the pagelock for other threads to use
- */
-void release_pagelock(PAGE* page) {
-    
-    #if DEBUG_PAGELOCK
-    log_page_status(page);
-    if (page->holding_threadid != GetCurrentThreadId()) {
-        DebugBreak();
-    }
-    page->page_lock = PAGE_UNLOCKED;
-    page->holding_threadid = 0;
-    LeaveCriticalSection(&page->dev_page_lock);
-    return;
-    #endif
-
-    if (InterlockedCompareExchange(&page->page_lock, PAGE_UNLOCKED, PAGE_LOCKED) != PAGE_LOCKED) {
-        DebugBreak();
-    };
-}
-
-
-/**
- * Tries to acquire the pagelock without any spinning. 
- * 
- * Returns TRUE if successful, FALSE otherwise
- */
-BOOL try_acquire_pagelock(PAGE* page) {
-    #if DEBUG_PAGELOCK
-    if (TryEnterCriticalSection(&page->dev_page_lock)) {
-        log_page_status(page);
-        page->page_lock = PAGE_LOCKED;
-        page->holding_threadid = GetCurrentThreadId();
-        return TRUE;
-    } else {
-        return FALSE;
-    }
-    #endif
-    return InterlockedCompareExchange(&page->page_lock, PAGE_LOCKED, PAGE_UNLOCKED) == PAGE_UNLOCKED;
-
-}

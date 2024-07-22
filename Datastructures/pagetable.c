@@ -57,10 +57,11 @@ PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base)
         return NULL;
     }
 
-    for (ULONG64 curr_lock = 0; curr_lock < num_locks; curr_lock++) {
-        PTE_LOCKSECTION* curr_section = &pte_locksections[curr_lock];
+    for (ULONG64 locksection_idx = 0; locksection_idx < num_locks; locksection_idx++) {
+        PTE_LOCKSECTION* curr_section = &pte_locksections[locksection_idx];
         initialize_lock(&curr_section->lock);
         curr_section->valid_pte_count = 0;
+        curr_section->locksection_idx = locksection_idx;
     } 
 
     pagetable->num_locks = num_locks;

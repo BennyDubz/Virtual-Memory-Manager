@@ -75,6 +75,7 @@ typedef struct {
 typedef struct {
     CRITICAL_SECTION lock;
     ULONG64 valid_pte_count;
+    ULONG64 locksection_idx;
 } PTE_LOCKSECTION;
 
 typedef struct {

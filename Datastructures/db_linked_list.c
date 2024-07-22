@@ -44,8 +44,11 @@ DB_LL_NODE* db_create_list() {
 
     listhead->blink = listhead;
     listhead->flink = listhead; 
-    listhead->listhead_ptr = listhead;
     listhead->item = NULL;
+
+    #if DEBUG_LISTS
+    listhead->listhead_ptr = listhead;
+    #endif
 
     return listhead;
 }
@@ -73,7 +76,10 @@ DB_LL_NODE* db_insert_at_head(DB_LL_NODE* listhead, void* item) {
 
     new_node->blink = listhead;
     new_node->flink = front_node;
+
+    #if DEBUG_LISTS
     new_node->listhead_ptr = listhead;
+    #endif
 
     return new_node;
 }
@@ -101,7 +107,10 @@ DB_LL_NODE* db_insert_at_tail(DB_LL_NODE* listhead, void* item) {
 
     new_node->blink = backnode;
     new_node->flink = listhead;
+
+    #if DEBUG_LISTS
     new_node->listhead_ptr = listhead;
+    #endif
 
     return new_node;
 }
@@ -124,8 +133,11 @@ int db_insert_node_at_head(DB_LL_NODE* listhead, DB_LL_NODE* node) {
     old_head->blink = node;
     node->flink = old_head;
     node->blink = listhead;
-    node->listhead_ptr = listhead;
     listhead->flink = node;
+
+    #if DEBUG_LISTS
+    node->listhead_ptr = listhead;
+    #endif
 
     return SUCCESS;
 }
@@ -147,10 +159,13 @@ int db_insert_node_at_tail(DB_LL_NODE* listhead, DB_LL_NODE* node) {
 
     node->flink = listhead;
     node->blink = old_tail;
-    node->listhead_ptr = listhead;
     
     listhead->blink = node;
     old_tail->flink = node;
+
+    #if DEBUG_LISTS
+    node->listhead_ptr = listhead;
+    #endif
 
     return SUCCESS;
 }
@@ -174,10 +189,12 @@ void* db_pop_from_head(DB_LL_NODE* listhead) {
 
     listhead->flink = head_node->flink;
     head_node->flink->blink = listhead;
+
+    #if DEBUG_LISTS
     head_node->listhead_ptr = NULL;
+    #endif
 
     void* item = head_node->item;
-
 
     return item;
 }
@@ -200,7 +217,10 @@ void* db_pop_from_tail(DB_LL_NODE* listhead) {
 
     listhead->blink = tail_node->blink;
     tail_node->blink->flink = listhead;
+
+    #if DEBUG_LISTS
     tail_node->listhead_ptr = NULL;
+    #endif
 
     void* item = tail_node->item;
 
@@ -224,11 +244,6 @@ void* db_remove_from_middle(DB_LL_NODE* listhead, DB_LL_NODE* middle_node) {
         return NULL;
     }
 
-    if (middle_node->listhead_ptr != listhead) {
-        fprintf(stderr, "Trying to remove middle node from a list it is not in\n");
-        return NULL;
-    }
-
     DB_LL_NODE* prev = middle_node->blink;
     DB_LL_NODE* next = middle_node->flink;
 
@@ -238,11 +253,39 @@ void* db_remove_from_middle(DB_LL_NODE* listhead, DB_LL_NODE* middle_node) {
     prev->flink = next;
     next->blink = prev;
 
+    #if DEBUG_LISTS
     middle_node->listhead_ptr = NULL;
-
+    #endif
 
     void* item = middle_node->item;
     
     // free(middle_node);
     return item;
+}
+
+/**
+ * Removes the entire section from the list. Assumes all nodes between
+ * the beginning and end node are in the list
+ */
+void db_remove_section(DB_LL_NODE* beginning, DB_LL_NODE* end) {
+    if (beginning == NULL || end == NULL) {
+        fprintf(stderr, "NULL parameters given to db_remove_section\n");
+        DebugBreak();
+    }
+
+    DB_LL_NODE* front_connection = beginning->blink;
+    DB_LL_NODE* back_connection = end->flink;
+
+    front_connection->flink = back_connection;
+    back_connection->blink = front_connection;
+
+    #if DEBUG_LISTS
+    DB_LL_NODE* curr_node = beginning;
+
+    while (curr_node != end->flink) {
+        curr_node->listhead_ptr = NULL;
+
+        curr_node = curr_node->flink;
+    }
+    #endif
 }

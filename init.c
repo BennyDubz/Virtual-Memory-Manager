@@ -17,7 +17,7 @@
 #include "./Datastructures/datastructures.h"
 #include "./Machinery/pagefault.h"
 #include "./Machinery/trim.h"
-#include "./Machinery/zero_operations.h"
+#include "./Machinery/pagelist_operations.h"
 #include "./init.h"
 #include "./globals.h"
 #include "./hardware.h"
@@ -47,6 +47,8 @@ ULONG64 physical_page_count;
 PAGETABLE* pagetable;
 
 DISK* disk;
+
+ZEROED_PAGES_LISTS* zero_lists;
 
 FREE_FRAMES_LISTS* free_frames;
 
@@ -81,6 +83,8 @@ HANDLE disk_open_slots_event;
 HANDLE pagetable_to_modified_event;
 
 HANDLE modified_to_standby_event;
+
+HANDLE zero_pages_event;
 
 ULONG64 num_child_threads;
 
@@ -407,7 +411,13 @@ static int init_datastructures() {
         return ERROR;
     }
 
-    free_frames = initialize_free_frames(page_storage_base, physical_page_numbers, physical_page_count);
+    zero_lists = initialize_zeroed_lists(page_storage_base, physical_page_numbers, physical_page_count);
+    if (zero_lists == NULL) {
+        fprintf(stderr, "Unable to allocate memory for zero_lists\n");
+        return ERROR;
+    }
+
+    free_frames = initialize_free_frames();
     if (free_frames == NULL) {
         fprintf(stderr, "Unable to allocate memory for free frames\n");
         return ERROR;
@@ -485,8 +495,10 @@ static int init_multithreading() {
 
     disk_open_slots_event = CreateEvent(NULL, FALSE, FALSE, NULL);
 
+    zero_pages_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+
     // Does not include this thread that handles page faults, and does not include worker threads
-    num_child_threads = 3; 
+    num_child_threads = 4; 
 
     threads = (HANDLE*) malloc(sizeof(HANDLE) * num_child_threads);
 
@@ -500,6 +512,9 @@ static int init_multithreading() {
     threads[1] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) thread_trimming, NULL, 0, NULL);
 
     threads[2] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) thread_modified_to_standby, NULL, 0, NULL);
+
+    threads[3] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) thread_populate_zero_lists, &vmem_parameters, 0, NULL);
+
 
     return SUCCESS;
 }

@@ -8,13 +8,17 @@
 #include <stdlib.h>
 #include <windows.h>
 
+#define DEBUG_LISTS 0
+
 #ifndef DBLIST
 #define DBLIST
 
 typedef struct NODE {
     struct NODE* flink;
     struct NODE* blink;
+    #if DEBUG_LISTS
     struct NODE* listhead_ptr;
+    #endif
     void* item;
 } DB_LL_NODE;
 
@@ -92,3 +96,10 @@ void* db_pop_from_tail(DB_LL_NODE* listhead);
  * Returns NULL upon error
  */
 void* db_remove_from_middle(DB_LL_NODE* listhead, DB_LL_NODE* middle_node);
+
+
+/**
+ * Removes the entire section from the list. Assumes all nodes between
+ * the beginning and end node are in the list
+ */
+void db_remove_section(DB_LL_NODE* beginning, DB_LL_NODE* end);

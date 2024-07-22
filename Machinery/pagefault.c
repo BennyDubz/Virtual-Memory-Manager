@@ -15,7 +15,7 @@
 #include "./debug_checks.h"
 #include "../Datastructures/datastructures.h"
 #include "./pagefault.h"
-#include "./zero_operations.h"
+#include "./pagelist_operations.h"
 
 
 /**
@@ -42,9 +42,9 @@ static int modified_rescue_page(PAGE* page);
 
 static int standby_rescue_page(PAGE* page, ULONG64* disk_idx_storage);
 
-static PAGE* standby_pop_page();
-
 static void release_unneeded_page(PAGE* page);
+
+static void zero_lists_add(PAGE* page);
 
 static void free_frames_add(PAGE* page);
 
@@ -74,6 +74,9 @@ int pagefault(PULONG_PTR virtual_address) {
         SetEvent(trimming_event);
     }
 
+    if (standby_list->list_length > physical_page_count / 10 && (fault_count % 32) == 0) {
+        SetEvent(zero_pages_event);
+    }
 
     PTE* accessed_pte = va_to_pte(virtual_address);
 
@@ -155,7 +158,7 @@ int pagefault(PULONG_PTR virtual_address) {
     }
 
     BOOL zeroed = FALSE;
-    if (allocated_page->status != ZEROED_PAGE && is_used_pte(local_pte) == FALSE) {
+    if (allocated_page->status != ZERO_STATUS && is_used_pte(local_pte) == FALSE) {
         zeroed = TRUE;
         zero_out_pages(&allocated_page, 1);
     }
@@ -177,6 +180,8 @@ int pagefault(PULONG_PTR virtual_address) {
 
     // Connect the PTE to the pfn through the CPU 
     connect_pte_to_page(accessed_pte, allocated_page);
+
+    // if (fault_count % 50) printf("zero length %llx\n", zero_lists->total_available);
 
     // if (is_disk_format(local_pte)) {
     //     DebugBreak();
@@ -358,11 +363,16 @@ static PAGE* find_available_page() {
 
     PAGE* allocated_page;
 
-    // If we succeed on the free list, we don't have to do anything else
-    if ((allocated_page = allocate_free_frame(free_frames)) != NULL) {
+    // If we succeed on the zeroed list, this is the best case scenario as we don't have to do anything else
+    if ((allocated_page = allocate_zeroed_frame()) != NULL) {
+        // acquire_pagelock(allocated_page);
+        return allocated_page;
+    }
+
+    // If we succeed on the free list, we may still have to zero out the frame later
+    if ((allocated_page = allocate_free_frame()) != NULL) {
         
-        InterlockedDecrement64(&total_available_pages);
-        acquire_pagelock(allocated_page);
+        // acquire_pagelock(allocated_page);
         #if DEBUG_PAGELOCK
         assert(allocated_page->holding_threadid == GetCurrentThreadId());
         #endif
@@ -475,154 +485,6 @@ static int standby_rescue_page(PAGE* page, ULONG64* disk_idx_storage) {
 
 
 /**
- * Pops and returns a pointer to the oldest page from the standby list and returns it, 
- * and modifies its old PTE to be in the disk format.
- * 
- * Returns NULL upon any error or if the list is empty
- */
-static PAGE* standby_pop_page() {
-
-    // Preemptively check that the list is empty
-    if (standby_list->list_length == 0) {
-        return NULL;
-    }
-
-    BOOL pagelock_acquired = FALSE;
-    PAGE* potential_page;
-    while (pagelock_acquired == FALSE) {
-        potential_page = (PAGE*) standby_list->listhead->blink->item;
-
-        // Check if the standby list is empty
-        if (potential_page == NULL) return NULL;
-
-        pagelock_acquired = try_acquire_pagelock(potential_page);
-
-        if (pagelock_acquired && potential_page != (PAGE*) standby_list->listhead->blink->item) {
-            release_pagelock(potential_page);
-            pagelock_acquired = FALSE;
-            continue;
-        }
-    
-    }
-
-    EnterCriticalSection(&standby_list->lock);
-
-    #if DEBUG_PAGELOCK
-    assert(potential_page->holding_threadid == GetCurrentThreadId());
-    #endif
-    // We remove the page from the list now
-    db_pop_from_tail(standby_list->listhead);
-    standby_list->list_length--;
-
-    LeaveCriticalSection(&standby_list->lock);
-
-    InterlockedDecrement64(&total_available_pages);
-
-    #if 0
-    while (potential_page == NULL) {
-        EnterCriticalSection(&standby_list->lock);
-
-        potential_page = (PAGE*) standby_list->listhead->blink->item;
-
-        // The list is empty
-        if (potential_page == NULL) {
-            LeaveCriticalSection(&standby_list->lock);
-            return NULL;
-        }
-
-        // Someone may be trying to rescue it, if they are - we have to back off
-        if (try_acquire_pagelock(potential_page) == FALSE) {
-            LeaveCriticalSection(&standby_list->lock);
-            potential_page = NULL;
-            continue;
-        }
-
-
-        #if DEBUG_PAGELOCK
-        assert(potential_page->holding_threadid == GetCurrentThreadId());
-        #endif
-        // We remove the page from the list now
-        db_pop_from_tail(standby_list->listhead);
-
-        DB_LL_NODE* start = standby_list->listhead->flink;
-
-        standby_list->list_length--;
-        InterlockedDecrement64(&total_available_pages);
-
-        LeaveCriticalSection(&standby_list->lock);
-    }
-    #endif
-
-    /**
-     * By here, we have the required page and its lock. 
-     * 
-     * However, we have NOT made any irreversible changes. This will allow us to return the page to the standby list?
-     */
-    return potential_page;    
-}   
-
-
-/**
- * Tries to pop batch_size pages from the standby list. Returns the number of pages successfully allocated
- */
-static ULONG64 standby_pop_batch(PAGE** page_storage, ULONG64 batch_size) {
-
-    PAGE* curr_page;
-    
-    /**
-     * Acquire the pagelock for the very first page in the list, once we have done this, 
-     * we can walk down the list and acquire the other needed pagelocks
-     */
-    BOOL pagelock_acquired = FALSE;
-    PAGE* first_page;
-    while (pagelock_acquired == FALSE) {
-        first_page = (PAGE*) standby_list->listhead->blink->item;
-
-        // Check if the standby list is empty
-        if (first_page == NULL) return 0;
-
-        pagelock_acquired = try_acquire_pagelock(first_page);
-
-        if (pagelock_acquired && first_page != (PAGE*) standby_list->listhead->blink->item) {
-            release_pagelock(first_page);
-            pagelock_acquired = FALSE;
-            continue;
-        }
-    }
-
-    ULONG64 num_allocated = 1;
-    curr_page = first_page;
-    DB_LL_NODE* curr_node = curr_page->frame_listnode;
-    PAGE* potential_page = (PAGE*) curr_node->blink->item;
-
-    while (num_allocated < batch_size && potential_page != NULL) {
-        
-        pagelock_acquired = try_acquire_pagelock(potential_page);
-
-        // Once we have the lock, we need to ensure that it is still inside the standby list
-        if (pagelock_acquired && potential_page == (PAGE*) curr_node->blink->item) {
-            curr_node = potential_page->frame_listnode;
-            num_allocated++;
-        }
-
-        potential_page = (PAGE*) curr_node->blink->item;
-    }
-
-    /**
-     * Now, we have the pagelocks of all of the pages that we need to use
-     */
-    EnterCriticalSection(&standby_list->lock);
-    for (ULONG64 allocation = 0; allocation < num_allocated; allocation++) {
-        page_storage[allocation] = db_pop_from_tail(standby_list->listhead);
-        standby_list->list_length--;
-    }
-    LeaveCriticalSection(&standby_list->lock);
-
-    return num_allocated;
-}
-
-
-/**
  * Returns the given page to its appropriate list after it is revealed we no longer need it
  * 
  * Assumes that we have the pagelock
@@ -646,6 +508,10 @@ static void release_unneeded_page(PAGE* page) {
         LeaveCriticalSection(&modified_list->lock);
     } else if (page->status == FREE_STATUS) {
         free_frames_add(page);
+    } else if (page->status == ZERO_STATUS) {
+        zero_lists_add(page);
+    } else {
+        DebugBreak();
     }
 
     assert(page->page_lock == PAGE_LOCKED);
@@ -655,15 +521,42 @@ static void release_unneeded_page(PAGE* page) {
 
 
 /**
- * Adds the given page to its proper slot in the free list
- * 
- * As of now, does NOT zero out the page!
- * 
- * Returns SUCCESS if there are no issues, ERROR otherwise
+ * Adds the given page to its proper slot in the zero list
  */
+static void zero_lists_add(PAGE* page) {
+    // Modulo operation based on the pfn to put it alongside other cache-colliding pages
+    int listhead_idx = page_to_pfn(page) % NUM_CACHE_SLOTS;
+
+    DB_LL_NODE* relevant_listhead = zero_lists->listheads[listhead_idx];
+
+    #ifdef DEBUG_CHECKING
+    int dbg_result;
+    if ((dbg_result = page_is_isolated(page)) != ISOLATED) {
+        DebugBreak();
+    }
+    #endif
+
+    EnterCriticalSection(&zero_lists->list_locks[listhead_idx]);
+
+    page->status = FREE_STATUS;
+
+    db_insert_node_at_head(relevant_listhead, page->frame_listnode);
+    zero_lists->list_lengths[listhead_idx]++;
+    
+    InterlockedIncrement64(&total_available_pages);
+
+    InterlockedIncrement64(&zero_lists->total_available);
+
+    LeaveCriticalSection(&zero_lists->list_locks[listhead_idx]);
+}
+
+
+/**
+ * Adds the given page to its proper slot in the free list
+= */
 static void free_frames_add(PAGE* page) {
     // Modulo operation based on the pfn to put it alongside other cache-colliding pages
-    int listhead_idx = page_to_pfn(page) % NUM_FRAME_LISTS;
+    int listhead_idx = page_to_pfn(page) % NUM_CACHE_SLOTS;
 
     DB_LL_NODE* relevant_listhead = free_frames->listheads[listhead_idx];
 
