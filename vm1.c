@@ -12,7 +12,7 @@
 #include "./Machinery/debug_checks.h"
 
 
-#define NUM_USERMODE_THREADS        2
+#define NUM_USERMODE_THREADS        8
 #define MAX_CONSECUTIVE_ACCESSES    64
 #define ACCESS_AMOUNT       MB(1)
 
@@ -124,6 +124,7 @@ void usermode_virtual_memory_simulation () {
 
     return;
 }
+
 
 int thread_access_random_addresses(void* params) {
     ULONG64 i;

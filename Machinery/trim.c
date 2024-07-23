@@ -18,165 +18,6 @@
 
 
 /**
- * Thread dedicated to trimming PTEs from the pagetable and putting them on the modified list
- */
-ULONG64 trim_count = 0;
-LPTHREAD_START_ROUTINE thread_trimming() {
-    #if 0
-    PAGE* pages_to_trim = (PAGE*) malloc(sizeof(PAGE) * pagetable->num_locks);
-
-    if (pages_to_trim == NULL) {
-        fprintf(stderr, "Failed to allocate memory for pages_to_trim in thread_trimming\n");
-        return;
-    }
-
-    void** pte_vas_to_trim = malloc(sizeof(void*) * pagetable->num_locks);
-
-    if (pte_vas_to_trim == NULL) {
-        fprintf(stderr, "Failed to allocate memory for pte_vas_to_trim in thread_trimming\n");
-        return;
-    }
-
-    ULONG64 num_pages;
-    #endif
-
-    ULONG64 ptes_per_lock = pagetable->num_virtual_pages / pagetable->num_locks;
-    ULONG64 section_start;
-    PTE* curr_pte;
-    PTE_LOCKSECTION* curr_pte_locksection;
-    ULONG64 curr_pfn;
-    PAGE* curr_page = NULL;
-    ULONG64 total_trimmed;
-
-
-    while(TRUE) {
-        WaitForSingleObject(trimming_event, INFINITE);
-        total_trimmed = 0;
-
-        // Go through each lock section and increment all valid PTEs
-        for (ULONG64 lock_section = 0; lock_section < pagetable->num_locks; lock_section++) {            
-            section_start = lock_section * ptes_per_lock;
-
-            curr_pte_locksection = &pagetable->pte_locksections[lock_section];
-
-            // Ignore invalid PTE sections  
-            if (curr_pte_locksection->valid_pte_count == 0) continue;
-
-            BOOL acquire_pte_lock = TRUE;
-
-
-            for (ULONG64 pte_idx = section_start; pte_idx < section_start + ptes_per_lock; pte_idx++) {
-                /**
-                 * We need to acquire the lock at the beginning, and occasionally reacquire it when we
-                 * conflict with someone holding the page lock
-                 */
-                if (acquire_pte_lock) {
-                    EnterCriticalSection(&curr_pte_locksection->lock);
-
-                    if (curr_pte_locksection->valid_pte_count == 0) {
-                        LeaveCriticalSection(&curr_pte_locksection->lock);
-                        break;
-                    }
-
-                    acquire_pte_lock = FALSE;
-                }
-
-
-                curr_pte = &pagetable->pte_list[pte_idx];
-
-
-                assert(curr_pte_locksection == pte_to_locksection(curr_pte));
-
-                // Ignore invalid PTEs
-                if (! is_memory_format(*curr_pte)) {
-                    continue;
-                }
-
-                curr_pfn = curr_pte->memory_format.frame_number;
-                curr_page = pfn_to_page(curr_pfn);
-
-                /**
-                 * If someone else has the pagelock, then we need to back up - they are
-                 * likely at the final stage of resolving a fault and we need to give up the lock
-                 * so that they can finish. We may still be able to trim the page after, however,
-                 * so we decrement the pte_index again.
-                 * 
-                 * Later, once the age of a PTE is a factor in the trimming, this will be less of a concern
-                 * (and may actually save some hot pages from being trimmed last-minute) 
-                 * 
-                 */
-                if (try_acquire_pagelock(curr_page) == FALSE) {
-                    LeaveCriticalSection(&curr_pte_locksection->lock);
-                    acquire_pte_lock = TRUE;
-                    pte_idx--;
-                    continue;
-                }
-
-                #ifdef DEBUG_CHECKING
-                if (pte_valid_count_check(&pagetable->pte_list[section_start]) == FALSE) {
-                    DebugBreak();
-                }
-                #endif
-
-                // Unmaps from CPU and decrements its valid_pte_count section
-                //BW: Later can have a list of PTEs to pass to this to unmap several at once
-
-                // disconnect_pte_from_cpu(curr_pte);
-
-
-                //BW: Can maybe leave pte lock here in the meantime?  
-                //      - as of now, no, as we have already set up the transition PTE  
-                PTE transition_pte_contents;
-                transition_pte_contents.complete_format = 0;
-                transition_pte_contents.transition_format.always_zero = 0;
-                transition_pte_contents.transition_format.frame_number = curr_pfn;
-                transition_pte_contents.transition_format.is_transition = 1;
-
-
-                write_pte_contents(curr_pte, transition_pte_contents);
-                disconnect_pte_from_cpu(curr_pte);
-
-                LeaveCriticalSection(&curr_pte_locksection->lock);
-
-                #ifdef DEBUG_CHECKING
-                int dbg_result;
-                if ((dbg_result = page_is_isolated(curr_page)) != ISOLATED) {
-                    DebugBreak();
-                }
-                #endif
-
-                total_trimmed++;
-
-                EnterCriticalSection(&modified_list->lock);  
-      
-
-                #ifdef DEBUG_CHECKING
-                if (pfn_is_single_allocated(page_to_pfn(curr_page)) == FALSE) {
-                    DebugBreak();
-                }
-                #endif
-
-                modified_add_page(curr_page, modified_list);
-                release_pagelock(curr_page);
-
-                LeaveCriticalSection(&modified_list->lock);
-                
-                break;
-            }
-            
-        }
-
-        // Signal that the modified list should be populated
-        trim_count++;
-
-        // printf("trimmed %llx\n", total_trimmed);
-
-        SetEvent(modified_to_standby_event);
-    }
-}
-
-
-/**
  * Thread dedicated to aging all of the valid PTEs in the pagetable
  */
 LPTHREAD_START_ROUTINE thread_aging() {
@@ -209,6 +50,302 @@ LPTHREAD_START_ROUTINE thread_aging() {
             LeaveCriticalSection(&curr_pte_locksection->lock);
         }
         // printf("Successfully aged\n");
+    }
+}
+
+
+/**
+ * Thread dedicated to trimming PTEs from the pagetable and putting them on the modified list
+ */
+#define TRIM_PER_SECTION 4
+ULONG64 trim_count = 0;
+LPTHREAD_START_ROUTINE thread_trimming() {
+    #if 0
+    PAGE* pages_to_trim = (PAGE*) malloc(sizeof(PAGE) * pagetable->num_locks);
+
+    if (pages_to_trim == NULL) {
+        fprintf(stderr, "Failed to allocate memory for pages_to_trim in thread_trimming\n");
+        return;
+    }
+
+    void** pte_vas_to_trim = malloc(sizeof(void*) * pagetable->num_locks);
+
+    if (pte_vas_to_trim == NULL) {
+        fprintf(stderr, "Failed to allocate memory for pte_vas_to_trim in thread_trimming\n");
+        return;
+    }
+
+    ULONG64 num_pages;
+    #endif
+
+    ULONG64 ptes_per_lock = pagetable->num_virtual_pages / pagetable->num_locks;
+    ULONG64 section_start;
+    PTE* curr_pte;
+    PTE_LOCKSECTION* curr_pte_locksection;
+    ULONG64 curr_pfn;
+    PAGE* curr_page = NULL;
+    ULONG64 trimmed_in_section;
+    ULONG64 total_trimmed = 0;
+
+    PTE* pte_section_trim[TRIM_PER_SECTION];
+    PAGE* page_section_trim[TRIM_PER_SECTION];
+    PULONG_PTR trim_addresses[TRIM_PER_SECTION];
+
+
+    while(TRUE) {
+        WaitForSingleObject(trimming_event, INFINITE);
+
+        // Go through each lock section and increment all valid PTEs
+        for (ULONG64 lock_section = 0; lock_section < pagetable->num_locks; lock_section++) {            
+            section_start = lock_section * ptes_per_lock;
+
+            curr_pte_locksection = &pagetable->pte_locksections[lock_section];
+
+            // Ignore invalid PTE sections  
+            if (curr_pte_locksection->valid_pte_count == 0) continue;
+
+            BOOL acquire_pte_lock = TRUE;
+
+            trimmed_in_section = 0;
+
+
+            for (ULONG64 pte_idx = section_start; pte_idx < section_start + ptes_per_lock; pte_idx++) {
+                /**
+                 * We need to acquire the lock at the beginning, and occasionally reacquire it when we
+                 * conflict with someone holding the page lock
+                 */
+                if (acquire_pte_lock) {
+                    EnterCriticalSection(&curr_pte_locksection->lock);
+
+                    if (curr_pte_locksection->valid_pte_count == trimmed_in_section) {
+                        LeaveCriticalSection(&curr_pte_locksection->lock);
+                        break;
+                    }
+
+                    acquire_pte_lock = FALSE;
+                }
+
+                // There are no more PTEs left in this section for us to trim
+                if (curr_pte_locksection->valid_pte_count == trimmed_in_section) {
+                    break;
+                }
+
+                curr_pte = &pagetable->pte_list[pte_idx];
+
+
+                assert(curr_pte_locksection == pte_to_locksection(curr_pte));
+
+                // Ignore invalid PTEs
+                if (! is_memory_format(*curr_pte)) {
+                    continue;
+                }
+
+                curr_page = pfn_to_page(curr_pte->memory_format.frame_number);
+
+                /**
+                 * If someone else has the pagelock, then we need to back up - they are
+                 * likely at the final stage of resolving a fault and we need to give up the lock
+                 * so that they can finish. We may still be able to trim the page after, however,
+                 * so we decrement the pte_index again.
+                 * 
+                 * Later, once the age of a PTE is a factor in the trimming, this will be less of a concern
+                 * (and may actually save some hot pages from being trimmed last-minute) 
+                 * 
+                 */
+                if (try_acquire_pagelock(curr_page) == FALSE) {
+                    LeaveCriticalSection(&curr_pte_locksection->lock);
+                    acquire_pte_lock = TRUE;
+                    pte_idx--;
+                    continue;
+                }
+
+                // This PTE is now on the chopping block
+                pte_section_trim[trimmed_in_section] = curr_pte;
+                page_section_trim[trimmed_in_section] = curr_page;
+
+                #ifdef DEBUG_CHECKING
+                int dbg_result;
+                if ((dbg_result = page_is_isolated(curr_page)) != ISOLATED) {
+                    DebugBreak();
+                }
+                #endif
+
+                trimmed_in_section++;
+                total_trimmed++;
+
+                if (trimmed_in_section == TRIM_PER_SECTION) {
+                    break;
+                }
+            }
+
+            // We failed to trim any pages
+            if (trimmed_in_section == 0) {
+                if (acquire_pte_lock == FALSE) {
+                    LeaveCriticalSection(&curr_pte_locksection->lock);
+                }
+
+                continue;
+            };
+
+            /**
+             * We separate the disconnecting MapUserPhysicalPagesScatter call from the insertion from the modified list
+             * to reduce the time/contention inside of the modified list lock. Hence, the two nearly identical loops
+             */
+            PTE transition_pte_contents;
+            transition_pte_contents.complete_format = 0;
+            transition_pte_contents.transition_format.always_zero = 0;
+            transition_pte_contents.transition_format.is_transition = 1;
+
+            if (acquire_pte_lock == TRUE) {
+                EnterCriticalSection(&curr_pte_locksection->lock);
+            }
+
+            for (ULONG64 trim_idx = 0; trim_idx < trimmed_in_section; trim_idx++) {
+                curr_pte = pte_section_trim[trim_idx];
+                transition_pte_contents.transition_format.frame_number = curr_pte->memory_format.frame_number;
+                write_pte_contents(curr_pte, transition_pte_contents);
+                trim_addresses[trim_idx] = pte_to_va(curr_pte);
+            }
+
+            // This will be an expensive call to MapUserPhysicalPages, so we want to break it up
+            disconnect_va_batch_from_cpu(trim_addresses, trimmed_in_section);
+
+            LeaveCriticalSection(&curr_pte_locksection->lock);
+
+            EnterCriticalSection(&modified_list->lock); 
+
+            for (ULONG64 trim_idx = 0; trim_idx < trimmed_in_section; trim_idx++) {
+                curr_pte = pte_section_trim[trim_idx];
+                curr_page = pfn_to_page(curr_pte->memory_format.frame_number);
+                modified_add_page(curr_page, modified_list);
+                release_pagelock(curr_page);
+            }
+
+            LeaveCriticalSection(&modified_list->lock); 
+
+            trimmed_in_section = 0;
+        }
+
+        // Signal that the modified list should be populated
+        trim_count++;
+
+        // printf("trimmed %llx\n", total_trimmed);
+        total_trimmed = 0;
+
+        SetEvent(modified_to_standby_event);
+    }
+}
+
+
+/**
+ * Trims the PTEs behind the faulting thread if there are at least FAULTER_TRIM_BEHIND_MIN of them active,
+ * but will only enter one PTE locksection to ensure low wait-times for the faulting thread
+ * 
+ * Will only trim a max of FAULTER_TRIM_BEHIND_MAX pages
+ */
+void faulter_trim_behind(PTE* accessed_pte) {
+    ULONG64 accessed_pte_index = ((ULONG64) accessed_pte - (ULONG64) pagetable->pte_list) / sizeof(PTE);
+    PTE_LOCKSECTION* curr_pte_locksection = pte_to_locksection(accessed_pte);
+    PTE* curr_pte;
+
+    if (accessed_pte_index < FAULTER_TRIM_BEHIND_MIN) return;
+
+    /**
+     * Quick check to see if the PTEs behind are valid before entering any lock
+     * 
+     * Note that these PTEs could be trimmed before we acquire the lock and look, but if there are enough here,
+     * we will try to acquire the lock and trim behind. If we fail to acquire the lock, then we will do nothing to
+     * reduce contention
+     */
+    ULONG64 num_valid_ptes_behind = 0;
+    for (ULONG64 pte_idx = accessed_pte_index - 1; pte_idx > 0; pte_idx--) {
+        curr_pte = &pagetable->pte_list[pte_idx];
+
+        if (is_memory_format(*curr_pte) == FALSE) {
+            break;
+        }
+
+        if (pte_to_locksection(&pagetable->pte_list[pte_idx]) != curr_pte_locksection) {
+            break;
+        }
+
+        num_valid_ptes_behind++;
+
+        if (num_valid_ptes_behind == FAULTER_TRIM_BEHIND_MAX) {
+            break;
+        }
+    }
+
+    // There were not enough valid PTEs behind us to bother trying
+    if (num_valid_ptes_behind < FAULTER_TRIM_BEHIND_MIN) {
+        return;
+    }
+
+    PTE pte_contents;
+    pte_contents.complete_format = 0;
+    pte_contents.transition_format.is_transition = 1;
+
+    ULONG64 num_ptes_trimmed = 0;
+    PULONG_PTR trimmed_addresses[FAULTER_TRIM_BEHIND_MAX];
+    PAGE* pages_trimmed[FAULTER_TRIM_BEHIND_MAX];
+    ULONG64 curr_pfn;
+    PAGE* curr_page;
+
+    // We will not try to contend for the lock at all, and will cut our losses at the loop we already performed
+    if (TryEnterCriticalSection(&curr_pte_locksection->lock) == FALSE) {
+        return;
+    }
+
+    // Now the PTEs can no longer change from under us - so we are free to change anything
+    for (ULONG64 pte_idx = accessed_pte_index - 1; pte_idx > accessed_pte_index - 1 - num_valid_ptes_behind; pte_idx--) {
+        curr_pte = &pagetable->pte_list[pte_idx];
+        
+        if (is_memory_format(*curr_pte) == FALSE) {
+            continue;
+        }
+
+        curr_pfn = curr_pte->memory_format.frame_number;
+        curr_page = pfn_to_page(curr_pfn);
+
+        // No contention on held pagelocks either!
+        if (try_acquire_pagelock(curr_page) == FALSE) {
+            continue;
+        }
+
+        // Edit the PTE to be on transition format
+        pte_contents.transition_format.frame_number = curr_pfn;
+        write_pte_contents(curr_pte, pte_contents);
+        
+        // Store the virtual addresses so that they can be unmapped easily
+        trimmed_addresses[num_ptes_trimmed] = pte_to_va(curr_pte);
+
+        // Store the pages to add to the modified list
+        pages_trimmed[num_ptes_trimmed] = curr_page;
+
+        num_ptes_trimmed++;
+        curr_pte_locksection->valid_pte_count--;
+    }
+
+    // A lot changed under us, our heuristic was wrong and we were unable to trim any PTEs
+    if (num_ptes_trimmed == 0) {
+        LeaveCriticalSection(&curr_pte_locksection->lock);
+        return;
+    }
+
+    disconnect_va_batch_from_cpu(trimmed_addresses, num_ptes_trimmed);
+
+    // Briefly enter the modified list lock just to add the pages that we have already prepared
+    EnterCriticalSection(&modified_list->lock);
+    for (ULONG64 i = 0; i < num_ptes_trimmed; i++) {
+        modified_add_page(pages_trimmed[i], modified_list);
+        release_pagelock(pages_trimmed[i]);
+    }    
+    LeaveCriticalSection(&modified_list->lock);
+
+    LeaveCriticalSection(&curr_pte_locksection->lock);
+
+    if (modified_list->list_length > MAX_PAGES_WRITABLE) {
+        SetEvent(modified_to_standby_event);
     }
 }
 

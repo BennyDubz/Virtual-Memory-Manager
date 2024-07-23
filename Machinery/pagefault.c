@@ -63,8 +63,11 @@ volatile ULONG64 successful_disk_read_count = 0;
 int pagefault(PULONG_PTR virtual_address) {
     InterlockedIncrement64(&fault_count);
 
-    if (fault_count % KB(64) == 0) {
+    if (fault_count % KB(128) == 0) {
         printf("Curr fault count 0x%llX\n", fault_count);
+        printf("\tZeroed: 0x%llX Free: 0x%llX Standby: 0x%llX Mod 0x%llX\n", zero_lists->total_available, free_frames->total_available, 
+                                            standby_list->list_length, modified_list->list_length);
+
     }
 
     /**
@@ -83,6 +86,11 @@ int pagefault(PULONG_PTR virtual_address) {
     if (accessed_pte == NULL) {
         fprintf(stderr, "Unable to find the accessed PTE\n");
         return REJECTION_FAIL;
+    }
+
+    // We try to trim behind us
+    if (fault_count % 16 == 0) {
+        faulter_trim_behind(accessed_pte);
     }
 
     // Make a copy of the PTE in order to perform the fault
@@ -217,9 +225,12 @@ int pagefault(PULONG_PTR virtual_address) {
         // The other disk format specific entries are zero - so we do not need to set them
         pte_contents.disk_format.pagefile_idx = allocated_page_old.pagefile_idx;
 
+        #if 0
         EnterCriticalSection(&pte_to_locksection(old_pte)->lock);
         write_pte_contents(old_pte, pte_contents);
         LeaveCriticalSection(&pte_to_locksection(old_pte)->lock);
+        #endif
+        write_pte_contents(old_pte, pte_contents);
     }
 
     release_pagelock(allocated_page);
@@ -365,6 +376,11 @@ static PAGE* find_available_page() {
 
     // If we succeed on the zeroed list, this is the best case scenario as we don't have to do anything else
     if ((allocated_page = allocate_zeroed_frame()) != NULL) {
+
+        if (zero_lists->total_available + zero_lists->total_available < physical_page_count / 5) {
+            faulter_refresh_free_and_zero_lists();
+        }
+
         // acquire_pagelock(allocated_page);
         return allocated_page;
     }
@@ -397,6 +413,10 @@ static PAGE* find_available_page() {
     #if DEBUG_PAGELOCK
     assert(allocated_page->holding_threadid == GetCurrentThreadId());
     #endif
+
+    if (standby_list->list_length > physical_page_count / 5) {
+        faulter_refresh_free_and_zero_lists();
+    }
 
     // The pagelock is acquired in standby_pop_page
     return allocated_page;

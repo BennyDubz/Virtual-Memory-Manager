@@ -7,6 +7,8 @@
 
 #include "../Datastructures/datastructures.h"
 
+#define FAULTER_TRIM_BEHIND_MIN 4
+#define FAULTER_TRIM_BEHIND_MAX 64
 
 /**
  * Thread dedicated to aging all of the valid PTEs in the pagetable
@@ -18,6 +20,13 @@ LPTHREAD_START_ROUTINE thread_aging();
  * Thread dedicated to trimming PTEs from the pagetable and putting them on the modified list
  */
 LPTHREAD_START_ROUTINE thread_trimming();
+
+
+/**
+ * Trims the PTEs behind the faulting thread if there are at least FAULTER_TRIM_BEHIND_BOUNDARY of them active,
+ * but will only enter one PTE locksection to ensure low wait-times for the faulting thread
+ */
+void faulter_trim_behind();
 
 
 /**

@@ -5,13 +5,37 @@
  * All operations required to zeroing out pages
  */
 
-#define NUM_ZERO_SLOTS 512
-#define MAX_ZEROABLE 64
+#define NUM_FAULTER_ZERO_SLOTS 256
+
+#define NUM_THREAD_ZERO_SLOTS 256
+
+#define PAGE_SLOT_OPEN 0
+#define PAGE_SLOT_CLAIMED 1
+#define PAGE_SLOT_READY 2
+
+
 #define ZERO_SLOT_OPEN 0
 #define ZERO_SLOT_USED 1
 #define ZERO_SLOT_NEEDS_FLUSH 2
 
 #include "../Datastructures/datastructures.h"
+
+#ifndef PAGE_ZEROING_STRUCT_T
+#define PAGE_ZEROING_STRUCT_T
+typedef struct {
+    long status_map[NUM_THREAD_ZERO_SLOTS];
+    PAGE* pages_to_zero[NUM_THREAD_ZERO_SLOTS];
+    volatile ULONG64 curr_idx;
+    volatile ULONG64 total_slots_used;
+    volatile long zeroing_ongoing;
+} PAGE_ZEROING_STRUCT;
+#endif
+
+/**
+ * Returns an index to the page zeroing struct's status/page storage that is likely to be open
+ * if the zeroing thread has kept up
+ */
+ULONG64 get_zeroing_struct_idx();
 
 
 /**
@@ -63,6 +87,16 @@ PAGE* allocate_free_frame();
  * Returns the number of pages successfully allocated and put into the page_storage
  */
 ULONG64 allocate_batch_free_frames(PAGE** page_storage, ULONG64 batch_size);
+
+
+/**
+ * To be called by the faulting thread when the total of free frames + zero frames is low
+ * 
+ * Takes many frames off of the standby list and uses some to populate the free frames list, while also
+ * adding some to the zeroing-threads buffer. If there are enough pages for the zeroing thread to zero-out,
+ * then it will be signalled
+ */
+void faulter_refresh_free_and_zero_lists();
 
 
 /**

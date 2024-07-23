@@ -56,6 +56,8 @@ STANDBY_LIST* standby_list;
 
 MODIFIED_LIST* modified_list;
 
+PAGE_ZEROING_STRUCT* page_zeroing;
+
 #if DEBUG_PAGELOCK
 PAGE_LOGSTRUCT page_log[LOG_SIZE];
 
@@ -462,6 +464,17 @@ static int init_datastructures() {
     page_log;
     log_idx = 0;
     #endif
+    
+    page_zeroing = (PAGE_ZEROING_STRUCT*) malloc(sizeof(PAGE_ZEROING_STRUCT));
+
+    if (page_zeroing == NULL) {
+        fprintf(stderr, "Unable to initialize page zeroing global structure\n");
+        return ERROR;
+    }
+
+    page_zeroing->curr_idx = 0;
+    page_zeroing->total_slots_used = 0;
+    page_zeroing->zeroing_ongoing = FALSE;
 
     return SUCCESS;
 }

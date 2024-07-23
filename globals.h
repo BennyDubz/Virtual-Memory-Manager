@@ -9,6 +9,7 @@
 #include "Datastructures/disk.h"
 #include "Datastructures/pagetable.h"
 #include "Datastructures/pagelists.h"
+#include "./Machinery/pagelist_operations.h"
 
 /**
  * GLOBAL VALUES OR POINTERS
@@ -35,12 +36,16 @@ extern STANDBY_LIST* standby_list;
 
 extern MODIFIED_LIST* modified_list;
 
+extern PAGE_ZEROING_STRUCT* page_zeroing;
+
 #define LOG_SIZE 512
 #if DEBUG_PAGELOCK
 extern PAGE_LOGSTRUCT page_log[LOG_SIZE];
 
 extern volatile ULONG64 log_idx;
 #endif
+
+
 
 
 /**

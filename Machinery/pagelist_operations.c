@@ -15,10 +15,21 @@
 #include "../globals.h"
 #include "../macros.h"
 
-#define ZERO_REFRESH_BOUNDARY  NUM_ZERO_SLOTS / 2
-long zero_slot_statuses[NUM_ZERO_SLOTS];
+#define ZERO_REFRESH_BOUNDARY  NUM_FAULTER_ZERO_SLOTS / 2
+long zero_slot_statuses[NUM_FAULTER_ZERO_SLOTS];
 ULONG64 total_available_zero_slots;
 PULONG_PTR faulter_zero_base_addr;
+
+/**
+ * Returns an index to the page zeroing struct's status/page storage that is likely to be open
+ * if the zeroing thread has kept up
+ * 
+ * This is done by doing an interlocked increment on the current index, and using the modulo operation to
+ * ensure the list wraps back around
+ */
+ULONG64 get_zeroing_struct_idx() {
+    return InterlockedIncrement64(&page_zeroing->curr_idx) % NUM_THREAD_ZERO_SLOTS;
+}
 
 /**
  * Used as the compare function for quicksorting an array of pages by their PTE's virtual address
@@ -71,21 +82,23 @@ static void update_pte_sections_to_disk_format(PAGE** page_list, ULONG64 num_pag
      * PTE locksections, allowing us to enter each PTE lock only once. The cost of sorting the array is much lower than the potential
      * cost of colliding on critical sections and entering and leaving the same critical section more than once
      */
-    qsort(page_list, num_pages, sizeof(PAGE*), page_pte_compare);
+    // qsort(page_list, num_pages, sizeof(PAGE*), page_pte_compare);
 
     // The first and last field will always be zero for all the PTEs we update
     PTE pte_contents;
     pte_contents.complete_format = 0;
 
+    #if 0
     PTE_LOCKSECTION* curr_locksection = pte_to_locksection(page_list[0]->pte);
     PTE_LOCKSECTION* next_locksection;
 
     EnterCriticalSection(&curr_locksection->lock);
+    #endif
 
     for (ULONG64 page_idx = 0; page_idx < num_pages; page_idx++) {
         curr_page = page_list[page_idx];
         curr_pte = curr_page->pte;
-
+        #if 0
         PTE_LOCKSECTION* next_locksection = pte_to_locksection(curr_pte);
 
         // Switch to the next critical section if it is not the one we are already in
@@ -96,6 +109,7 @@ static void update_pte_sections_to_disk_format(PAGE** page_list, ULONG64 num_pag
 
             EnterCriticalSection(&next_locksection->lock);
         }
+        #endif
 
         if (is_transition_format(*curr_pte) == FALSE) DebugBreak();
 
@@ -104,14 +118,14 @@ static void update_pte_sections_to_disk_format(PAGE** page_list, ULONG64 num_pag
         write_pte_contents(curr_pte, pte_contents);
     }
 
-    LeaveCriticalSection(&curr_locksection->lock);
+    // LeaveCriticalSection(&curr_locksection->lock);
 }
 
 
 /**
  * Adds all of the pages from each page section to their free list buckets, and releases all the pagelocks
  */
-static void free_frames_zerolist_add_batch(PAGE** page_list, ULONG64 num_pages) {
+static void free_frames_add_batch(PAGE** page_list, ULONG64 num_pages) {
     PAGE* curr_page;
 
     /**
@@ -163,7 +177,7 @@ static void free_frames_zerolist_add_batch(PAGE** page_list, ULONG64 num_pages) 
     SetEvent(waiting_for_pages_event);
 }
 
-
+#if 0
 /**
  * Reacquires all of the remaining (not NULL) pages in each page section from the free frames list
  */
@@ -204,47 +218,90 @@ static void free_frames_zerolist_reacquire_pages(PAGE*** page_sections, ULONG64*
         LeaveCriticalSection(&free_frames->list_locks[cache_slot]);
     }
 }
-
+#endif
 
 /**
  * Adds all of the remaining (not NULL) pages in each section to the zero list and releases all of the pagelocks
  */
-static void zero_list_add_batch(PAGE*** page_sections, ULONG64* page_section_counts) {
-    PAGE** page_array;
-    ULONG64 section_count;
-    ULONG64 remaining_section_count;
+static void zero_list_add_batch(PAGE** page_list, ULONG64 num_pages) {
     PAGE* curr_page;
+
+    /**
+     * Here, we sort the page_list by each page's cache color - which is determined by the cache size and each page's
+     * respective physical frame number. This allows us to enter each free_list/zero_list locksection only once.
+     */
+    qsort(page_list, num_pages, sizeof(PAGE*), page_cache_color_compare);
+
+    ULONG64 curr_cache_color = page_to_pfn(page_list[0]) % NUM_CACHE_SLOTS;
+    ULONG64 next_cache_color;
+
+
+    /**
+     * We enter the first pages corresponding cache color locksection - we will hold onto this lock
+     * until we reach a page who is in a different cache color. Because the list is sorted by cache color,
+     * we will only enter and leave each critical section once
+     */
+    CRITICAL_SECTION* curr_locksection = &zero_lists->list_locks[curr_cache_color];
+
+    EnterCriticalSection(curr_locksection);
+
+    for (ULONG64 page_idx = 0; page_idx < num_pages; page_idx++) {
     
-    for (ULONG64 cache_slot = 0; cache_slot < NUM_CACHE_SLOTS; cache_slot++) {
-        section_count = page_section_counts[cache_slot];
+        curr_page = page_list[page_idx];
 
-        // Ignore page sections where we do not have anything to add
-        if (section_count == 0) continue;
+        next_cache_color = page_to_pfn(curr_page) % NUM_CACHE_SLOTS;
 
-        page_array = page_sections[cache_slot];
-        DB_LL_NODE* zero_list_section_listhead = zero_lists->listheads[cache_slot];
-        remaining_section_count = section_count;
-        
-        // Add every page in the cache slot section to the free list section
-        EnterCriticalSection(&zero_lists->list_locks[cache_slot]);
+        // If the cache colors are different, we will need to enter a new locksection
+        if (next_cache_color != curr_cache_color) {
+            LeaveCriticalSection(curr_locksection);
 
-        for (ULONG64 page_idx = 0; page_idx < section_count; page_idx++) {
-            curr_page = page_array[page_idx];
+            curr_locksection = &zero_lists->list_locks[next_cache_color];
 
-            // This page was used while it was on the free list, and not on the zero_lists list
-            if (curr_page == NULL) {
-                remaining_section_count--;
-                continue;
-            }
+            curr_cache_color = next_cache_color;
 
-            db_insert_node_at_head(zero_list_section_listhead, curr_page->frame_listnode);
-            release_pagelock(curr_page);
+            EnterCriticalSection(curr_locksection);
         }
 
-        zero_lists->list_lengths[cache_slot] += remaining_section_count;
+        db_insert_at_head(zero_lists->listheads[curr_cache_color], curr_page->frame_listnode);
 
-        LeaveCriticalSection(&zero_lists->list_locks[cache_slot]);
+        curr_page->status = FREE_STATUS;
+        curr_page->pte = NULL;
+
+        release_pagelock(curr_page);
     }
+    
+    LeaveCriticalSection(curr_locksection);
+
+    SetEvent(waiting_for_pages_event);
+}
+
+
+/**
+ * Gets all of the pages from the global pages_to_zero_storage and uses interlocked operations on the pages_to_zero_map
+ * to mark which pages we took, and writes the pages into page_storage as well as their frame numbers into pfn_storage
+ * 
+ * Returns the number of pages written
+ */
+static ULONG64 zero_list_get_pages_to_clear(PAGE** page_storage, ULONG64* pfn_storage) {
+    ULONG64 page_count = 0;
+    PAGE* curr_page;
+    UCHAR old_val;
+    for (ULONG64 i = 0; i < NUM_THREAD_ZERO_SLOTS; i++) {
+        if (page_zeroing->status_map[i] == PAGE_SLOT_READY) {
+            curr_page = page_zeroing->pages_to_zero[i];
+            page_storage[page_count] = curr_page;
+            pfn_storage[page_count] = page_to_pfn(curr_page);
+
+            acquire_pagelock(curr_page);
+            page_count++;
+
+            // Clear the status slot - its corresponding page can now be overwritten
+            InterlockedAnd(&page_zeroing->status_map[i], PAGE_SLOT_OPEN);
+            InterlockedDecrement64(&page_zeroing->total_slots_used);
+        }
+    }
+
+    return page_count;
 }
 
 
@@ -252,8 +309,6 @@ static void zero_list_add_batch(PAGE*** page_sections, ULONG64* page_section_cou
  * Thread dedicated to taking pages from standby, zeroing them, and
  * adding them to the zero lists for quicker access
  */
-#define MAX_PAGES_TO_REPURPOSE 512
-#define STANDBY_PROPORTION_DIVISOR 5
 // #define MAX_PAGES_PER_SECTION 64
 LPTHREAD_START_ROUTINE thread_populate_zero_lists(void* parameters) {
     MEM_EXTENDED_PARAMETER* vmem_parameters = (MEM_EXTENDED_PARAMETER*) parameters;
@@ -261,57 +316,26 @@ LPTHREAD_START_ROUTINE thread_populate_zero_lists(void* parameters) {
 
     // We dynamically adjust depending on whether or not we allow multiple VAs to map to the same page
     if (vmem_parameters == NULL) {
-        thread_zeroing_address = VirtualAlloc(NULL, PAGE_SIZE * MAX_PAGES_TO_REPURPOSE, 
+        thread_zeroing_address = VirtualAlloc(NULL, PAGE_SIZE * NUM_THREAD_ZERO_SLOTS, 
                         MEM_PHYSICAL | MEM_RESERVE, PAGE_READWRITE);
     } else {
-        thread_zeroing_address = VirtualAlloc2(NULL, NULL, PAGE_SIZE * MAX_PAGES_TO_REPURPOSE,
+        thread_zeroing_address = VirtualAlloc2(NULL, NULL, PAGE_SIZE * NUM_THREAD_ZERO_SLOTS,
                         MEM_PHYSICAL | MEM_RESERVE, PAGE_READWRITE, vmem_parameters, 1);
     }
 
 
-    #if 0
-    /**
-     *  We will organize the PTEs we need to update into their various locksections 
-    */
-    PTE** ptes_to_update = (PTE***) malloc(sizeof(PTE*) * pagetable->num_locks);
-
-    if (ptes_to_update == NULL) {
-        fprintf(stderr, "Unable to allocate memory for pte updating in thread_populate_zero_lists\n");
-        return;
-    }
-
-    ULONG64* pte_section_counts = (ULONG64*) malloc(sizeof(ULONG64) * pagetable->num_locks);
-
-    if (pte_section_counts == NULL) {
-        fprintf(stderr, "Unable to allocate memory for pte_section_counts in thread_populate_zero_lists\n");
-        return;
-    }
-
-    for (ULONG64 section_num = 0; section_num < pagetable->num_locks; section_num++) {
-        //BW: Think about how we can reduce memory cost here - even if we could theoretically trim an entire PTE section
-        // PTE** pte_section_to_update = (PTE**) malloc(sizeof(PTE*) * MAX_PAGES_PER_SECTION);
-        PTE** pte_section_to_update = (PTE**) malloc(sizeof(PTE*) * MAX_PAGES_TO_REPURPOSE);
-
-
-        if (pte_section_to_update == NULL) {
-            fprintf(stderr, "Unable to allocate memory for pte section updating in thread_populate_zero_lists\n");
-            return;
-        }
-
-        ptes_to_update[section_num] = pte_section_to_update;
-    }
-    #endif
-
     /**
      * The pages, on the other hand, will be organized based off of their cache section
      */
-    PAGE** page_list = (PAGE**) malloc(sizeof(PAGE*) * MAX_PAGES_TO_REPURPOSE);
+    PAGE** page_list = (PAGE**) malloc(sizeof(PAGE*) * NUM_THREAD_ZERO_SLOTS);
 
 
     if (page_list == NULL) {
         fprintf(stderr, "Unable to allocate memory for page_list in thread_populate_zero_lists\n");
-        return;
+        return NULL;
     }
+
+    ULONG64* pfn_list = (ULONG64*) malloc(sizeof(ULONG64) * NUM_THREAD_ZERO_SLOTS);
 
 
     /**
@@ -338,19 +362,43 @@ LPTHREAD_START_ROUTINE thread_populate_zero_lists(void* parameters) {
     while (TRUE) {
         WaitForSingleObject(zero_pages_event, INFINITE);
 
+        InterlockedOr(&page_zeroing->zeroing_ongoing, TRUE);
+
+        #if 0
         ULONG64 curr_standby_length = *(volatile ULONG64*) &standby_list->list_length;
         ULONG64 num_to_repurpose;
 
-        if (MAX_PAGES_TO_REPURPOSE < curr_standby_length / STANDBY_PROPORTION_DIVISOR) {
-            num_to_repurpose = MAX_PAGES_TO_REPURPOSE;
+        if (NUM_THREAD_ZERO_SLOTS < curr_standby_length / STANDBY_PROPORTION_DIVISOR) {
+            num_to_repurpose = NUM_THREAD_ZERO_SLOTS;
         } else {
             num_to_repurpose = curr_standby_length / STANDBY_PROPORTION_DIVISOR;
         }
+        #endif
 
-        ULONG64 actual_pages_acquired;
+        ULONG64 num_to_zero = zero_list_get_pages_to_clear(page_list, pfn_list);
+
+        if (num_to_zero == 0) continue;
+
+        if (MapUserPhysicalPages(thread_zeroing_address, num_to_zero, pfn_list) == FALSE) {
+            fprintf(stderr, "Failed to map zeroing address in thread_populate_zero_lists\n");
+            DebugBreak();
+        }
+
+        memset(thread_zeroing_address, 0, PAGE_SIZE * num_to_zero);
+
+        if (MapUserPhysicalPages(thread_zeroing_address, num_to_zero, NULL) == FALSE) {
+            fprintf(stderr, "Failed to unmap zeroing address in thread_populate_zero_lists\n");
+            DebugBreak();
+        }
+
+        InterlockedAnd(&page_zeroing->zeroing_ongoing, FALSE);
 
         // Get all of the pages from the standby list into our sections
         // standby_zerolist_pop_batch(page_sections, ptes_to_update, pte_section_counts, page_section_counts, num_to_repurpose);
+        
+        zero_list_add_batch(page_list, num_to_zero);
+
+        #if 0
         actual_pages_acquired = standby_pop_batch(page_list, num_to_repurpose);
 
         // We failed to pop any pages off of the standby list
@@ -362,10 +410,12 @@ LPTHREAD_START_ROUTINE thread_populate_zero_lists(void* parameters) {
         update_pte_sections_to_disk_format(page_list, actual_pages_acquired);
         
         // Add the frames to the free-list and release the pagelocks
-        free_frames_zerolist_add_batch(page_list, actual_pages_acquired);
+        free_frames_add_batch(page_list, actual_pages_acquired);
+        #endif
 
 
-        // printf("\t\t finished batch\n");
+
+        printf("Finished batch of %llx to zero\n", num_to_zero);
 
         /**
          * Now, we want to zero out all of the pages that we can - but since we do not have the pagelock
@@ -384,9 +434,10 @@ LPTHREAD_START_ROUTINE thread_populate_zero_lists(void* parameters) {
     
     }
 
+    DebugBreak();
+    return NULL; // To please the compiler
 
 }
-
 
 
 /**
@@ -394,10 +445,10 @@ LPTHREAD_START_ROUTINE thread_populate_zero_lists(void* parameters) {
  */
 int initialize_page_zeroing(MEM_EXTENDED_PARAMETER* vmem_parameters) {
     if (vmem_parameters == NULL) {
-        faulter_zero_base_addr = VirtualAlloc(NULL, PAGE_SIZE * NUM_ZERO_SLOTS, 
+        faulter_zero_base_addr = VirtualAlloc(NULL, PAGE_SIZE * NUM_FAULTER_ZERO_SLOTS, 
                         MEM_PHYSICAL | MEM_RESERVE, PAGE_READWRITE);
     } else {
-        faulter_zero_base_addr = VirtualAlloc2(NULL, NULL, PAGE_SIZE * NUM_ZERO_SLOTS,
+        faulter_zero_base_addr = VirtualAlloc2(NULL, NULL, PAGE_SIZE * NUM_FAULTER_ZERO_SLOTS,
                         MEM_PHYSICAL | MEM_RESERVE, PAGE_READWRITE, vmem_parameters, 1);
     }
 
@@ -407,11 +458,11 @@ int initialize_page_zeroing(MEM_EXTENDED_PARAMETER* vmem_parameters) {
     }
 
     // All slots start as open
-    for (ULONG64 i = 0; i < NUM_ZERO_SLOTS; i++) {
+    for (ULONG64 i = 0; i < NUM_FAULTER_ZERO_SLOTS; i++) {
         zero_slot_statuses[i] = ZERO_SLOT_OPEN;
     }
 
-    total_available_zero_slots = NUM_ZERO_SLOTS;
+    total_available_zero_slots = NUM_FAULTER_ZERO_SLOTS;
 
     return SUCCESS;
 }
@@ -428,7 +479,7 @@ static ULONG64 acquire_batch_zero_slots(ULONG64* zero_slot_indices_storage, ULON
     volatile long* zero_slot;
     ULONG64 num_allocated = 0;
 
-    for (ULONG64 slot_idx = 0; slot_idx < NUM_ZERO_SLOTS; slot_idx++) {
+    for (ULONG64 slot_idx = 0; slot_idx < NUM_FAULTER_ZERO_SLOTS; slot_idx++) {
         zero_slot = &zero_slot_statuses[slot_idx];
         
         if (*zero_slot == ZERO_SLOT_OPEN) {
@@ -461,7 +512,7 @@ static int acquire_zero_slot(ULONG64* zero_slot_idx_storage) {
     volatile long* zero_slot;
 
     // BW: This can be made much more efficient with a bitmap implementation
-    for (ULONG64 slot_idx = 0; slot_idx < NUM_ZERO_SLOTS; slot_idx++) {
+    for (ULONG64 slot_idx = 0; slot_idx < NUM_FAULTER_ZERO_SLOTS; slot_idx++) {
         zero_slot = &zero_slot_statuses[slot_idx];
 
         if (*zero_slot == ZERO_SLOT_OPEN) {
@@ -512,8 +563,8 @@ static void release_zero_slot(ULONG64 slot_idx) {
  * Takes all of the zero slots in the list that need to be refreshed and handle them in a single
  * batch - reducing the amount of load we need on MapUserPhysicalPagesScatter
  */
-PULONG_PTR refresh_zero_addresses[NUM_ZERO_SLOTS];
-volatile long* refresh_zero_status_slots[NUM_ZERO_SLOTS];
+PULONG_PTR refresh_zero_addresses[NUM_FAULTER_ZERO_SLOTS];
+volatile long* refresh_zero_status_slots[NUM_FAULTER_ZERO_SLOTS];
 long zero_refresh_ongoing = FALSE; // We use the long for interlocked operation parameters
 static void refresh_zero_slots() {
     // Synchronize whether we or someone else is refreshing the zero slots
@@ -528,7 +579,7 @@ static void refresh_zero_slots() {
     PULONG_PTR zero_slot_addr;
 
     // Find all of the slots to clear
-    for (ULONG64 slot_idx = 0; slot_idx < NUM_ZERO_SLOTS; slot_idx++) {
+    for (ULONG64 slot_idx = 0; slot_idx < NUM_FAULTER_ZERO_SLOTS; slot_idx++) {
         zero_slot = &zero_slot_statuses[slot_idx];
 
         if (*zero_slot == ZERO_SLOT_NEEDS_FLUSH) {
@@ -571,15 +622,15 @@ static void zero_out_addresses(PULONG_PTR* virtual_addresses, ULONG64 num_addres
  * Given the pages that need to be cleaned, zeroes out all of the contents on their physical pages
  */
 void zero_out_pages(PAGE** pages, ULONG64 num_pages) {
-    if (pages == NULL || num_pages == 0 || num_pages > MAX_ZEROABLE || pages[0] == NULL ) {
+    if (pages == NULL || num_pages == 0 || num_pages > NUM_FAULTER_ZERO_SLOTS || pages[0] == NULL ) {
         fprintf(stderr, "NULL or invalid arguments given to zero_out_pages\n");
         DebugBreak();
     }
 
 
-    PULONG_PTR zero_slot_addresses[MAX_ZEROABLE];
-    ULONG64 zero_slot_indices[MAX_ZEROABLE];
-    ULONG64 pfns[MAX_ZEROABLE];
+    PULONG_PTR zero_slot_addresses[NUM_FAULTER_ZERO_SLOTS];
+    ULONG64 zero_slot_indices[NUM_FAULTER_ZERO_SLOTS];
+    ULONG64 pfns[NUM_FAULTER_ZERO_SLOTS];
     ULONG64 slots_allocated_this_loop = 0;
     ULONG64 total_slots_allocated = 0;
 
@@ -997,6 +1048,84 @@ ULONG64 allocate_batch_free_frames(PAGE** page_storage, ULONG64 batch_size) {
     }
 
     return num_allocated;
+}
+
+
+/**
+ * To be called by the faulting thread when the total of free frames + zero frames is low
+ * 
+ * Takes many frames off of the standby list and uses some to populate the free frames list, while also
+ * adding some to the zeroing-threads buffer. If there are enough pages for the zeroing thread to zero-out,
+ * then it will be signalled
+ */
+#define NUM_PAGES_FAULTER_REFRESH 32
+int total = 0;
+void faulter_refresh_free_and_zero_lists() {
+    PAGE* pages_to_refresh[NUM_PAGES_FAULTER_REFRESH];
+
+    ULONG64 num_allocated = standby_pop_batch(pages_to_refresh, NUM_PAGES_FAULTER_REFRESH);
+
+    // The standby list is empty!
+    if (num_allocated == 0) {
+        SetEvent(trimming_event);
+        return;
+    }
+
+    // Update the old transition PTEs to be disk format
+    update_pte_sections_to_disk_format(pages_to_refresh, num_allocated);
+
+    // Add half the pages to the free list, and releases their pagelocks to be used freely
+    free_frames_add_batch(pages_to_refresh, min(num_allocated, NUM_PAGES_FAULTER_REFRESH / 2));
+
+
+    // See if we still have pages remaining to add to the zeroing threads buffer
+    if (num_allocated < (NUM_PAGES_FAULTER_REFRESH / 2) + 1) { // + 1 to reflect the indices used
+        // There are still very few pages on standby...
+        SetEvent(trimming_event);
+        return;
+    }
+
+    long old_slot_val;
+
+
+    // Add the other half to be zeroed out!
+    for (ULONG64 page_idx = NUM_PAGES_FAULTER_REFRESH / 2; page_idx < num_allocated; page_idx++) {
+        ULONG64 page_zeroing_idx = get_zeroing_struct_idx();
+
+        // We try to claim the slot
+        old_slot_val = InterlockedCompareExchange(&page_zeroing->status_map[page_zeroing_idx], PAGE_SLOT_CLAIMED, PAGE_SLOT_OPEN);
+        
+        // The zeroing thread has failed to keep up - we should just add these to the free frames list
+        if (old_slot_val != PAGE_SLOT_OPEN) {
+            SetEvent(zero_pages_event);
+            ULONG64 remaining_pages = num_allocated - page_idx;
+            free_frames_add_batch(&pages_to_refresh[page_idx], remaining_pages);
+            break;
+        }
+
+        // Write the page to be zeroed into the struct
+        page_zeroing->pages_to_zero[page_zeroing_idx] = pages_to_refresh[page_idx];
+        release_pagelock(pages_to_refresh[page_idx]);
+
+        // Increment the value to signal that the zeroing thread can use this slot to zero
+        assert(InterlockedIncrement(&page_zeroing->status_map[page_zeroing_idx]) == PAGE_SLOT_READY);
+        InterlockedIncrement64(&page_zeroing->total_slots_used);
+    }
+
+    if (page_zeroing->total_slots_used > NUM_THREAD_ZERO_SLOTS / 4 && page_zeroing->zeroing_ongoing == FALSE) {
+        SetEvent(zero_pages_event);
+    }
+
+}
+
+
+/**
+ * To be called by the faulting thread when the number of pages left in the standby cache is low 
+ * 
+ * Pops many pages off the standby list to be added onto the cache for quicker access
+ */
+void faulter_refresh_standby_cache() {
+    return;
 }
 
 
