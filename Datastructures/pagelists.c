@@ -47,6 +47,8 @@ PAGE* initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_f
         fprintf(stderr, "Unable to reserve memory for the pages\n");
         return NULL;
     }
+
+    printf("Num physical frames: %llx\n", num_physical_frames);
     
     // This makes it so we can easily shift to find even the lowest physical frame
     page_storage_base -= lowest_pfn;
@@ -76,6 +78,12 @@ PAGE* initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_f
         InitializeCriticalSection(&new_page->dev_page_lock);
         #endif
 
+        #if LIGHT_DEBUG_PAGELOCK
+        new_page->origin_code = 0xFFFFFF;
+        new_page->prev_code = 0xFFFFFF;
+        new_page->two_ago = 0xFFFFFF;
+        #endif
+
         /**
          * By creating the listnodes here up front as well, we ensure we do not have to malloc them 
          * later on down the road. If we were unable to allocate memory to a node to add
@@ -90,7 +98,6 @@ PAGE* initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_f
         
         new_page->frame_listnode = page_listnode;
     }
-
 
     return page_storage_base;
 }
@@ -119,68 +126,6 @@ BOOL page_is_standby(PAGE page) {
     return page.status == STANDBY_STATUS;
 }
 
-
-#if 0
-/**
- * Spins until the pagelock for the given page can be acquired and returns
- */
-void acquire_pagelock(PAGE* page) {
-
-    #if DEBUG_PAGELOCK
-    EnterCriticalSection(&page->dev_page_lock);
-    page->page_lock = PAGE_LOCKED;
-    page->holding_threadid = GetCurrentThreadId();
-    return;
-    #endif
-
-    unsigned old_lock_status;
-    while(TRUE) {
-        old_lock_status = InterlockedCompareExchange(&page->page_lock, PAGE_LOCKED, PAGE_UNLOCKED);
-        if (old_lock_status == PAGE_UNLOCKED) break;
-    }
-}
-
-
-/**
- * Releases the pagelock for other threads to use
- */
-void release_pagelock(PAGE* page) {
-    #if DEBUG_PAGELOCK
-    if (page->holding_threadid != GetCurrentThreadId()) {
-        DebugBreak();
-    }
-    page->page_lock = PAGE_UNLOCKED;
-    page->holding_threadid = 0;
-    LeaveCriticalSection(&page->dev_page_lock);
-    return;
-    #endif
-
-    if (InterlockedCompareExchange(&page->page_lock, PAGE_UNLOCKED, PAGE_LOCKED) != PAGE_LOCKED) {
-        DebugBreak();
-    };
-}
-
-
-/**
- * Tries to acquire the pagelock without any spinning. 
- * 
- * Returns TRUE if successful, FALSE otherwise
- */
-BOOL try_acquire_pagelock(PAGE* page) {
-    #if DEBUG_PAGELOCK
-    if (TryEnterCriticalSection(&page->dev_page_lock)) {
-        page->page_lock = PAGE_LOCKED;
-        page->holding_threadid = GetCurrentThreadId();
-        return TRUE;
-    } else {
-        return FALSE;
-    }
-    #endif
-    return InterlockedCompareExchange(&page->page_lock, PAGE_LOCKED, PAGE_UNLOCKED) == PAGE_UNLOCKED;
-
-}
-#endif
-
 /**
  * #######################################
  * ZEROED PAGES LIST STRUCTS AND FUNCTIONS
@@ -203,11 +148,19 @@ ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR 
     // Create all the individual listheads
     for (int new_list = 0; new_list < NUM_CACHE_SLOTS; new_list++) {
         DB_LL_NODE* new_listhead = db_create_list();
+
+        if (new_listhead == NULL) {
+            fprintf(stderr, "Failed to allocate memory for listhead in initialize_zeroed_lists\n");
+            return NULL;
+        }
+
         zeroed_lists->listheads[new_list] = new_listhead;
         zeroed_lists->list_lengths[new_list] = 0;
-        zeroed_lists->curr_list_idx = 0;
 
         initialize_lock(&zeroed_lists->list_locks[new_list]);
+
+        EnterCriticalSection(&zeroed_lists->list_locks[new_list]);
+        LeaveCriticalSection(&zeroed_lists->list_locks[new_list]);
     }
 
     // Add all the physical frames to their respective free lists
@@ -234,7 +187,7 @@ ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR 
 
         zero_frame->status = ZERO_STATUS;
 
-        zeroed_lists->list_lengths[listhead_idx] ++;
+        zeroed_lists->list_lengths[listhead_idx]++;
     }
 
     zeroed_lists->total_available = num_physical_frames;
@@ -266,11 +219,19 @@ FREE_FRAMES_LISTS* initialize_free_frames() {
     // Create all the individual listheads
     for (int new_list = 0; new_list < NUM_CACHE_SLOTS; new_list++) {
         DB_LL_NODE* new_listhead = db_create_list();
+
+        if (new_listhead == NULL) {
+            fprintf(stderr, "Failed to allocate memory for listhead in initialize_zeroed_lists\n");
+            return NULL;
+        }
+
         free_frames->listheads[new_list] = new_listhead;
         free_frames->list_lengths[new_list] = 0;
-        free_frames->curr_list_idx = 0;
 
         initialize_lock(&free_frames->list_locks[new_list]);
+
+        EnterCriticalSection(&free_frames->list_locks[new_list]);
+        LeaveCriticalSection(&free_frames->list_locks[new_list]);
     }
 
     free_frames->total_available = 0;

@@ -50,3 +50,9 @@ void log_page_status(PAGE* page);
  * Debugbreaks the program with all values as local variables for the debugger
  */
 void debug_break_all_va_info(PULONG_PTR arbitrary_va);
+
+
+/**
+ * Loops through the entire pagetable and ensures there is only one reference to a disk index
+ */
+void singly_allocated_disk_idx_check(ULONG64 disk_idx);

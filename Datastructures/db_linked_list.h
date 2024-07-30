@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <windows.h>
 
-#define DEBUG_LISTS 0
+#define DEBUG_LISTS 1
 
 #ifndef DBLIST
 #define DBLIST
@@ -18,6 +18,7 @@ typedef struct NODE {
     struct NODE* blink;
     #if DEBUG_LISTS
     struct NODE* listhead_ptr;
+    struct NODE* prev_listhead;
     #endif
     void* item;
 } DB_LL_NODE;

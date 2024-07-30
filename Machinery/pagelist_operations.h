@@ -7,7 +7,7 @@
 
 #define NUM_FAULTER_ZERO_SLOTS 256
 
-#define NUM_THREAD_ZERO_SLOTS 256
+#define NUM_THREAD_ZERO_SLOTS 1024
 
 #define PAGE_SLOT_OPEN 0
 #define PAGE_SLOT_CLAIMED 1
@@ -30,6 +30,7 @@ typedef struct {
     volatile long zeroing_ongoing;
 } PAGE_ZEROING_STRUCT;
 #endif
+
 
 /**
  * Returns an index to the page zeroing struct's status/page storage that is likely to be open
@@ -118,13 +119,13 @@ ULONG64 standby_pop_batch(PAGE** page_storage, ULONG64 batch_size);
 /**
  * Spins until the pagelock for the given page can be acquired and returns
  */
-void acquire_pagelock(PAGE* page);
+void acquire_pagelock(PAGE* page, ULONG64 origin_code);
 
 
 /**
  * Releases the pagelock for other threads to use
  */
-void release_pagelock(PAGE* page);
+void release_pagelock(PAGE* page, ULONG64 origin_code);
 
 
 /**
@@ -132,4 +133,4 @@ void release_pagelock(PAGE* page);
  * 
  * Returns TRUE if successful, FALSE otherwise
  */
-BOOL try_acquire_pagelock(PAGE* page);
+BOOL try_acquire_pagelock(PAGE* page, ULONG64 origin_code);

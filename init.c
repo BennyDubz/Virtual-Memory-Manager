@@ -25,9 +25,7 @@
 // Allows us to access the windows permission libraries so that we can actually get physical frames
 #pragma comment(lib, "advapi32.lib")
 
-#if SUPPORT_MULTIPLE_VA_TO_SAME_PAGE
 #pragma comment(lib, "onecore.lib")
-#endif
 
 // ########## DEFINED GLOBALS ##########
 
@@ -40,6 +38,9 @@ PAGE* page_storage_base;
 volatile ULONG64 total_available_pages;
 
 ULONG64 physical_page_count;
+
+MEM_EXTENDED_PARAMETER vmem_parameters;
+
 
 /**
  * GLOBAL DATASTRUCTURES
@@ -104,7 +105,6 @@ BOOL obtained_pages;
 PULONG_PTR physical_page_numbers;
 ULONG_PTR virtual_address_size;
 ULONG_PTR virtual_address_size_in_unsigned_chunks;
-MEM_EXTENDED_PARAMETER vmem_parameters;
 
 
 
@@ -193,7 +193,6 @@ GetPrivilege  (
     return TRUE;
 }
 
-#if SUPPORT_MULTIPLE_VA_TO_SAME_PAGE
 
 HANDLE
 CreateSharedMemorySection (
@@ -224,7 +223,6 @@ CreateSharedMemorySection (
     return section;
 }
 
-#endif
 
 
 static int init_simulation(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memory_size_storage);
@@ -286,18 +284,12 @@ static int init_simulation(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memor
         return ERROR;
     }    
 
-    #if SUPPORT_MULTIPLE_VA_TO_SAME_PAGE
-    printf("We are supporting multiple VA's to the same page\n");
     physical_page_handle = CreateSharedMemorySection();
 
     if (physical_page_handle == NULL) {
         printf ("CreateSharedMemorySection failed, error %#x\n", GetLastError());
         return ERROR;
     }
-    #else
-    physical_page_handle = GetCurrentProcess ();
-
-    #endif
 
     physical_page_count = NUMBER_OF_PHYSICAL_PAGES;
 
@@ -347,7 +339,6 @@ static int init_simulation(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memor
     virtual_address_size_in_unsigned_chunks =
                         virtual_address_size / sizeof (ULONG_PTR);
 
-    #if SUPPORT_MULTIPLE_VA_TO_SAME_PAGE
 
     // vmem_parameters = { 0 };
 
@@ -367,19 +358,35 @@ static int init_simulation(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memor
                        &vmem_parameters,
                        1);
 
-    #else
+    DWORD old_prot;
 
-    vmem_base = VirtualAlloc (NULL,
-                        virtual_address_size,
-                        MEM_RESERVE | MEM_PHYSICAL,
-                        PAGE_READWRITE);
-
-    #endif
 
     if (vmem_base == NULL) {
         printf ("init : could not reserve memory for usermode simulation\n");
         return ERROR;
     }
+
+    #if 0
+    ULONG64 page_read_only_prot = ((ULONG64) physical_page_numbers[0]) | PAGE_MAPUSERPHYSCAL_READONLY_MASK;
+
+    if (MapUserPhysicalPages(vmem_base, 1, &page_read_only_prot) == FALSE) {
+        printf("Failed to map readonly page\n");
+        DebugBreak();
+    }
+
+    bool status;
+
+    __try {
+        *vmem_base = 0xFFFFFFFF;
+        status = TRUE;
+
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+
+        status = FALSE;
+    }
+
+    DebugBreak();
+    #endif
 
     *virtual_memory_size_storage = virtual_address_size;
     *vmem_base_storage = vmem_base;
@@ -426,11 +433,8 @@ static int init_datastructures() {
     }
 
     total_available_pages = physical_page_count;
-    #if SUPPORT_MULTIPLE_VA_TO_SAME_PAGE
     disk = initialize_disk(&vmem_parameters);
-    #else
-    disk = initialize_disk(NULL);
-    #endif
+
 
     if (disk == NULL) {
         fprintf(stderr, "Unable to allocate memory for disk\n");
@@ -448,17 +452,12 @@ static int init_datastructures() {
         fprintf(stderr, "Unable to initialize modified list\n");
         return ERROR;
     }
-    #if SUPPORT_MULTIPLE_VA_TO_SAME_PAGE
+
     if (initialize_page_zeroing(&vmem_parameters) == ERROR) {
         fprintf(stderr, "Unable to initialize page zeroing structures\n");
         return ERROR;
     }
-    #else
-    if (initialize_page_zeroing(NULL) == ERROR) {
-        fprintf(stderr, "Unable to initialize page zeroing structures\n");
-        return ERROR;
-    }
-    #endif
+   
 
     #if DEBUG_PAGELOCK
     page_log;

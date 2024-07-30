@@ -7,8 +7,11 @@
 
 #include "../Datastructures/datastructures.h"
 
-#define FAULTER_TRIM_BEHIND_MIN 4
+#define FAULTER_TRIM_BEHIND_MIN 8
 #define FAULTER_TRIM_BEHIND_MAX 64
+
+// We need to OR the final bit of a pfn in order to have read-only permissions
+#define PAGE_MAPUSERPHYSCAL_READONLY_MASK 0x8000000000000000
 
 /**
  * Thread dedicated to aging all of the valid PTEs in the pagetable
@@ -36,11 +39,15 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby();
 
 
 /**
- * Connects the given PTE to the open page's physical frame and alerts the CPU
+ * Connects the given PTE to the open page's physical frame and modifies the PTE
+ * 
+ * Sets the permission bits of the PTE in accordance with its status as well as the type of access
+ * (read / write) that occurred. We try to get away with PAGE_READONLY permissions when it would allow us
+ * to potentially conserve pagefile space - and therefore unncessary modified writes.
  * 
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
-int connect_pte_to_page(PTE* pte, PAGE* open_page);
+int connect_pte_to_page(PTE* pte, PAGE* open_page, ULONG64 access_type);
 
 
 /**

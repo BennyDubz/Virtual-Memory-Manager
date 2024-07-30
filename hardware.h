@@ -28,10 +28,6 @@
 #define DOWN_TO_PAGE_ADDR(x) (x & ~(PAGE_SIZE - 1))
 #define DOWN_TO_PAGE_NUM(x) (x >> PAGE_POWER)
 
-// Whether we can map multiple virtual addresses to the same page
-#define SUPPORT_MULTIPLE_VA_TO_SAME_PAGE 1
-
-
 #ifndef LARGE_SIM
 
 /**
@@ -43,7 +39,7 @@
 
 #define CACHE_SIZE      KB(16)
 
-#define DISK_SIZE       VIRTUAL_ADDRESS_SIZE * 2
+#define DISK_SIZE       VIRTUAL_ADDRESS_SIZE
 
 #define NUMBER_OF_PHYSICAL_PAGES   ((VIRTUAL_ADDRESS_SIZE / PAGE_SIZE) / 3)
 
@@ -59,7 +55,7 @@
 
 #define CACHE_SIZE      MB(1)
 
-#define DISK_SIZE       VIRTUAL_ADDRESS_SIZE * 2
+#define DISK_SIZE       VIRTUAL_ADDRESS_SIZE
 
 #define NUMBER_OF_PHYSICAL_PAGES   ((VIRTUAL_ADDRESS_SIZE / PAGE_SIZE) / 3)
 #endif

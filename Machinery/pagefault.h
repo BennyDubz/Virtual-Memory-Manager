@@ -9,6 +9,11 @@
 #include "../hardware.h"
 #include "../globals.h"
 
+
+/**
+ * This allows us to store the results of various faults
+ */
+
 // To make it easier to store results
 #define NUM_FAULT_RETURN_VALS 6
 
@@ -32,4 +37,4 @@
  * Returns SUCCESS if the faulting instruction can be tried again, ERROR otherwise
  * 
  */
-int pagefault(PULONG_PTR virtual_address);
+int pagefault(PULONG_PTR virtual_address, ULONG64 access_type);

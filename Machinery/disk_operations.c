@@ -11,96 +11,13 @@
 #include "../Datastructures/datastructures.h"
 #include "./disk_operations.h"
 #include "./conversions.h"
+#include "./debug_checks.h"
 #include "../globals.h"
 #include "../macros.h"
 #include "../hardware.h"
 
 
 static void disk_spin();
-
-/**
- * A thread dedicated to writing the given page to the disk. Writes the resulting
- * disk storage index into the given pointer disk_idx_storage.
- * 
- * Returns SUCCESS if we write the page to disk, ERROR otherwise
- */
-int write_page_to_disk(PAGE* transition_page, ULONG64* disk_idx_storage) {
-    if (transition_page == NULL || disk_idx_storage == NULL) {
-        fprintf(stderr, "NULL transition page or disk_idx_storage given to thread_worker_write_to_disk\n");
-        return ERROR;
-    }
-
-    // DISK_RW_SLOT* write_slot = db_pop_from_tail(disk->disk_write_listhead);
-
-    /**
-     * We need to find an open disk write slot VA, followed by mapping the pfn from this
-     * page to it. This allows us to map the contents of the pfn from the temporary slot
-     * to the disk without allowing the user to access the PTE and modify its contents.
-     */
-    
-    ULONG64 pfn = page_to_pfn(transition_page);
-
-    // We need to now get an open disk slot...
-    ULONG64 disk_storage_slot;
-
-    if (allocate_single_disk_slot(&disk_storage_slot) == ERROR) {
-        // fprintf(stderr, "Failed to get disk slot in write_page_to_disk\n");
-        // DebugBreak();
-        return ERROR;
-    }
-
-    PULONG_PTR disk_storage_addr = disk_idx_to_addr(disk_storage_slot);
-
-    DISK_RW_SLOT* write_slot;
-    EnterCriticalSection(&disk->disk_write_list_lock);
-
-    // We need to try until we get a slot available
-    while ((write_slot = db_pop_from_tail(disk->disk_write_listhead)) == NULL) {
-        LeaveCriticalSection(&disk->disk_write_list_lock);
-
-        WaitForSingleObject(disk_write_available_event, INFINITE);
-
-        EnterCriticalSection(&disk->disk_write_list_lock);
-    }
-    LeaveCriticalSection(&disk->disk_write_list_lock);
-
-
-    // At this point, we know that we have a slot to write to
-    // Map the CPU
-    if (MapUserPhysicalPages (write_slot->rw_address, 1, &pfn) == FALSE) {
-        fprintf (stderr, "write_page_to_disk : could not map VA %p to pfn %llX\n", write_slot->rw_address, pfn);
-        DebugBreak();
-        return ERROR;
-    }
-
-    // Copy from the temporary slot to the disk
-    memcpy(disk_storage_addr, write_slot->rw_address, PAGE_SIZE);
-
-    // To simulate that real disks are slow, we spin a bit here
-    disk_spin();
-
-    // Unmap the temporary write slot from our pfn
-    if (MapUserPhysicalPages (write_slot->rw_address, 1, NULL) == FALSE) {
-        fprintf (stderr, "write_page_to_disk : could not unmap VA %p\n", write_slot->rw_address);
-        DebugBreak();
-        return ERROR;
-    }
-
-    // db_insert_node_at_head(disk->disk_write_listhead, write_slot->listnode);
-
-    // Add the write slot back to the list, and signal anyone waiting
-    EnterCriticalSection(&disk->disk_write_list_lock);
-
-    db_insert_node_at_head(disk->disk_write_listhead, write_slot->listnode);
-    SetEvent(disk_write_available_event);
-
-    LeaveCriticalSection(&disk->disk_write_list_lock);
-
-    // Store the disk storage slot into the given idx storage
-    *disk_idx_storage = disk_storage_slot;
-
-    return SUCCESS;
-}
 
 
 /**
@@ -112,12 +29,16 @@ int write_page_to_disk(PAGE* transition_page, ULONG64* disk_idx_storage) {
 ULONG64 write_batch_to_disk(DISK_BATCH* disk_batch) {
     ULONG_PTR pfn_list[MAX_PAGES_WRITABLE];
 
+    ULONG64 num_available_disk_slots = allocate_many_disk_slots(disk_batch->disk_indices, disk_batch->num_pages);
+
+    // We were unable to get any disk slots
+    if (num_available_disk_slots == 0) return 0;
+
     // We need a list of PFNs for MapUserPhysicalPages
     for (int page_num = 0; page_num < disk_batch->num_pages; page_num++) {
         pfn_list[page_num] = page_to_pfn(disk_batch->pages_being_written[page_num]);
     }
 
-    ULONG64 num_available_disk_slots = allocate_many_disk_slots(disk_batch->disk_indices, disk_batch->num_pages);
 
     // Map the physical pages to our large disk write slot
     if (MapUserPhysicalPages(disk->disk_large_write_slot, num_available_disk_slots, pfn_list) == FALSE) {
@@ -161,23 +82,34 @@ ULONG64 write_batch_to_disk(DISK_BATCH* disk_batch) {
  */
 static int acquire_disk_readslot(ULONG64* disk_read_idx_storage) {
     long read_old_val;
+    ULONG64 curr_idx;
     volatile long* disk_readslot;
 
-    // BW: This can be made much more efficient with a bitmap implementation
-    for (ULONG64 disk_read_idx = 0; disk_read_idx < DISK_READ_SLOTS; disk_read_idx++) {
-        disk_readslot = &disk->disk_read_slot_statues[disk_read_idx];
+    ULONG64 num_attempts = 0;
+
+    while (num_attempts < DISK_READ_SLOTS) {   
+        /**
+         * Using the interlocked operations here with the read indices makes it almost certain that threads will not share the same
+         * read index, and if we are able to refresh the slots frequently enough, then we should be able to find a disk slot in
+         * O(1) time rather than the worst case O(n) time if we performed a typical linear walk. The worst case scenario though is still the
+         * linear walk that fails to find a disk slot - in which case a thread will refresh the read slots in the parent
+         */
+        curr_idx = InterlockedIncrement64(&disk->disk_read_curr_idx) % DISK_READ_SLOTS;
+
+        disk_readslot = &disk->disk_read_slot_statues[curr_idx];
 
         if (*disk_readslot == DISK_READ_OPEN) {
             read_old_val = InterlockedCompareExchange(disk_readslot, DISK_READ_USED, DISK_READ_OPEN);
             
             // We successfully claimed the disk slot
             if (read_old_val == DISK_READ_OPEN) {
-                *disk_read_idx_storage = disk_read_idx;
-                assert(&disk->num_available_read_slots != 0);
+                *disk_read_idx_storage = curr_idx;
                 InterlockedDecrement64(&disk->num_available_read_slots);
                 return SUCCESS;
             }
         }
+
+        num_attempts++;
     }
 
     // There were no slots available, we will need to refresh the list and try again
@@ -271,7 +203,6 @@ int read_page_from_disk(PAGE* open_page, ULONG64 disk_idx) {
     DISK_RW_SLOT* read_slot;
 
     // Someone else likely beat us to freeing this disk slot
-
     if (disk->disk_slot_statuses[disk_idx] == DISK_FREESLOT) { 
         DebugBreak();
     }
@@ -288,37 +219,9 @@ int read_page_from_disk(PAGE* open_page, ULONG64 disk_idx) {
             // If another thread beat us to it, this will return almost immediately
             refresh_disk_readslots();
         }
-
-        // if (disk->num_available_read_slots == 0) {
-        //     ResetEvent(disk_read_available_event);
-
-        //     // Since threads will work on this preemptively, this wait should be infrequent
-        //     WaitForSingleObject(disk_read_available_event, INFINITE);
-        // }
     }
 
     PULONG_PTR disk_read_addr = disk->disk_read_base_addr + (disk_read_idx * PAGE_SIZE / sizeof(PULONG_PTR));
-
-
-
-    #if 0
-    //BW: Adjust these to use InterlockedCompareExchange and InterlockedAnd
-    EnterCriticalSection(&disk->disk_read_list_lock);
-
-
-    // We need to try until we get a slot available
-    while ((read_slot = db_pop_from_tail(disk->disk_read_listhead)) == NULL) {
-        LeaveCriticalSection(&disk->disk_read_list_lock);
-
-        WaitForSingleObject(disk_read_available_event, INFINITE);
-
-        EnterCriticalSection(&disk->disk_read_list_lock);
-    }
-
-    LeaveCriticalSection(&disk->disk_read_list_lock);
-    #endif
-
-    //BW: Look at all usage of disk idx locks, do we still need this?
 
 
     // Map the CPU
@@ -333,15 +236,6 @@ int read_page_from_disk(PAGE* open_page, ULONG64 disk_idx) {
     // To simulate that real disks are slow, we spin a bit here
     disk_spin();
 
-
-    /**
-     * We can batch these by having much more disk read slots, and having a :
-     * 0 - free status 
-     * 1 - used status 
-     * 2 - needs TLB flush
-     * 
-     */
-
     release_disk_readslot(disk_read_idx);
     
     // If we are running low on disk read slots, attempt to refresh the disk slots
@@ -349,17 +243,6 @@ int read_page_from_disk(PAGE* open_page, ULONG64 disk_idx) {
         // If someone else is already doing it (race condition) - we will return almost immediately
         refresh_disk_readslots();
     }
-
-
-    #if 0
-    // Add the read slot back to the list, and signal anyone waiting
-    EnterCriticalSection(&disk->disk_read_list_lock);
-
-    db_insert_node_at_head(disk->disk_read_listhead, read_slot->listnode);
-    SetEvent(disk_read_available_event);
-
-    LeaveCriticalSection(&disk->disk_read_list_lock);
-    #endif
 
     return SUCCESS;
 }
@@ -602,6 +485,52 @@ int release_single_disk_slot(ULONG64 disk_idx) {
 
 
 /**
+ * Called at the end of a pagefault to determine whether or not a pagefile slot needs to be
+ * released. Modifies the page if necessary to remove the reference to the pagefile slot if it is released,
+ * and releases the disk slot if appropriate
+ * 
+ * Assumes the caller holds the given page's pagelock.
+ */
+void handle_end_of_fault_disk_slot(PTE local_pte, PAGE* allocated_page, ULONG64 access_type) {
+        
+    if (access_type == READ_ACCESS) {
+
+        // We want to store the disk index in the page so we don't lose it
+        if (is_disk_format(local_pte)) {
+            allocated_page->pagefile_idx = local_pte.disk_format.pagefile_idx;
+            return;
+        }
+
+        if (is_used_pte(local_pte) == FALSE) {
+            allocated_page->pagefile_idx = DISK_IDX_NOTUSED;
+            return;
+        }
+
+        return;
+    }
+
+    if (access_type == WRITE_ACCESS) {
+
+        // We have to throw out the pagefile space stored in the PTE
+        if (is_disk_format(local_pte)) {
+            release_single_disk_slot(local_pte.disk_format.pagefile_idx);
+        }
+
+        // If we rescued from standby, then we need to release the now stale pagefile space
+        if (is_transition_format(local_pte) && allocated_page->status == STANDBY_STATUS) {
+            release_single_disk_slot(allocated_page->pagefile_idx);
+        }
+
+        // In all cases, we cannot store any pagefile information in the page
+        allocated_page->pagefile_idx = DISK_IDX_NOTUSED;
+        return;
+    }
+    
+    DebugBreak();
+}
+
+
+/**
  * Real disks take a long time to perform their operations. We simulate this
  * by forcing the caller to spin, so that we can better represent optimizations
  * on disk reads
@@ -614,3 +543,5 @@ static void disk_spin() {
 
     return;
 }
+
+

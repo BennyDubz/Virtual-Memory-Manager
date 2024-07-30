@@ -56,6 +56,9 @@ lock_spinning: vm.exe
 lock_spinning_lenient: CFLAGS += $(LOCK_SPINNING_FLAGS) $(LENIENT_DISK_FLAGS)
 lock_spinning_lenient: vm.exe
 
+large_spinning_lenient: CFLAGS += $(LOCK_SPINNING_FLAGS) $(LENIENT_DISK_FLAGS) $(LARGE_SIM_FLAGS)
+large_spinning_lenient: vm.exe
+
 debug: CFLAGS += $(DEBUG_FLAGS)
 debug: vm.exe
 

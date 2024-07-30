@@ -19,7 +19,8 @@
  * Returns a pointer to a list of PTEs with num_physical_frames entries, or NULL upon an error
  */
 PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base) {
-    printf("Number of virtual pages: %lld\n", num_virtual_pages);
+    printf("Number of virtual pages: %llX\n", num_virtual_pages);
+    
     PAGETABLE* pagetable = (PAGETABLE*) malloc(sizeof(PAGETABLE));
 
     if (pagetable == NULL) {
@@ -48,8 +49,9 @@ PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base)
         pte_list[virtual_page] = new_pte;
     }
 
-    ULONG64 num_locks = max(num_virtual_pages >> 4, 1);
-
+    // We want 512 PTEs per locksection
+    ULONG64 num_locks = max(num_virtual_pages / 512, 1);
+    
     PTE_LOCKSECTION* pte_locksections = (PTE_LOCKSECTION*) malloc(sizeof(PTE_LOCKSECTION) * num_locks);
 
     if (pte_locksections == NULL) {

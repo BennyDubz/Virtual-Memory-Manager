@@ -21,6 +21,9 @@ extern volatile ULONG64 total_available_pages;
 
 extern ULONG64 physical_page_count;
 
+extern MEM_EXTENDED_PARAMETER vmem_parameters;
+
+
 /**
  * GLOBAL DATASTRUCTURES
  */

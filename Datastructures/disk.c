@@ -30,12 +30,15 @@ DISK* initialize_disk(MEM_EXTENDED_PARAMETER* vmem_parameters) {
         return NULL;
     }
 
-    PULONG_PTR disk_base = VirtualAlloc(NULL, DISK_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    PULONG_PTR disk_base = VirtualAlloc(NULL, DISK_SIZE, 
+                        MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    
 
     if (disk_base == NULL) {
         fprintf(stderr, "Unable to virtual alloc memory for the disk base in initialize_disk\n");
         return NULL;
     }
+
 
     disk->base_address = disk_base;
     
@@ -46,7 +49,7 @@ DISK* initialize_disk(MEM_EXTENDED_PARAMETER* vmem_parameters) {
         fprintf(stderr, "Unable to allocate memory for disk slots in initialize_disks\n");
         return NULL;
     }
-    printf("Making %d disk slots\n", DISK_STORAGE_SLOTS);
+
 
     /**
      * We set all of the disk slots to be free initially, EXCEPT disk slot 0
@@ -123,67 +126,13 @@ DISK* initialize_disk(MEM_EXTENDED_PARAMETER* vmem_parameters) {
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
 static int initialize_disk_write(DISK* disk, MEM_EXTENDED_PARAMETER* vmem_parameters) {
-    // We want the virtual memory to be separate from the user address space
-    PULONG_PTR disk_write_base;
-    if (vmem_parameters == NULL) {
-        disk_write_base = VirtualAlloc(NULL, PAGE_SIZE * DISK_WRITE_SLOTS, 
-                        MEM_PHYSICAL | MEM_RESERVE, PAGE_READWRITE);
-    } else {
-        disk_write_base = VirtualAlloc2(NULL, NULL, PAGE_SIZE * DISK_WRITE_SLOTS,
-                        MEM_PHYSICAL | MEM_RESERVE, PAGE_READWRITE, vmem_parameters, 1);
-    }
-    
-    if (disk_write_base == NULL) {
-        fprintf(stderr, "Unable to virtual alloc memory for disk_write_base in initialize_disk\n");
-        return ERROR;
-    }
-
-    DB_LL_NODE* disk_write_listhead = db_create_list();
-
-    if (disk_write_listhead == NULL) {
-        fprintf(stderr, "Failed to allocate memory for disk write listhead\n");
-        return ERROR;
-    }
-
-    // Allocate a slot and listnode for each address we virtual alloc'd
-    for (ULONG64 slot_num = 0; slot_num < DISK_WRITE_SLOTS; slot_num++) {
-        DISK_RW_SLOT* disk_w_slot = (DISK_RW_SLOT*) malloc(sizeof(DISK_RW_SLOT));
-
-        if (disk_w_slot == NULL) {
-            fprintf(stderr, "Failed to allocate memory for disk_w_slot in initialize_disk_write\n");
-            return ERROR;
-        }
-
-        PULONG_PTR disk_write_addr = disk_write_base + (slot_num * PAGE_SIZE / sizeof(PULONG_PTR));
-        DB_LL_NODE* disk_w_node = db_create_node(disk_write_addr);
-
-        if (disk_w_node == NULL) {
-            fprintf(stderr, "Failed to allocate memory for disk_w_node in initialize_disk_write\n");
-            return ERROR;
-        }
-
-        disk_w_slot->listnode = disk_w_node;
-        disk_w_slot->rw_address = disk_write_addr;
-        disk_w_node->item = disk_w_slot;
-
-        db_insert_node_at_head(disk_write_listhead, disk_w_node);
-    }
-
-    initialize_lock(&disk->disk_write_list_lock);
-    disk->disk_write_listhead = disk_write_listhead;
-
     /**
      * We also virtual alloc a large virtual address space to support large, batched writes
      */
     PULONG_PTR disk_large_write_slot;
-    
-    if (vmem_parameters == NULL) {
-        disk_large_write_slot = VirtualAlloc(NULL, PAGE_SIZE * MAX_PAGES_WRITABLE, 
-                        MEM_PHYSICAL | MEM_RESERVE, PAGE_READWRITE); 
-    } else {
-        disk_large_write_slot = VirtualAlloc2(NULL, NULL, PAGE_SIZE * MAX_PAGES_WRITABLE,
+
+    disk_large_write_slot = VirtualAlloc2(NULL, NULL, PAGE_SIZE * MAX_PAGES_WRITABLE,
                         MEM_PHYSICAL | MEM_RESERVE, PAGE_READWRITE, vmem_parameters, 1);
-    }
     
     if (disk_large_write_slot == NULL) {
         fprintf(stderr, "Failed to virtual alloc the large disk write slot\n");
@@ -202,21 +151,9 @@ static int initialize_disk_write(DISK* disk, MEM_EXTENDED_PARAMETER* vmem_parame
  */
 static int initialize_disk_read(DISK* disk, MEM_EXTENDED_PARAMETER* vmem_parameters) {
     
-    /**
-     * We want the disk read/write slots to have separate virtual address ranges from the user
-     * in our simulation. If vmem_parameters is NULL, then we can simply do a normal VirtualAlloc.
-     * 
-     * Otherwise, we need to use VirtualAlloc2 in order to adjust to the requirements of
-     * SUPPORT_MULTIPLE_VA_TO_PAGE being on
-     */
     PULONG_PTR disk_read_base;
-    if (vmem_parameters == NULL) {
-        disk_read_base = VirtualAlloc(NULL, PAGE_SIZE * DISK_READ_SLOTS, 
-                        MEM_PHYSICAL | MEM_RESERVE, PAGE_READWRITE);
-    } else {
-        disk_read_base = VirtualAlloc2(NULL, NULL, PAGE_SIZE * DISK_READ_SLOTS,
+    disk_read_base = VirtualAlloc2(NULL, NULL, PAGE_SIZE * DISK_READ_SLOTS,
                         MEM_PHYSICAL | MEM_RESERVE, PAGE_READWRITE, vmem_parameters, 1);
-    }
 
     
     if (disk_read_base == NULL) {
@@ -230,42 +167,7 @@ static int initialize_disk_read(DISK* disk, MEM_EXTENDED_PARAMETER* vmem_paramet
     }
 
     disk->num_available_read_slots = DISK_READ_SLOTS;
-
-    #if 0
-    DB_LL_NODE* disk_read_listhead = db_create_list();
-
-    if (disk_read_listhead == NULL) {
-        fprintf(stderr, "Failed to allocate memory for disk read listhead\n");
-        return ERROR;
-    }
-
-    // Allocate a slot and listnode for each address we virtual alloc'd
-    for (ULONG64 slot_num = 0; slot_num < DISK_READ_SLOTS; slot_num++) {
-        DISK_RW_SLOT* disk_r_slot = (DISK_RW_SLOT*) malloc(sizeof(DISK_RW_SLOT));
-
-        if (disk_r_slot == NULL) {
-            fprintf(stderr, "Failed to allocate memory for disk_r_slot in initialize_disk_read\n");
-            return ERROR;
-        }
-
-        PULONG_PTR disk_read_addr = disk_read_base + (slot_num * PAGE_SIZE / sizeof(PULONG_PTR));
-        DB_LL_NODE* disk_r_node = db_create_node(disk_read_addr);
-
-        if (disk_r_node == NULL) {
-            fprintf(stderr, "Failed to allocate memory for disk_r_node in initialize_disk_read\n");
-            return ERROR;
-        }
-
-        disk_r_slot->listnode = disk_r_node;
-        disk_r_slot->rw_address = disk_read_addr;
-        disk_r_node->item = disk_r_slot;
-
-        db_insert_node_at_head(disk_read_listhead, disk_r_node);
-    }
-
-    initialize_lock(&disk->disk_read_list_lock);
-    disk->disk_read_listhead = disk_read_listhead;
-    #endif
+    disk->disk_read_curr_idx = 0;
 
     return SUCCESS;
 }

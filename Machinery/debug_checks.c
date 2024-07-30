@@ -206,13 +206,89 @@ void debug_break_all_va_info(PULONG_PTR arbitrary_va) {
 
     PULONG_PTR last_used_disk_slot;
 
+    ULONG64 disk_idx;
+
     PULONG_PTR other_va = (PULONG_PTR) *arbitrary_va;
 
     PTE* other_pte = va_to_pte(other_va);
 
     if (relevant_page->pagefile_idx != 0) {
         last_used_disk_slot = disk_idx_to_addr(relevant_page->pagefile_idx);
+        disk_idx = relevant_page->pagefile_idx;
     }
 
     DebugBreak();
+}
+
+
+static void singly_allocated_disk_idx_debugbreak(ULONG64 disk_idx, PTE* found_pte, PTE* curr_pte, PAGE* found_page, PAGE* curr_page) {
+    PULONG_PTR disk_slot_addr = disk_idx_to_addr(disk_idx);
+
+    PULONG_PTR found_pte_va = pte_to_va(found_pte);
+
+    PULONG_PTR curr_pte_va = pte_to_va(curr_pte);
+
+    DebugBreak();
+}
+
+
+/**
+ * Loops through the entire pagetable and ensures there is only one reference to a disk index
+ */
+void singly_allocated_disk_idx_check(ULONG64 disk_idx) {
+
+    ULONG64 num_ptes = pagetable->num_virtual_pages;
+    PTE* curr_pte_ptr;
+    PTE curr_pte_contents;
+    PAGE* curr_page;
+    
+    PTE* found_pte = NULL;
+    PAGE* found_page = NULL;
+
+    for (ULONG64 i = 0; i < num_ptes; i++) {
+        curr_pte_ptr = &pagetable->pte_list[i];
+        curr_pte_contents = read_pte_contents(curr_pte_ptr);
+
+        if (is_used_pte(curr_pte_contents) == FALSE) continue;
+
+        if (is_memory_format(curr_pte_contents)) {
+            curr_page = pfn_to_page(curr_pte_contents.memory_format.frame_number);
+
+            if (curr_page->pagefile_idx == disk_idx) {
+                if (found_pte != NULL)  {
+                    singly_allocated_disk_idx_debugbreak(disk_idx, found_pte, curr_pte_ptr, found_page, curr_page);
+                }
+                found_page = curr_page;
+                found_pte = curr_pte_ptr;
+            }
+
+            continue;
+        }
+
+        if (is_transition_format(curr_pte_contents)) {
+            curr_page = pfn_to_page(curr_pte_contents.transition_format.frame_number);
+
+            if (curr_page->pagefile_idx == disk_idx) {
+                if (found_pte != NULL)  {
+                    singly_allocated_disk_idx_debugbreak(disk_idx, found_pte, curr_pte_ptr, found_page, curr_page);
+                }
+                found_page = curr_page;
+                found_pte = curr_pte_ptr;
+            }
+            continue;
+        }
+
+
+        if (is_disk_format(curr_pte_contents)) {
+            if (curr_pte_contents.disk_format.pagefile_idx == disk_idx) {
+                if (found_pte != NULL) {
+                    singly_allocated_disk_idx_debugbreak(disk_idx, found_pte, curr_pte_ptr, found_page, NULL);
+                }
+                found_pte = curr_pte_ptr;
+            }
+            continue;
+        }
+    }
+
+    if (found_pte == NULL) DebugBreak();
 }

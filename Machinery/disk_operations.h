@@ -17,15 +17,6 @@ typedef struct {
 
 
 /**
- * A thread dedicated to writing the given page to the disk. Writes the resulting
- * disk storage index into the given pointer disk_idx_storage.
- * 
- * Returns SUCCESS if we write the page to disk, ERROR otherwise
- */
-int write_page_to_disk(PAGE* transition_page, ULONG64* disk_idx_storage);
-
-
-/**
  * Writes the entire batch to disk, and stores the disk indices into the page
  * 
  * Returns the number of pages successfully written to disk, as if there are not enough slots 
@@ -65,3 +56,14 @@ int allocate_single_disk_slot(ULONG64* result_storage);
  * Returns SUCCESS upon no issues, ERROR otherwise
  */
 int release_single_disk_slot(ULONG64 disk_idx);
+
+
+
+/**
+ * Called at the end of a pagefault to determine whether or not a pagefile slot needs to be
+ * released. Modifies the page if necessary to remove the reference to the pagefile slot if it is released,
+ * and releases the disk slot if appropriate
+ * 
+ * Assumes the caller holds the given page's pagelock
+ */
+void handle_end_of_fault_disk_slot(PTE local_pte, PAGE* allocated_page, ULONG64 access_type);

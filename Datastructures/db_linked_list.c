@@ -48,6 +48,7 @@ DB_LL_NODE* db_create_list() {
 
     #if DEBUG_LISTS
     listhead->listhead_ptr = listhead;
+    listhead->prev_listhead = NULL;
     #endif
 
     return listhead;
@@ -190,7 +191,11 @@ void* db_pop_from_head(DB_LL_NODE* listhead) {
     listhead->flink = head_node->flink;
     head_node->flink->blink = listhead;
 
+    head_node->flink = NULL;
+    head_node->blink = NULL;
+
     #if DEBUG_LISTS
+    head_node->prev_listhead = head_node->listhead_ptr;
     head_node->listhead_ptr = NULL;
     #endif
 
@@ -218,7 +223,11 @@ void* db_pop_from_tail(DB_LL_NODE* listhead) {
     listhead->blink = tail_node->blink;
     tail_node->blink->flink = listhead;
 
+    tail_node->flink = NULL;
+    tail_node->blink = NULL;
+
     #if DEBUG_LISTS
+    tail_node->prev_listhead = tail_node->listhead_ptr;
     tail_node->listhead_ptr = NULL;
     #endif
 
@@ -249,11 +258,16 @@ void* db_remove_from_middle(DB_LL_NODE* listhead, DB_LL_NODE* middle_node) {
 
     assert(prev != middle_node);
     assert(next != middle_node);
+    assert(listhead != middle_node);
+
+    middle_node->flink = NULL;
+    middle_node->blink = NULL;
     
     prev->flink = next;
     next->blink = prev;
 
     #if DEBUG_LISTS
+    middle_node->prev_listhead =  middle_node->listhead_ptr;
     middle_node->listhead_ptr = NULL;
     #endif
 

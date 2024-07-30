@@ -14,9 +14,10 @@
 
 #define NUM_USERMODE_THREADS        8
 #define MAX_CONSECUTIVE_ACCESSES    64
-#define ACCESS_AMOUNT       MB(1)
+#define TOTAL_ACCESS_AMOUNT      MB(100)
 
 HANDLE simulation_threads[NUM_USERMODE_THREADS];
+HANDLE thread_start_event;
 volatile ULONG64 total_fault_failures = 0;
 volatile ULONG64 fault_results[NUM_FAULT_RETURN_VALS];
 
@@ -24,11 +25,11 @@ volatile ULONG64 fault_results[NUM_FAULT_RETURN_VALS];
 typedef struct {
     PULONG_PTR vmem_base;
     ULONG_PTR virtual_address_size;
-    ULONG64 seed_addition;
+    ULONG64* time_storage;
 } SIM_PARAMS;
 
-int thread_access_random_addresses(void* params);
 
+int thread_access_random_addresses(void* params);
 
 
 /**
@@ -52,6 +53,10 @@ void usermode_virtual_memory_simulation () {
 
     SIM_PARAMS thread_params[NUM_USERMODE_THREADS];
 
+    ULONG64 thread_times[NUM_USERMODE_THREADS];
+
+    thread_start_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+
     #ifdef DEBUG_CHECKING
     printf("Debug checking is on\n");
     #endif
@@ -72,9 +77,6 @@ void usermode_virtual_memory_simulation () {
     printf("No simulated disk slowdown: lenient disk is on\n");
     #endif
 
-    clock_t timer;
-    timer = clock();
-
     // Initialize fault failure tracking array
     for (int i = 0; i < NUM_FAULT_RETURN_VALS; i++) {
         fault_results[i] = 0;
@@ -82,12 +84,20 @@ void usermode_virtual_memory_simulation () {
 
     // Start off all threads
     for (int user_thread_num = 0; user_thread_num < NUM_USERMODE_THREADS; user_thread_num++) {
+        thread_params[user_thread_num].time_storage = &thread_times[user_thread_num];
         thread_params[user_thread_num].virtual_address_size = virtual_address_size;
         thread_params[user_thread_num].vmem_base = vmem_base;
-        thread_params[user_thread_num].seed_addition = user_thread_num * 100;
         simulation_threads[user_thread_num] = CreateThread(NULL, 0, 
                 (LPTHREAD_START_ROUTINE) thread_access_random_addresses, (LPVOID) &thread_params[user_thread_num], 0, NULL);
     }
+
+    // Give a little time for the other threads to start up
+    Sleep(50);
+
+    clock_t timer;
+    timer = clock();
+
+    SetEvent(thread_start_event);
 
     // Wait for thread completion
     for (int user_thread_num = 0; user_thread_num < NUM_USERMODE_THREADS; user_thread_num++) {
@@ -103,9 +113,9 @@ void usermode_virtual_memory_simulation () {
 
     timer = clock() - timer;
     double time_taken = (double) (timer) / CLOCKS_PER_SEC;
-    printf("usermode_virtual_memory_simulation : finished accessing %d random virtual addresses over %d threads\n", ACCESS_AMOUNT * NUM_USERMODE_THREADS, NUM_USERMODE_THREADS);
+    printf("usermode_virtual_memory_simulation : finished accessing %d random virtual addresses over %d threads\n", TOTAL_ACCESS_AMOUNT, NUM_USERMODE_THREADS);
     printf("usermode_virtual_memory_simulation : total of %lld fault failures\n", total_fault_failures);
-    printf("usermode_virtual_memory_simulation : total CPU time was %f seconds\n", time_taken);
+    printf("usermode_virtual_memory_simulation : total time was %f seconds\n", time_taken);
     printf("usermode_virtual_memory_simulation : fault breakdown:\n");
 
     printf("\tSuccessful faults: %lld\n", fault_results[SUCCESSFUL_FAULT]);
@@ -134,22 +144,29 @@ int thread_access_random_addresses(void* params) {
     PULONG_PTR vmem_base;
     ULONG_PTR virtual_address_size;
 
-
     SIM_PARAMS* parameters = (SIM_PARAMS*) params;
 
     virtual_address_size = parameters->virtual_address_size;
     vmem_base = parameters->vmem_base;
 
+    // This ensures that we access distinct 64 bit chunks that do not overlap
     ULONG64 virtual_address_size_in_unsigned_chunks = virtual_address_size / sizeof(ULONG_PTR);
-
-    srand(time(NULL) + parameters->seed_addition);
+    
     int fault_result;
     arbitrary_va = NULL;
-
     int consecutive_accesses = 0;   
 
+    /**
+     * Normally, the CPU would tell the operating system what the access type was for a fault.
+     * In the simulation, we will have to tell the fault handler this ourselves
+     */
+    ULONG64 access_type;
+
+
+    WaitForSingleObject(thread_start_event, INFINITE);
+
     printf("Thread starting \n");
-    for (i = 0; i < ACCESS_AMOUNT; i += 1) {
+    for (i = 0; i < TOTAL_ACCESS_AMOUNT / NUM_USERMODE_THREADS; i += 1) {
 
         if (consecutive_accesses == 0) {
             arbitrary_va = NULL;
@@ -170,13 +187,14 @@ int thread_access_random_addresses(void* params) {
         
         if (arbitrary_va == NULL) {
 
-            random_number = rand () * rand() * rand() * rand() * rand();
+            // Not cryptographically strong, but good enough to get a spread-out distribution
+            random_number = ReadTimeStampCounter();
 
             random_number %= virtual_address_size_in_unsigned_chunks;
 
             arbitrary_va = vmem_base + random_number;
 
-            consecutive_accesses = rand() % MAX_CONSECUTIVE_ACCESSES;
+            consecutive_accesses = ReadTimeStampCounter() % MAX_CONSECUTIVE_ACCESSES;
         }
 
         //
@@ -185,16 +203,16 @@ int thread_access_random_addresses(void* params) {
         //
 
         page_faulted = FALSE;
+        access_type = READ_ACCESS;
 
         __try {
             //BW: Switch to this when we are actually zeroing-out pages
             if (*arbitrary_va == 0) {
+                access_type = WRITE_ACCESS;
                 *arbitrary_va = (ULONG_PTR) arbitrary_va;
             } else if((ULONG_PTR) *arbitrary_va != (ULONG_PTR) arbitrary_va) {
                 debug_break_all_va_info(arbitrary_va);
             }
-
-            // *arbitrary_va = (ULONG_PTR) arbitrary_va;
 
         } __except (EXCEPTION_EXECUTE_HANDLER) {
 
@@ -202,7 +220,7 @@ int thread_access_random_addresses(void* params) {
         }
 
         if (page_faulted) {
-            fault_result = pagefault(arbitrary_va);
+            fault_result = pagefault(arbitrary_va, access_type);
 
             InterlockedIncrement64(&fault_results[fault_result]);
 
@@ -224,6 +242,7 @@ int thread_access_random_addresses(void* params) {
 
     return SUCCESS;
 }
+
 
 
 void main (int argc, char** argv) {

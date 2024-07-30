@@ -8,7 +8,8 @@
 
 
 // If this is 1, then we will use normal critical sections instead of just the bit
-#define DEBUG_PAGELOCK 1
+#define DEBUG_PAGELOCK 0
+#define LIGHT_DEBUG_PAGELOCK 1
 
 #include <windows.h>
 #include "../hardware.h"
@@ -37,8 +38,8 @@
 #define PAGE_NOT_BEING_TRIMMED 0
 #define PAGE_BEING_TRIMMED 1
 
-#define PAGE_NOT_IN_DISK_BATCH 0
-#define PAGE_IN_DISK_BATCH 1
+#define PAGE_NOT_MODIFIED 0
+#define PAGE_MODIFIED 1
 
 
 #ifndef PAGE_T
@@ -55,12 +56,18 @@ typedef struct {
      * then it is rescued and trimmed again, it can end up in a disk batch twice. With this bit,
      * we are able to ensure that we do not re-add it to the disk_batch
      */
-    ULONG64 in_disk_batch:1;
+    ULONG64 modified:1;
     PTE* pte;
     long page_lock;
     #if DEBUG_PAGELOCK
     CRITICAL_SECTION dev_page_lock;
     ULONG64 holding_threadid;
+
+    #elif LIGHT_DEBUG_PAGELOCK
+    ULONG64 holding_threadid;
+    ULONG64 origin_code;
+    ULONG64 prev_code;
+    ULONG64 two_ago;
     #endif
     DB_LL_NODE* frame_listnode;
 } PAGE;
@@ -139,7 +146,6 @@ typedef struct {
 
     volatile ULONG64 list_lengths[NUM_CACHE_SLOTS]; 
     volatile ULONG64 total_available;
-    volatile ULONG64 curr_list_idx;
 
     CRITICAL_SECTION list_locks[NUM_CACHE_SLOTS];
     
@@ -171,7 +177,6 @@ typedef struct {
     // BW: Note the potential for race conditions keeping track of this!  
     volatile ULONG64 list_lengths[NUM_CACHE_SLOTS]; 
     volatile ULONG64 total_available;
-    volatile ULONG64 curr_list_idx;
 
     CRITICAL_SECTION list_locks[NUM_CACHE_SLOTS];
     

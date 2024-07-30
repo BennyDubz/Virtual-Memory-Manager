@@ -12,6 +12,10 @@
 #define INVALID 0
 #define VALID 1
 
+#define PTE_PROTNONE 0
+#define PTE_PROTREAD 1
+#define PTE_PROTWRITE 2
+#define PTE_PROTREADWRITE  PTE_PROTREAD | PTE_PROTWRITE
 
 
 //TODO: Think about various types of structs we would have in here
@@ -26,6 +30,7 @@ typedef struct {
     ULONG64 valid:1;
     ULONG64 frame_number:40;
     ULONG64 age:4;
+    ULONG64 protections:2;
 } VALID_PTE;
 
 /**
