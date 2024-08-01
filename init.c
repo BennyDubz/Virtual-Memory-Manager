@@ -386,6 +386,22 @@ static int init_simulation(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memor
     }
 
     DebugBreak();
+
+    if (MapUserPhysicalPages(vmem_base, 1, &physical_page_numbers[0]) == FALSE) {
+        printf("Failed to map readonly page\n");
+        DebugBreak();
+    }
+
+    __try {
+        *vmem_base = 0xAAAAAAAA;
+        status = TRUE;
+
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+
+        status = FALSE;
+    }
+
+    DebugBreak();
     #endif
 
     *virtual_memory_size_storage = virtual_address_size;

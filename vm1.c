@@ -12,9 +12,16 @@
 #include "./Machinery/debug_checks.h"
 
 
-#define NUM_USERMODE_THREADS        8
+#define NUM_USERMODE_THREADS        12
 #define MAX_CONSECUTIVE_ACCESSES    64
-#define TOTAL_ACCESS_AMOUNT      MB(100)
+#define TOTAL_ACCESS_AMOUNT      GB(35)
+
+/**
+ * Reads are more common in the real world - if (random_number % WRITE_PROBABILITY_MODULO == 0) then we write to the address
+ * This allows us to properly demonstrate how the fault handler distinguishes reads and writes, and how we
+ * take advantage of using READONLY permissions to preserve pagefile space and therefore speed up trimming and improve page availability
+ */
+#define WRITE_PROBABILITY_MODULO  5
 
 HANDLE simulation_threads[NUM_USERMODE_THREADS];
 HANDLE thread_start_event;
@@ -136,6 +143,7 @@ void usermode_virtual_memory_simulation () {
 }
 
 
+
 int thread_access_random_addresses(void* params) {
     ULONG64 i;
     BOOL page_faulted;
@@ -208,8 +216,10 @@ int thread_access_random_addresses(void* params) {
         __try {
             //BW: Switch to this when we are actually zeroing-out pages
             if (*arbitrary_va == 0) {
-                access_type = WRITE_ACCESS;
-                *arbitrary_va = (ULONG_PTR) arbitrary_va;
+                if (ReadTimeStampCounter() % WRITE_PROBABILITY_MODULO == 0) {
+                    access_type = WRITE_ACCESS;
+                    *arbitrary_va = (ULONG_PTR) arbitrary_va;
+                }
             } else if((ULONG_PTR) *arbitrary_va != (ULONG_PTR) arbitrary_va) {
                 debug_break_all_va_info(arbitrary_va);
             }

@@ -78,39 +78,13 @@ static void update_pte_sections_to_disk_format(PAGE** page_list, ULONG64 num_pag
     PTE* curr_pte;
     PAGE* curr_page;
 
-    /**
-     * We sort the pages by their respective PTE's virtual address. This means that the pages will be sorted in the order of the 
-     * PTE locksections, allowing us to enter each PTE lock only once. The cost of sorting the array is much lower than the potential
-     * cost of colliding on critical sections and entering and leaving the same critical section more than once
-     */
-    // qsort(page_list, num_pages, sizeof(PAGE*), page_pte_compare);
-
     // The first and last field will always be zero for all the PTEs we update
     PTE pte_contents;
     pte_contents.complete_format = 0;
 
-    #if 0
-    PTE_LOCKSECTION* curr_locksection = pte_to_locksection(page_list[0]->pte);
-    PTE_LOCKSECTION* next_locksection;
-
-    EnterCriticalSection(&curr_locksection->lock);
-    #endif
-
     for (ULONG64 page_idx = 0; page_idx < num_pages; page_idx++) {
         curr_page = page_list[page_idx];
         curr_pte = curr_page->pte;
-        #if 0
-        PTE_LOCKSECTION* next_locksection = pte_to_locksection(curr_pte);
-
-        // Switch to the next critical section if it is not the one we are already in
-        if (next_locksection != curr_locksection) {
-            LeaveCriticalSection(&curr_locksection->lock);
-
-            curr_locksection = next_locksection;
-
-            EnterCriticalSection(&next_locksection->lock);
-        }
-        #endif
 
         if (is_transition_format(*curr_pte) == FALSE) DebugBreak();
 
@@ -119,7 +93,6 @@ static void update_pte_sections_to_disk_format(PAGE** page_list, ULONG64 num_pag
         write_pte_contents(curr_pte, pte_contents);
     }
 
-    // LeaveCriticalSection(&curr_locksection->lock);
 }
 
 
@@ -420,7 +393,7 @@ static int acquire_zero_slot(ULONG64* zero_slot_idx_storage) {
             
             // We successfully claimed the zero slot
             if (read_old_val == ZERO_SLOT_OPEN) {
-                assert(*zero_slot == ZERO_SLOT_USED);
+                custom_spin_assert(*zero_slot == ZERO_SLOT_USED);
                 *zero_slot_idx_storage = slot_idx;
                 InterlockedDecrement64(&total_available_zero_slots);
                 return SUCCESS;
@@ -440,9 +413,9 @@ static void release_batch_zero_slots(ULONG64* slot_indices, ULONG64 num_slots) {
     
     for (ULONG64 release_idx = 0; release_idx < num_slots; release_idx++) {
         ULONG64 slot_index = slot_indices[release_idx];
-        assert(zero_slot_statuses[slot_index] == ZERO_SLOT_USED);
+        custom_spin_assert(zero_slot_statuses[slot_index] == ZERO_SLOT_USED);
 
-        assert(InterlockedIncrement(&zero_slot_statuses[slot_index]) == ZERO_SLOT_NEEDS_FLUSH);
+        custom_spin_assert(InterlockedIncrement(&zero_slot_statuses[slot_index]) == ZERO_SLOT_NEEDS_FLUSH);
     }
 }
 
@@ -455,7 +428,7 @@ static void release_zero_slot(ULONG64 slot_idx) {
         DebugBreak();
     }
 
-    assert(InterlockedIncrement(&zero_slot_statuses[slot_idx]) == ZERO_SLOT_NEEDS_FLUSH);
+    custom_spin_assert(InterlockedIncrement(&zero_slot_statuses[slot_idx]) == ZERO_SLOT_NEEDS_FLUSH);
 }
 
 
@@ -639,9 +612,9 @@ static ULONG64 acquire_batch_list_tail_pagelocks(DB_LL_NODE* pagelist_listhead, 
     #if DEBUG_PAGELOCK
     for (int i = 0; i < num_allocated; i++) {
         PAGE* page = page_storage[i];
-        assert(page->page_lock == PAGE_LOCKED);
-        assert(page->holding_threadid == GetCurrentThreadId());
-        assert(page->status == STANDBY_STATUS);
+        custom_spin_assert(page->page_lock == PAGE_LOCKED);
+        custom_spin_assert(page->holding_threadid == GetCurrentThreadId());
+        custom_spin_assert(page->status == STANDBY_STATUS);
     }
     #endif
 
@@ -673,7 +646,7 @@ PAGE* allocate_zeroed_frame() {
     
     ULONG64 local_index = ReadTimeStampCounter() % NUM_CACHE_SLOTS;
 
-    assert(local_index < NUM_CACHE_SLOTS);
+    custom_spin_assert(local_index < NUM_CACHE_SLOTS);
 
     while (curr_attempts < NUM_CACHE_SLOTS) {
         // Check for empty list - we can quickly check here before acquiring the lock
@@ -706,7 +679,7 @@ PAGE* allocate_zeroed_frame() {
 
         LeaveCriticalSection(&zero_lists->list_locks[local_index]);
 
-        assert(potential_page->pagefile_idx == DISK_IDX_NOTUSED);
+        custom_spin_assert(potential_page->pagefile_idx == DISK_IDX_NOTUSED);
 
         break;
     }
@@ -839,7 +812,7 @@ PAGE* allocate_free_frame() {
 
         LeaveCriticalSection(&free_frames->list_locks[local_index]);
 
-        assert(potential_page->pagefile_idx == DISK_IDX_NOTUSED);
+        custom_spin_assert(potential_page->pagefile_idx == DISK_IDX_NOTUSED);
 
         break;
     }
@@ -927,6 +900,7 @@ ULONG64 allocate_batch_free_frames(PAGE** page_storage, ULONG64 batch_size) {
  * then it will be signalled
  */
 #define NUM_PAGES_FAULTER_REFRESH 512
+#define FREE_FRAMES_PORTION   (NUM_PAGES_FAULTER_REFRESH * 3 / 4)
 #define ONLY_ONE_REFRESHER 1
 
 #if ONLY_ONE_REFRESHER
@@ -961,11 +935,11 @@ void faulter_refresh_free_and_zero_lists() {
     update_pte_sections_to_disk_format(pages_to_refresh, num_allocated);
 
     // Add half the pages to the free list, and releases their pagelocks to be used freely
-    free_frames_add_batch(pages_to_refresh, min(num_allocated, NUM_PAGES_FAULTER_REFRESH / 2));
+    free_frames_add_batch(pages_to_refresh, min(num_allocated, FREE_FRAMES_PORTION));
 
 
     // See if we still have pages remaining to add to the zeroing threads buffer
-    if (num_allocated < (NUM_PAGES_FAULTER_REFRESH / 2) + 1) { // + 1 to reflect the indices used
+    if (num_allocated < FREE_FRAMES_PORTION + 1) { // + 1 to reflect the indices used
         // There are still very few pages on standby...
         SetEvent(trimming_event);
 
@@ -974,7 +948,7 @@ void faulter_refresh_free_and_zero_lists() {
         #endif
 
         for (int i = 0; i < num_allocated; i++) {
-            assert(pages_to_refresh[i]->holding_threadid != GetCurrentThreadId());
+            custom_spin_assert(pages_to_refresh[i]->holding_threadid != GetCurrentThreadId());
         }
 
         return;
@@ -985,7 +959,7 @@ void faulter_refresh_free_and_zero_lists() {
     PAGE* curr_page;
 
     // Add the other half to be zeroed out!
-    for (ULONG64 page_idx = NUM_PAGES_FAULTER_REFRESH / 2; page_idx < num_allocated; page_idx++) {
+    for (ULONG64 page_idx = FREE_FRAMES_PORTION; page_idx < num_allocated; page_idx++) {
         ULONG64 page_zeroing_idx = get_zeroing_struct_idx();
 
         // We try to claim the slot
@@ -1002,7 +976,7 @@ void faulter_refresh_free_and_zero_lists() {
             #endif
 
             for (int i = page_idx; i < num_allocated; i++) {
-                assert(pages_to_refresh[i]->holding_threadid != GetCurrentThreadId());
+                custom_spin_assert(pages_to_refresh[i]->holding_threadid != GetCurrentThreadId());
             }
 
             break;
@@ -1018,7 +992,7 @@ void faulter_refresh_free_and_zero_lists() {
         release_pagelock(curr_page, 17);
 
         // Increment the value to signal that the zeroing thread can use this slot to zero
-        assert(InterlockedIncrement(&page_zeroing->status_map[page_zeroing_idx]) == PAGE_SLOT_READY);
+        custom_spin_assert(InterlockedIncrement(&page_zeroing->status_map[page_zeroing_idx]) == PAGE_SLOT_READY);
         InterlockedIncrement64(&page_zeroing->total_slots_used);
     }
 
@@ -1066,10 +1040,10 @@ PAGE* standby_pop_page() {
     EnterCriticalSection(&standby_list->lock);
 
     #if DEBUG_PAGELOCK
-    assert(potential_page->holding_threadid == GetCurrentThreadId());
+    custom_spin_assert(potential_page->holding_threadid == GetCurrentThreadId());
     #endif
     // We remove the page from the list now
-    assert(db_pop_from_tail(standby_list->listhead) == potential_page);
+    custom_spin_assert(db_pop_from_tail(standby_list->listhead) == potential_page);
     standby_list->list_length--;
 
     LeaveCriticalSection(&standby_list->lock);

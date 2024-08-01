@@ -125,7 +125,7 @@ static void release_disk_readslot(ULONG64 disk_read_idx) {
         DebugBreak();
     }
 
-    assert(InterlockedIncrement(&disk->disk_read_slot_statues[disk_read_idx]) == DISK_READ_NEEDS_FLUSH);
+    custom_spin_assert(InterlockedIncrement(&disk->disk_read_slot_statues[disk_read_idx]) == DISK_READ_NEEDS_FLUSH);
 }
 
 
@@ -439,7 +439,7 @@ int allocate_single_disk_slot(ULONG64* result_storage) {
         }
 
         LeaveCriticalSection(&disk->disk_slot_locks[lock_section]);
-        assert(open_disk_idx != 0);
+        custom_spin_assert(open_disk_idx != 0);
         *result_storage = open_disk_idx;
         return SUCCESS;
     }

@@ -171,7 +171,7 @@ LPTHREAD_START_ROUTINE thread_trimming() {
 
                 // If the page still has a pagefile index stored within it, then we can trim it straight to standby
                 if (curr_page->pagefile_idx == DISK_IDX_NOTUSED) {
-                    if (curr_page->writing_to_disk == PAGE_BEING_WRITTEN) {
+                    if (curr_page->writing_to_disk == PAGE_BEING_WRITTEN && curr_page->modified == PAGE_NOT_MODIFIED) {
                         curr_page->status = MODIFIED_STATUS;
                         page_section_already_being_writen[trim_already_being_written] = curr_page;
                         trim_already_being_written++;
@@ -254,7 +254,7 @@ LPTHREAD_START_ROUTINE thread_trimming() {
 
                 for (ULONG64 trim_idx = 0; trim_idx < trim_to_modified; trim_idx++) {
                     curr_page = page_section_trim_to_modified[trim_idx];
-                    assert(curr_page->status == ACTIVE_STATUS);
+                    custom_spin_assert(curr_page->status == ACTIVE_STATUS);
                     modified_add_page(curr_page, modified_list);
                     release_pagelock(curr_page, 18);
                 }
@@ -269,7 +269,7 @@ LPTHREAD_START_ROUTINE thread_trimming() {
 
                 for (ULONG64 trim_idx = 0; trim_idx < trim_to_standby; trim_idx++) {
                     curr_page = page_section_trim_to_standby[trim_idx];
-                    assert(curr_page->status == ACTIVE_STATUS);
+                    custom_spin_assert(curr_page->status == ACTIVE_STATUS);
                     standby_add_page(curr_page, standby_list);
                     release_pagelock(curr_page, 23);
                 }
@@ -384,8 +384,11 @@ void faulter_trim_behind(PTE* accessed_pte) {
              * then the mod-writer will try to add it to the standby list. This is fine - we can set it to be back in the MODIFIED_STATUS
              * and the mod writer will put it on the standby list when it is finished. We just need to avoid the case where it is in both the modified
              * and the standby list at the same time - which will corrupt the list structures
+             * 
+             * Even more rare, a page could be being written, rescued and written to, and trimmed before the write finished.
+             * In that case, the pagefile space is again stale so even though the write is in progress, we want to re-add it to the modified list
              */
-            if (curr_page->writing_to_disk == PAGE_BEING_WRITTEN) {
+            if (curr_page->writing_to_disk == PAGE_BEING_WRITTEN && curr_page->modified == PAGE_NOT_MODIFIED) {
                 curr_page->status = MODIFIED_STATUS;
                 pages_already_being_written[trim_already_being_written] = curr_page;
                 trim_already_being_written++;
@@ -399,7 +402,7 @@ void faulter_trim_behind(PTE* accessed_pte) {
             trim_to_standby++;
         }
 
-        assert(curr_page->pte == curr_pte);
+        custom_spin_assert(curr_page->pte == curr_pte);
 
         // Edit the PTE to be on transition format
         pte_contents.transition_format.frame_number = curr_pfn;
@@ -435,7 +438,7 @@ void faulter_trim_behind(PTE* accessed_pte) {
         EnterCriticalSection(&modified_list->lock);
         for (ULONG64 i = 0; i < trim_to_modified; i++) {
             curr_page = pages_trimmed_to_modified[i];
-            assert(curr_page->status == ACTIVE_STATUS);
+            custom_spin_assert(curr_page->status == ACTIVE_STATUS);
             modified_add_page(curr_page, modified_list);
             release_pagelock(curr_page, 19);
         }    
@@ -450,7 +453,7 @@ void faulter_trim_behind(PTE* accessed_pte) {
         EnterCriticalSection(&standby_list->lock);
         for (ULONG64 i = 0; i < trim_to_standby; i++) {
             curr_page = pages_trimmed_to_standby[i];
-            assert(curr_page->status == ACTIVE_STATUS);
+            custom_spin_assert(curr_page->status == ACTIVE_STATUS);
             standby_add_page(curr_page, standby_list);
             release_pagelock(curr_page, 24);
         }
@@ -520,7 +523,7 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
             // The list is empty
             if (potential_page == NULL) break;
 
-            assert(potential_page->status == MODIFIED_STATUS);
+            custom_spin_assert(potential_page->status == MODIFIED_STATUS);
 
 
             // The rare case where the page we want to pop has its pagelock held. We surrender the modified listlock
@@ -642,26 +645,40 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
         }
 
         ULONG64 end_index = num_pages_written;
-
+        BOOL release_slot;
 
         /**
          * Acquire pagelocks ahead of time, then get the standby list lock
          */
         for (int i = 0; i < num_pages_written; i++) {
             curr_page = disk_batch.pages_being_written[i];
+            release_slot = FALSE;
 
             acquire_pagelock(curr_page, 9);
 
+            // In either case, we need to bail from writing this page to standby
             if (curr_page->status != MODIFIED_STATUS || 
                     curr_page->modified == PAGE_MODIFIED) {
                 
                 curr_page->writing_to_disk = PAGE_NOT_BEING_WRITTEN;
+
+                // We can still use the pagefile space even if the page was rescued
+                if (curr_page->modified == PAGE_NOT_MODIFIED) {
+                    curr_page->pagefile_idx = disk_batch.disk_indices[i];
+                } else {
+                    // We need to discard the pagefile space
+                    release_slot = TRUE;
+                }
+
                 release_pagelock(curr_page, 10);
 
                 disk_batch.pages_being_written[i] = NULL;
 
-                //BW: We can consider batching these up later
-                release_single_disk_slot(disk_batch.disk_indices[i]);
+                // We would rather release the disk slot while not holding this pagelock
+                if (release_slot) {
+                    release_single_disk_slot(disk_batch.disk_indices[i]);
+                }
+            
                 continue;
             }
 
@@ -673,12 +690,11 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
 
         for (int i = 0; i < num_pages_written; i++) {
             PAGE* curr_page = disk_batch.pages_being_written[i];
-            // If someone else has the pagelock, they must be trying to rescue it right now!
             if (curr_page == NULL) continue;
 
             num_pages_added++;
 
-            assert(curr_page->pagefile_idx == DISK_IDX_NOTUSED);
+            custom_spin_assert(curr_page->pagefile_idx == DISK_IDX_NOTUSED);
 
             // Now, the page can be modified and added to the standby list
             curr_page->pagefile_idx = disk_batch.disk_indices[i];
@@ -739,32 +755,32 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
  * 
  * Returns the permissions set (either PAGE_READWRITE or PAGE_READONLY)
  */
-static ULONG64 set_address_approprate_permissions(PTE* pte, ULONG64 access_type) {
+static ULONG64 determine_address_approprate_permissions(PTE* pte, ULONG64 access_type) {
     PULONG_PTR pte_va = pte_to_va(pte);
     DWORD old_protection_storage_notused;
-
-    /**
-     * TODO: Find out how to change the permissions of MEM_RESERVE | MEM_PHYSICAL pages
-     */
 
     /**
      * Unaccessed PTEs should always get readwrite permissions, as they are likely to 
      * write to an address that they have never used before now
      */
     if (access_type == WRITE_ACCESS || is_used_pte(*pte) == FALSE) {
+        #if 0
         if (VirtualProtect(pte_va, PAGE_SIZE, PAGE_READWRITE, &old_protection_storage_notused) == ERROR) {
             fprintf(stderr, "Failed to change permissions in set_address_approprate_permissions %d 0\n", GetLastError());
             DebugBreak();
         }
+        #endif
         
         return PAGE_READWRITE;
     }
     
+    #if 0
     // We have already reserved this memory, so this should never fail. We are merely changing the permissions
     if (VirtualProtect(pte_va, PAGE_SIZE, PAGE_READONLY, &old_protection_storage_notused) == ERROR) {
         fprintf(stderr, "Failed to change permissions in set_address_approprate_permissions %d 1\n", GetLastError());
         DebugBreak();
     }
+    #endif
 
     return PAGE_READONLY;
 }
@@ -798,8 +814,13 @@ int connect_pte_to_page(PTE* pte, PAGE* open_page, ULONG64 access_type) {
 
     pte_locksection->valid_pte_count++;
 
-    // BW: Note the gap here!
-    ULONG64 permissions = set_address_approprate_permissions(pte, access_type);
+    ULONG64 permissions = determine_address_approprate_permissions(pte, access_type);
+    
+    // We need to just set the top bit of the pfn to be 1 for MapUserPhysicalPages to set the permissions to readonly without 
+    // the need for using VirtualProtect
+    if (permissions == PAGE_READONLY) {
+        pfn = pfn | PAGE_MAPUSERPHYSCAL_READONLY_MASK;
+    }
 
     // Map the CPU
     if (MapUserPhysicalPages (pte_to_va(pte), 1, &pfn) == FALSE) {

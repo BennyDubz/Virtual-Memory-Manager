@@ -56,3 +56,10 @@ void debug_break_all_va_info(PULONG_PTR arbitrary_va);
  * Loops through the entire pagetable and ensures there is only one reference to a disk index
  */
 void singly_allocated_disk_idx_check(ULONG64 disk_idx);
+
+
+/**
+ * An assert that will print out a message and spin forever, allowing you to debugbreak in when otherwise the
+ * debugger is too slow
+ */
+void custom_spin_assert(BOOL expression);

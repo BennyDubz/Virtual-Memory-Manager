@@ -292,3 +292,19 @@ void singly_allocated_disk_idx_check(ULONG64 disk_idx) {
 
     if (found_pte == NULL) DebugBreak();
 }
+
+
+/**
+ * An assert that will print out a message and spin forever, allowing you to debugbreak in when otherwise the
+ * debugger is too slow
+ */
+void custom_spin_assert(BOOL expression) {
+    if (expression == TRUE) return;
+
+    fprintf(stderr, "Custom spinning assert triggered! Thread %lx spinning\n", GetCurrentThreadId());
+    for (ULONG64 i = 0; i < 0xFFFFFFFFFFFFFFFF; i++) {
+        for (ULONG64 j = 0; j < 0xFFFFFFFFFFFFFFFF; j++) {
+
+        }
+    }
+}

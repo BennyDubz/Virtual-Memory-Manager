@@ -36,7 +36,7 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
 
 static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result_page_storage);
 
-static PAGE* find_available_page();
+static PAGE* find_available_page(PTE local_pte);
 
 static int rescue_page(PAGE* page);
 
@@ -131,10 +131,10 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type) {
     }
 
     #if DEBUG_PAGELOCK
-    assert(allocated_page->holding_threadid == GetCurrentThreadId());
+    custom_spin_assert(allocated_page->holding_threadid == GetCurrentThreadId());
     #endif
-    assert(allocated_page->page_lock == PAGE_LOCKED);
-    assert(allocated_page->status != ACTIVE_STATUS);
+    custom_spin_assert(allocated_page->page_lock == PAGE_LOCKED);
+    custom_spin_assert(allocated_page->status != ACTIVE_STATUS);
     
 
 
@@ -205,7 +205,7 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type) {
 
     // // We want to save our pagefile index since it is not stale
     // if (set_permissions == PAGE_READONLY && is_disk_format(local_pte)) {
-    //     assert(access_type != WRITE_ACCESS);
+    //     custom_spin_assert(access_type != WRITE_ACCESS);
     //     allocated_page->pagefile_idx = disk_idx;
     // }
 
@@ -246,7 +246,7 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type) {
  */
 static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 access_type) {
 
-    assert(local_pte.memory_format.protections != PTE_PROTNONE);
+    custom_spin_assert(local_pte.memory_format.protections != PTE_PROTNONE);
 
     CRITICAL_SECTION* pte_lock = &pte_to_locksection(accessed_pte)->lock;
     PULONG_PTR pte_va = pte_to_va(accessed_pte);
@@ -281,10 +281,24 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
 
     // See if we need to change the permissions to PAGE_READWRITE
     if (access_type == WRITE_ACCESS && local_pte.memory_format.protections == PTE_PROTREAD) {
+        ULONG64 pfn = page_to_pfn(curr_page);
+
+        // All we want to do is change the permissions on the page - using MapUserPhysicalPages for this happens to be faster than
+        // using VirtualProtect
+        if (MapUserPhysicalPages (pte_to_va(accessed_pte), 1, &pfn) == FALSE) {
+
+            fprintf (stderr, "handle_valid_pte_fault : could not map VA %p to pfn %llx\n", pte_to_va(accessed_pte), pfn);
+            DebugBreak();
+
+            return ERROR;
+        }
+
+        #if 0
         if (VirtualProtect(pte_va, PAGE_SIZE, PAGE_READWRITE, &old_protection_storage_notused) == ERROR) {
             fprintf(stderr, "Failed to change permissions to readwrite for valid pte in fault\n");
             DebugBreak();
         }
+        #endif
 
         if (curr_page->pagefile_idx != DISK_IDX_NOTUSED) {
             release_single_disk_slot(curr_page->pagefile_idx);
@@ -294,7 +308,7 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
 
     release_pagelock(curr_page, 34);
 
-    assert(pfn_to_page(accessed_pte->memory_format.frame_number)->status == ACTIVE_STATUS);
+    custom_spin_assert(pfn_to_page(accessed_pte->memory_format.frame_number)->status == ACTIVE_STATUS);
 
     write_pte_contents(accessed_pte, pte_contents);
 
@@ -314,7 +328,7 @@ static int handle_unaccessed_pte_fault(PTE local_pte, PAGE** result_page_storage
     /**
      * In this case, all we need to do is get a valid page and return it - nothing else
      */
-    PAGE* allocated_page = find_available_page();
+    PAGE* allocated_page = find_available_page(local_pte);
 
     if (allocated_page == NULL) {
         return NO_AVAILABLE_PAGES_FAIL;
@@ -356,10 +370,10 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
 
     *result_page_storage = page_to_rescue;
 
-    assert(page_to_rescue->page_lock == PAGE_LOCKED);
-    assert(page_to_rescue->status != ACTIVE_STATUS);
+    custom_spin_assert(page_to_rescue->page_lock == PAGE_LOCKED);
+    custom_spin_assert(page_to_rescue->status != ACTIVE_STATUS);
     #if DEBUG_PAGELOCK
-    assert(page_to_rescue->holding_threadid == GetCurrentThreadId());
+    custom_spin_assert(page_to_rescue->holding_threadid == GetCurrentThreadId());
     #endif
 
     return SUCCESS;    
@@ -377,7 +391,7 @@ static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result
     CRITICAL_SECTION* pte_lock = &pte_to_locksection(accessed_pte)->lock;
 
     // We also now hold the allocated pagelock
-    PAGE* allocated_page = find_available_page();
+    PAGE* allocated_page = find_available_page(local_pte);
 
     if (allocated_page == NULL) {
         return NO_AVAILABLE_PAGES_FAIL;
@@ -387,8 +401,8 @@ static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result
 
     EnterCriticalSection(pte_lock);
 
-    assert(allocated_page->page_lock == PAGE_LOCKED);
-    assert(allocated_page->status != ACTIVE_STATUS);
+    custom_spin_assert(allocated_page->page_lock == PAGE_LOCKED);
+    custom_spin_assert(allocated_page->status != ACTIVE_STATUS);
 
     if (ptes_are_equal(local_pte, *accessed_pte) == FALSE) {
         /**
@@ -421,8 +435,8 @@ static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result
 
     *result_page_storage = allocated_page;
 
-    assert(allocated_page->page_lock == PAGE_LOCKED);
-    assert(allocated_page->status != ACTIVE_STATUS);
+    custom_spin_assert(allocated_page->page_lock == PAGE_LOCKED);
+    custom_spin_assert(allocated_page->status != ACTIVE_STATUS);
 
 
     return SUCCESS;
@@ -446,30 +460,59 @@ static void potential_faulter_list_refresh() {
  * 
  * Returns NULL if there were no pages available at the time
  */
-static PAGE* find_available_page() {
+static PAGE* find_available_page(PTE local_pte) {
 
     PAGE* allocated_page;
+    BOOL zero_first;
 
-    // BOOL zero_first = TRUE;
-
-    // If we succeed on the zeroed list, this is the best case scenario as we don't have to do anything else
-    if ((allocated_page = allocate_zeroed_frame()) != NULL) {
-
-        potential_faulter_list_refresh();
-
-        return allocated_page;
+    // Since disk reads overwrite page contents, we do not need zeroed out pages.
+    // and we would rather them be saved for accesses that do need zeroed pages
+    if (is_disk_format(local_pte)) {
+        zero_first = FALSE;
+    } else {
+        zero_first = TRUE;
     }
 
-    // If we succeed on the free list, we may still have to zero out the frame later
-    if ((allocated_page = allocate_free_frame()) != NULL) {
+    if (zero_first) {
+        // If we succeed on the zeroed list, this is the best case scenario as we don't have to do anything else
+        if ((allocated_page = allocate_zeroed_frame()) != NULL) {
 
-        potential_faulter_list_refresh();
+            potential_faulter_list_refresh();
 
-        #if DEBUG_PAGELOCK
-        assert(allocated_page->holding_threadid == GetCurrentThreadId());
-        #endif
-        return allocated_page;
+            return allocated_page;
+        }
+
+        // If we succeed on the free list, we may still have to zero out the frame later
+        if ((allocated_page = allocate_free_frame()) != NULL) {
+
+            potential_faulter_list_refresh();
+
+            #if DEBUG_PAGELOCK
+            custom_spin_assert(allocated_page->holding_threadid == GetCurrentThreadId());
+            #endif
+            return allocated_page;
+        }
+    } else {
+        // In this case - we don't need the pages to be zeroed already - so the free list is fine
+        if ((allocated_page = allocate_free_frame()) != NULL) {
+
+            potential_faulter_list_refresh();
+
+            #if DEBUG_PAGELOCK
+            custom_spin_assert(allocated_page->holding_threadid == GetCurrentThreadId());
+            #endif
+            return allocated_page;
+        }
+
+        // We still prefer the faster access to the zeroed list than anything on standby
+        if ((allocated_page = allocate_zeroed_frame()) != NULL) {
+
+            potential_faulter_list_refresh();
+
+            return allocated_page;
+        }
     }
+
 
     /**
      * Now we have to try to get a page from the standby list
@@ -490,7 +533,7 @@ static PAGE* find_available_page() {
     }
 
     #if DEBUG_PAGELOCK
-    assert(allocated_page->holding_threadid == GetCurrentThreadId());
+    custom_spin_assert(allocated_page->holding_threadid == GetCurrentThreadId());
     #endif
 
     potential_faulter_list_refresh();
@@ -511,8 +554,8 @@ static int rescue_page(PAGE* page) {
         if (modified_rescue_page(page) == ERROR) {
             return ERROR;
         }
-        assert(page->page_lock == PAGE_LOCKED);
-        assert(page->status == MODIFIED_STATUS);
+        custom_spin_assert(page->page_lock == PAGE_LOCKED);
+        custom_spin_assert(page->status == MODIFIED_STATUS);
         return SUCCESS;
     }
 
@@ -520,8 +563,8 @@ static int rescue_page(PAGE* page) {
         if (standby_rescue_page(page) == ERROR) {
             return ERROR;
         }
-        assert(page->page_lock == PAGE_LOCKED);
-        assert(page->status == STANDBY_STATUS);
+        custom_spin_assert(page->page_lock == PAGE_LOCKED);
+        custom_spin_assert(page->status == STANDBY_STATUS);
         return SUCCESS;
     }
 
@@ -536,7 +579,10 @@ static int rescue_page(PAGE* page) {
  */
 static int modified_rescue_page(PAGE* page) {
     // The page is not in the modified list, but is instead being written to disk, but we can still take it
-    if (page->writing_to_disk == PAGE_BEING_WRITTEN) {
+    if (page->writing_to_disk == PAGE_BEING_WRITTEN && page->modified == PAGE_NOT_MODIFIED) {
+        #if DEBUG_LISTS
+        custom_spin_assert(page->frame_listnode->listhead_ptr == NULL);
+        #endif
         return SUCCESS;
     }
 
@@ -603,7 +649,7 @@ static void release_unneeded_page(PAGE* page) {
         DebugBreak();
     }
 
-    assert(page->page_lock == PAGE_LOCKED);
+    custom_spin_assert(page->page_lock == PAGE_LOCKED);
     release_pagelock(page, 12);
 
 }
