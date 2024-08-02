@@ -14,7 +14,7 @@
 
 #define NUM_USERMODE_THREADS        12
 #define MAX_CONSECUTIVE_ACCESSES    64
-#define TOTAL_ACCESS_AMOUNT      GB(35)
+#define TOTAL_ACCESS_AMOUNT         MB(10)
 
 /**
  * Reads are more common in the real world - if (random_number % WRITE_PROBABILITY_MODULO == 0) then we write to the address

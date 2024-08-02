@@ -525,7 +525,6 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
 
             custom_spin_assert(potential_page->status == MODIFIED_STATUS);
 
-
             // The rare case where the page we want to pop has its pagelock held. We surrender the modified listlock
             if (try_acquire_pagelock(potential_page, 8) == FALSE) {
                 LeaveCriticalSection(&modified_list->lock);
@@ -533,6 +532,9 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
                 curr_attempts++;
                 continue;
             }
+
+            custom_spin_assert(potential_page->pagefile_idx == DISK_IDX_NOTUSED);
+
 
             // We now remove the page from the modified list
             modified_pop_page(modified_list);
@@ -572,9 +574,12 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
 
         // First check to see if we wrote any pages at all - if we didn't we need to wait for available disk slots
         if (num_pages_written == 0) {
+            printf("out of disk slots for mod writer\n");
             for (ULONG64 i = 0; i < disk_batch.num_pages; i++) {
                 curr_page = disk_batch.pages_being_written[i];
                 acquire_pagelock(curr_page, 27);
+
+                curr_page->writing_to_disk = PAGE_NOT_BEING_WRITTEN;
 
                 // Ignore pages that have been rescued and/or modified
                 if (curr_page->status != MODIFIED_STATUS || 
@@ -613,11 +618,14 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
          * we just add the remainder back to the modified list
          */
         if (num_pages_written != disk_batch.num_pages) {
+            custom_spin_assert(FALSE);
             ULONG64 start_index = disk_batch.num_pages - num_pages_written;
 
             for (ULONG64 i = start_index; i < disk_batch.num_pages; i++) {
                 curr_page = disk_batch.pages_being_written[i];
                 acquire_pagelock(curr_page, 30);
+
+                curr_page->writing_to_disk = PAGE_NOT_BEING_WRITTEN;
 
                 // Ignore pages that have been rescued and/or modified
                 if (curr_page->status != MODIFIED_STATUS || 
@@ -651,16 +659,19 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
          * Acquire pagelocks ahead of time, then get the standby list lock
          */
         for (int i = 0; i < num_pages_written; i++) {
+            
             curr_page = disk_batch.pages_being_written[i];
             release_slot = FALSE;
 
             acquire_pagelock(curr_page, 9);
 
-            // In either case, we need to bail from writing this page to standby
+            curr_page->writing_to_disk = PAGE_NOT_BEING_WRITTEN;
+
+            // In either case, we need to bail from adding this page to standby
             if (curr_page->status != MODIFIED_STATUS || 
                     curr_page->modified == PAGE_MODIFIED) {
-                
-                curr_page->writing_to_disk = PAGE_NOT_BEING_WRITTEN;
+
+                custom_spin_assert(curr_page->pagefile_idx == DISK_IDX_NOTUSED);
 
                 // We can still use the pagefile space even if the page was rescued
                 if (curr_page->modified == PAGE_NOT_MODIFIED) {
@@ -696,9 +707,8 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
 
             custom_spin_assert(curr_page->pagefile_idx == DISK_IDX_NOTUSED);
 
-            // Now, the page can be modified and added to the standby list
+            // Now, the page can be added to the standby list
             curr_page->pagefile_idx = disk_batch.disk_indices[i];
-            curr_page->writing_to_disk = PAGE_NOT_BEING_WRITTEN;
 
             if (standby_add_page(curr_page, standby_list) == ERROR) {
                 DebugBreak();

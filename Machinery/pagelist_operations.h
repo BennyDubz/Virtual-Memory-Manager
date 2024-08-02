@@ -101,6 +101,14 @@ void faulter_refresh_free_and_zero_lists();
 
 
 /**
+ * To be called when a faulter needs to only refresh the free frames list, and not the zero list
+ * 
+ * This helps us reduce contention on the free list
+ */
+void faulter_refresh_free_frames();
+
+
+/**
  * Pops and returns a pointer to the oldest page from the standby list and returns it
  * 
  * Returns NULL upon any error or if the list is empty

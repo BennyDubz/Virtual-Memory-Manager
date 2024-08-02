@@ -514,11 +514,10 @@ void handle_end_of_fault_disk_slot(PTE local_pte, PAGE* allocated_page, ULONG64 
         // We have to throw out the pagefile space stored in the PTE
         if (is_disk_format(local_pte)) {
             release_single_disk_slot(local_pte.disk_format.pagefile_idx);
-        }
-
-        // If we rescued from standby, then we need to release the now stale pagefile space
-        if (is_transition_format(local_pte) && allocated_page->status == STANDBY_STATUS) {
+        } else if (is_transition_format(local_pte) && allocated_page->status == STANDBY_STATUS) {
             release_single_disk_slot(allocated_page->pagefile_idx);
+        } else {
+            custom_spin_assert(allocated_page->pagefile_idx == DISK_IDX_NOTUSED);
         }
 
         // In all cases, we cannot store any pagefile information in the page

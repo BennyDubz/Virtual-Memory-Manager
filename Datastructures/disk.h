@@ -58,7 +58,7 @@ typedef struct {
     CRITICAL_SECTION* disk_slot_locks;
     ULONG64 num_locks;
     ULONG64* open_slot_counts;
-    ULONG64 total_available_slots;
+    volatile ULONG64 total_available_slots;
 
     /**
      * To support batched writing, we will have a special virtual address that can map in many physical pages

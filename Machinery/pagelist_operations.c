@@ -205,7 +205,7 @@ static void zero_list_add_batch(PAGE** page_list, ULONG64 num_pages) {
         InterlockedIncrement64(&zero_lists->total_available);
         InterlockedIncrement64(&total_available_pages);
 
-        curr_page->status = FREE_STATUS;
+        curr_page->status = ZERO_STATUS;
         curr_page->pte = NULL;
         curr_page->pagefile_idx = DISK_IDX_NOTUSED;
 
@@ -761,6 +761,7 @@ ULONG64 allocate_batch_zeroed_frames(PAGE** page_storage, ULONG64 num_pages) {
 /**
  * Returns a page off the free list, if there are any. Otherwise, returns NULL
  */
+#define MAX_ATTEMPTS    NUM_CACHE_SLOTS / 20
 PAGE* allocate_free_frame() {
     
     /**
@@ -780,7 +781,7 @@ PAGE* allocate_free_frame() {
     
     ULONG64 local_index = ReadTimeStampCounter() % NUM_CACHE_SLOTS;
 
-    while (curr_attempts < NUM_CACHE_SLOTS) {
+    while (curr_attempts < MAX_ATTEMPTS) {
         // Check for empty list - we can quickly check here before acquiring the lock
         if (free_frames->list_lengths[local_index] == 0) {
             curr_attempts += 1;
@@ -899,7 +900,7 @@ ULONG64 allocate_batch_free_frames(PAGE** page_storage, ULONG64 batch_size) {
  * adding some to the zeroing-threads buffer. If there are enough pages for the zeroing thread to zero-out,
  * then it will be signalled
  */
-#define NUM_PAGES_FAULTER_REFRESH 512
+#define NUM_PAGES_FAULTER_REFRESH   NUM_CACHE_SLOTS * 2
 #define FREE_FRAMES_PORTION   (NUM_PAGES_FAULTER_REFRESH * 3 / 4)
 #define ONLY_ONE_REFRESHER 1
 
@@ -1007,6 +1008,52 @@ void faulter_refresh_free_and_zero_lists() {
     InterlockedAnd(&free_zero_refresh_ongoing, FALSE);
     #endif
 }
+
+
+#if ONLY_ONE_REFRESHER
+long free_frames_refresh_ongoing = FALSE;
+#endif
+
+/**
+ * To be called when a faulter needs to only refresh the free frames list, and not the zero list
+ * 
+ * This helps us reduce contention on the free list
+ */
+void faulter_refresh_free_frames() {
+    
+    #if ONLY_ONE_REFRESHER
+    if (InterlockedOr(&free_frames_refresh_ongoing, TRUE) == TRUE) {
+        return;
+    }
+    #endif
+
+
+    PAGE* pages_to_refresh[NUM_PAGES_FAULTER_REFRESH];
+
+    ULONG64 num_allocated = standby_pop_batch(pages_to_refresh, NUM_PAGES_FAULTER_REFRESH);
+
+    // The standby list is empty!
+    if (num_allocated == 0) {
+        SetEvent(trimming_event);
+
+        #if ONLY_ONE_REFRESHER
+        InterlockedAnd(&free_frames_refresh_ongoing, FALSE);
+        #endif
+
+        return;
+    }
+
+    // Update the old transition PTEs to be disk format
+    update_pte_sections_to_disk_format(pages_to_refresh, num_allocated);
+
+    // Add all the pages to their respective free lists
+    free_frames_add_batch(pages_to_refresh, min(num_allocated, NUM_PAGES_FAULTER_REFRESH));
+
+    #if ONLY_ONE_REFRESHER
+    InterlockedAnd(&free_frames_refresh_ongoing, FALSE);
+    #endif
+}
+
 
 
 /**

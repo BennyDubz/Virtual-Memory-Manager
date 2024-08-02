@@ -67,8 +67,8 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type) {
     
     if (fault_count % KB(128) == 0) {
         printf("Curr fault count 0x%llX\n", fault_count);
-        printf("\t Phys page standby ratio: %f Zeroed: 0x%llX Free: 0x%llX Standby: 0x%llX Mod 0x%llX\n", (double)  standby_list->list_length / physical_page_count, zero_lists->total_available, free_frames->total_available, 
-                                            standby_list->list_length, modified_list->list_length);
+        printf("\t Phys page standby ratio: %f Zeroed: 0x%llX Free: 0x%llX Standby: 0x%llX Mod 0x%llX Num disk slots %llx\n", (double)  standby_list->list_length / physical_page_count, zero_lists->total_available, free_frames->total_available, 
+                                            standby_list->list_length, modified_list->list_length, disk->total_available_slots);
     }
 
     /**
@@ -197,18 +197,6 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type) {
         LeaveCriticalSection(pte_lock);
     }
 
-    // // Release the disk slot for our associated page if it is appropriate
-    // if (set_permissions == PAGE_READWRITE != DISK_IDX_NOTUSED) {
-    //     release_single_disk_slot(disk_idx);
-    //     allocated_page->pagefile_idx = DISK_IDX_NOTUSED;
-    // } 
-
-    // // We want to save our pagefile index since it is not stale
-    // if (set_permissions == PAGE_READONLY && is_disk_format(local_pte)) {
-    //     custom_spin_assert(access_type != WRITE_ACCESS);
-    //     allocated_page->pagefile_idx = disk_idx;
-    // }
-
 
     /**
      * We need to modify the other PTE associated with the standby page now that we are committing
@@ -227,6 +215,8 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type) {
         PTE pte_contents;
         pte_contents.complete_format = 0;
         // The other disk format specific entries are zero - so we do not need to set them
+
+        custom_spin_assert(allocated_page_old.pagefile_idx != DISK_IDX_NOTUSED);
         pte_contents.disk_format.pagefile_idx = allocated_page_old.pagefile_idx;
 
         write_pte_contents(old_pte, pte_contents);
@@ -293,17 +283,13 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
             return ERROR;
         }
 
-        #if 0
-        if (VirtualProtect(pte_va, PAGE_SIZE, PAGE_READWRITE, &old_protection_storage_notused) == ERROR) {
-            fprintf(stderr, "Failed to change permissions to readwrite for valid pte in fault\n");
-            DebugBreak();
-        }
-        #endif
-
         if (curr_page->pagefile_idx != DISK_IDX_NOTUSED) {
             release_single_disk_slot(curr_page->pagefile_idx);
             curr_page->pagefile_idx = DISK_IDX_NOTUSED;
         }
+
+    } else if (access_type == WRITE_ACCESS) {
+        custom_spin_assert(curr_page->pagefile_idx == DISK_IDX_NOTUSED);
     }
 
     release_pagelock(curr_page, 34);
@@ -446,11 +432,19 @@ static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result
 /**
  * Sometimes, we will want to refresh the free and zero lists
  */
+#define STANDBY_LIST_REFRESH_PROPORTION 8
+#define TOTAL_ZERO_AND_FREE_LIST_REFRESH_PROPORTION 20
+#define FREE_LIST_REFRESH_PROPORTION 25
 static void potential_faulter_list_refresh() {
-    if (standby_list->list_length > physical_page_count / 8) {
-        if (free_frames->total_available + zero_lists->total_available < physical_page_count / 25) {
+    if (standby_list->list_length > physical_page_count / STANDBY_LIST_REFRESH_PROPORTION) {
+        if (free_frames->total_available + zero_lists->total_available < physical_page_count / TOTAL_ZERO_AND_FREE_LIST_REFRESH_PROPORTION) {
             faulter_refresh_free_and_zero_lists();
+        } 
+        #if 1
+        else if (free_frames->total_available < physical_page_count / FREE_LIST_REFRESH_PROPORTION) {
+            faulter_refresh_free_frames();
         }
+        #endif
     }
 }
 
@@ -460,14 +454,16 @@ static void potential_faulter_list_refresh() {
  * 
  * Returns NULL if there were no pages available at the time
  */
+#define REDUCE_FREE_LIST_PRESSURE_PROPORTION 4
 static PAGE* find_available_page(PTE local_pte) {
 
     PAGE* allocated_page;
     BOOL zero_first;
 
+    
     // Since disk reads overwrite page contents, we do not need zeroed out pages.
     // and we would rather them be saved for accesses that do need zeroed pages
-    if (is_disk_format(local_pte)) {
+    if (is_disk_format(local_pte) || free_frames->total_available < NUM_CACHE_SLOTS * REDUCE_FREE_LIST_PRESSURE_PROPORTION) {
         zero_first = FALSE;
     } else {
         zero_first = TRUE;
