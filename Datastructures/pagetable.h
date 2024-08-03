@@ -12,14 +12,20 @@
 #define INVALID 0
 #define VALID 1
 
+// PTE protection statuses
 #define PTE_PROTNONE 0
 #define PTE_PROTREAD 1
 #define PTE_PROTWRITE 2
 #define PTE_PROTREADWRITE  PTE_PROTREAD | PTE_PROTWRITE
 
 
-//TODO: Think about various types of structs we would have in here
-// Each would have a status, but then they would have their own 
+/**
+ * Influences disk reads by allowing us to "lock" a disk PTE until we are finished reading it from the disk 
+ * Prevents unnecessesary disk reads and reduces PTE lock contention
+ */
+#define PTE_NOT_BEING_READ_FROM_DISK 0
+#define PTE_BEING_READ_FROM_DISK 1
+
 
 #ifndef PTE_T
 #define PTE_T
@@ -40,16 +46,11 @@ typedef struct {
 typedef struct {
     ULONG64 always_zero:1;
     ULONG64 pagefile_idx:40;
-    // Will always be one for this structure
     ULONG64 always_zero2:1;
+    ULONG64 being_read_from_disk:1;
 } DISK_PTE;
 
 
-/**
- * For frames that are modified but not accessible- they are either:
- * 1. Currently being written to disk
- * 2. Already written to disk, but on the standby list and is rescuable by the VA currently using it
- */
 typedef struct {
     ULONG64 always_zero:1;
     ULONG64 frame_number:40;

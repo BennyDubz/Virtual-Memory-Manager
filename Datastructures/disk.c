@@ -67,7 +67,7 @@ DISK* initialize_disk(MEM_EXTENDED_PARAMETER* vmem_parameters) {
     /**
      * Initialize disk slot locks
      */
-    ULONG64 num_locks = max(DISK_STORAGE_SLOTS >> 4, 1);
+    ULONG64 num_locks = max(DISK_STORAGE_SLOTS >> 6, 1);
     CRITICAL_SECTION* disk_slot_locks = (CRITICAL_SECTION*) malloc(sizeof(CRITICAL_SECTION) * num_locks);
 
     if (disk_slot_locks == NULL) {

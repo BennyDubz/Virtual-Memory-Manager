@@ -73,6 +73,7 @@ PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base)
 }
 
 
+
 /**
  * Returns the contents of the given PTE in one operation indivisibly
  */

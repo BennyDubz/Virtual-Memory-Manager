@@ -472,11 +472,11 @@ int release_single_disk_slot(ULONG64 disk_idx) {
     disk->disk_slot_statuses[disk_idx] = DISK_FREESLOT;
     disk->open_slot_counts[disk_idx / (DISK_STORAGE_SLOTS / disk->num_locks)] += 1;
     
-    LeaveCriticalSection(disk_idx_to_lock(disk_idx));
-
     if (disk->total_available_slots == 0) {
         SetEvent(disk_open_slots_event);
     }
+
+    LeaveCriticalSection(disk_idx_to_lock(disk_idx));
     
     InterlockedIncrement64(&disk->total_available_slots);
 

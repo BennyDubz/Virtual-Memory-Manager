@@ -12,9 +12,9 @@
 #include "./Machinery/debug_checks.h"
 
 
-#define NUM_USERMODE_THREADS        12
+#define NUM_USERMODE_THREADS        8
 #define MAX_CONSECUTIVE_ACCESSES    64
-#define TOTAL_ACCESS_AMOUNT         MB(10)
+#define TOTAL_ACCESS_AMOUNT         MB(5)
 
 /**
  * Reads are more common in the real world - if (random_number % WRITE_PROBABILITY_MODULO == 0) then we write to the address

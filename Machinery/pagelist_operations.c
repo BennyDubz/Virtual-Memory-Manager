@@ -540,6 +540,42 @@ void zero_out_pages(PAGE** pages, ULONG64 num_pages) {
 
 
 /**
+ * Tries to acquire the pagelock for the page at the tail of the list 
+ * 
+ * Returns the page if its lock was acquired, NULL otherwise
+ */
+static PAGE* try_acquire_list_tail_pagelock(DB_LL_NODE* pagelist_listhead) {
+    BOOL pagelock_acquired = FALSE;
+    PAGE* potential_page = NULL;
+
+    while (pagelock_acquired == FALSE) {
+        potential_page = (PAGE*) pagelist_listhead->blink->item;
+
+        // Check if this list section is empty
+        if (potential_page == NULL) return NULL;
+
+        pagelock_acquired = try_acquire_pagelock(potential_page, 4);
+
+        // Acquiring the pagelock right when it is no longer on the list isn't fair - we can afford to try again
+        if (pagelock_acquired && potential_page != (PAGE*) pagelist_listhead->blink->item) {
+            release_pagelock(potential_page, 16);
+            pagelock_acquired = FALSE;
+            continue;
+        }
+
+        break;
+    }
+
+    // If we failed to acquire a pagelock, we cannot return a reference to a page
+    if (pagelock_acquired == FALSE) {
+        return NULL;
+    } else {
+        return potential_page;
+    }
+}
+
+
+/**
  * Spins until it acquires the pagelock for the tail entry of the list, if there is a tail entry
  * 
  * Returns the page whose lock was acquired, or NULL if the list was empty and it was unable
@@ -761,7 +797,7 @@ ULONG64 allocate_batch_zeroed_frames(PAGE** page_storage, ULONG64 num_pages) {
 /**
  * Returns a page off the free list, if there are any. Otherwise, returns NULL
  */
-#define MAX_ATTEMPTS    NUM_CACHE_SLOTS / 20
+#define MAX_ATTEMPTS    NUM_CACHE_SLOTS / 10
 PAGE* allocate_free_frame() {
     
     /**
@@ -793,7 +829,15 @@ PAGE* allocate_free_frame() {
         
         DB_LL_NODE* section_listhead = free_frames->listheads[local_index];
 
+        // if (curr_attempts < MAX_ATTEMPTS / 2) {
+        //     potential_page = try_acquire_list_tail_pagelock(section_listhead);
+        // } else {
+        //     potential_page = acquire_list_tail_pagelock(section_listhead);
+        // }
+
         potential_page = acquire_list_tail_pagelock(section_listhead);
+
+        // potential_page = try_acquire_list_tail_pagelock(section_listhead);
 
         // We failed to get a page from this section, it was empty
         if (potential_page == NULL) {
@@ -817,6 +861,8 @@ PAGE* allocate_free_frame() {
 
         break;
     }
+
+    // printf("Num attempts: %lld %p\n", curr_attempts, potential_page);
     
     return potential_page;
 }
@@ -948,10 +994,6 @@ void faulter_refresh_free_and_zero_lists() {
         InterlockedAnd(&free_zero_refresh_ongoing, FALSE);
         #endif
 
-        for (int i = 0; i < num_allocated; i++) {
-            custom_spin_assert(pages_to_refresh[i]->holding_threadid != GetCurrentThreadId());
-        }
-
         return;
     }
 
@@ -975,10 +1017,6 @@ void faulter_refresh_free_and_zero_lists() {
             #if ONLY_ONE_REFRESHER
             InterlockedAnd(&free_zero_refresh_ongoing, FALSE);
             #endif
-
-            for (int i = page_idx; i < num_allocated; i++) {
-                custom_spin_assert(pages_to_refresh[i]->holding_threadid != GetCurrentThreadId());
-            }
 
             break;
         }

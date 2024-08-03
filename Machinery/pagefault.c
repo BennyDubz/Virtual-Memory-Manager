@@ -17,6 +17,8 @@
 #include "./pagefault.h"
 #include "./pagelist_operations.h"
 
+#define SHORTEN_DISK_PTE_HOLDTIMES 1
+
 
 /**
  * GLOBALS FOR PAGE FAULTING
@@ -33,6 +35,8 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
 static int handle_unaccessed_pte_fault(PTE local_pte, PAGE** result_page_storage);
 
 static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result_page_storage);
+
+static BOOL acquire_disk_pte_read_rights(PTE* accessed_pte, PTE local_pte);
 
 static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result_page_storage);
 
@@ -87,7 +91,7 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type) {
     }
 
     // We try to trim behind us
-    if (fault_count % 8 == 0 && modified_list->list_length < physical_page_count / 4) {
+    if (fault_count % 8 == 0 && total_available_pages < (physical_page_count / 4) && modified_list->list_length < physical_page_count / 4) {
         faulter_trim_behind(accessed_pte);
     }
 
@@ -137,7 +141,6 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type) {
     custom_spin_assert(allocated_page->status != ACTIVE_STATUS);
     
 
-
     /**
      * For disk reads on the same PTE (or PTE section), only a single faulting thread will end up here and will already have the PTE lock
      * 
@@ -146,16 +149,22 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type) {
      * This means that only a single thread at a time would be able to change a transition PTE so long as they hold the pagelock, making its corresponding
      * PTE lock redundant. By not aquiring it, we can reduce contention on the PTE locks
      */
+    #if SHORTEN_DISK_PTE_HOLDTIMES
+    if (is_transition_format(local_pte) == FALSE) {
+    #else
     if (is_used_pte(local_pte) == FALSE) {
+    #endif
         EnterCriticalSection(pte_lock);
     
         /**
          * More than one thread was trying to access this PTE at once, meaning that only one of them succeeded and mapped the page
          */
-        if (ptes_are_equal(local_pte, *accessed_pte) == FALSE) {
-            LeaveCriticalSection(pte_lock);
-            release_unneeded_page(allocated_page);
-            return RACE_CONDITION_FAIL;
+        if (is_used_pte(local_pte) == FALSE) {
+            if (ptes_are_equal(local_pte, *accessed_pte) == FALSE) {
+                LeaveCriticalSection(pte_lock);
+                release_unneeded_page(allocated_page);
+                return RACE_CONDITION_FAIL;
+            }
         }
 
     }
@@ -192,11 +201,11 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type) {
         DebugBreak();
     }
 
-    // Transition PTEs do not need the PTE lock, but everyone else does and will hold it
+
     if (is_transition_format(local_pte) == FALSE) {
         LeaveCriticalSection(pte_lock);
     }
-
+    
 
     /**
      * We need to modify the other PTE associated with the standby page now that we are committing
@@ -367,6 +376,59 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
 
 
 /**
+ * Sets the being_read_from_disk bit in the accessed PTE to 1 if possible, otherwise releases the lock and spins until the read is complete
+ * 
+ * This is certainly not perfect - as we don't like the other CPU spinning while this one is being read from disk... but it is a temporary
+ * way to reduce contention on the entire PTE lock. Ideally, collisons on just this single PTE should be rare so this should be uncommon
+ */
+static BOOL acquire_disk_pte_read_rights(PTE* accessed_pte, PTE local_pte) {
+    PTE_LOCKSECTION* pte_locksection = pte_to_locksection(accessed_pte);
+    BOOL wait_until_change = FALSE;
+
+    // If the local PTE is already indicating that it is being read from the disk, we should just spin and not enter the critical section
+    if (local_pte.disk_format.being_read_from_disk == PTE_NOT_BEING_READ_FROM_DISK) {
+        EnterCriticalSection(&pte_locksection->lock);
+
+        // Someone else is reading this disk PTE right now
+        if (is_disk_format(*accessed_pte)) {
+            if (accessed_pte->disk_format.being_read_from_disk == PTE_BEING_READ_FROM_DISK) {
+                wait_until_change = TRUE;
+            } else {
+                PTE pte_contents;
+                pte_contents.complete_format = 0;
+                pte_contents.disk_format.pagefile_idx = local_pte.disk_format.pagefile_idx;
+                pte_contents.disk_format.being_read_from_disk = PTE_BEING_READ_FROM_DISK;
+
+                local_pte = pte_contents;
+                write_pte_contents(accessed_pte, pte_contents);
+            }
+        } else {
+            // The disk read is already complete! We can just return now
+            LeaveCriticalSection(&pte_locksection->lock);
+            return FALSE;
+        }
+
+        LeaveCriticalSection(&pte_locksection->lock);
+    } else {
+        // The local PTE indicates that we should spin until the disk read is finished
+        wait_until_change = TRUE;
+    }
+    
+
+    if (wait_until_change) {
+        while (ptes_are_equal(read_pte_contents(accessed_pte), local_pte)) {
+
+        }
+        //WaitOnAddress(accessed_pte, &local_pte, sizeof(PTE), INFINITE);
+        return FALSE;
+    }
+
+    return TRUE;
+
+}
+
+
+/**
  * Handles a pagefault for a PTE that is in the disk format - it's contents
  * must be fetched from the disk
  * 
@@ -374,17 +436,50 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
  * disk index that it was at in disk_idx_storage
  */
 static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result_page_storage) {
+    #if SHORTEN_DISK_PTE_HOLDTIMES
+    // Try to acquire the rights to read this exact PTE from the disk
+    if (acquire_disk_pte_read_rights(accessed_pte, local_pte) == FALSE) {
+        // We waited in there, and the PTE changed (and is likely finished being read from disk)
+        return RACE_CONDITION_FAIL;
+    }
+
+    /**
+     * At this point, a thread here has exclusive rights to read the accessed PTE from the disk
+     */
+    #else
     CRITICAL_SECTION* pte_lock = &pte_to_locksection(accessed_pte)->lock;
+    #endif
 
     // We also now hold the allocated pagelock
     PAGE* allocated_page = find_available_page(local_pte);
 
+    /**
+     * If there are no pages available, we cannot let any other threads continue to wait when we are not
+     * going to be able to finish writing this disk PTE
+     */
     if (allocated_page == NULL) {
+        #if SHORTEN_DISK_PTE_HOLDTIMES
+        CRITICAL_SECTION* pte_lock = &pte_to_locksection(accessed_pte)->lock;
+
+        PTE pte_contents;
+        pte_contents.complete_format = 0;
+        pte_contents.disk_format.pagefile_idx = local_pte.disk_format.pagefile_idx;
+        pte_contents.disk_format.being_read_from_disk = PTE_NOT_BEING_READ_FROM_DISK;
+
+        EnterCriticalSection(pte_lock);
+
+        write_pte_contents(accessed_pte, pte_contents);
+
+        LeaveCriticalSection(pte_lock);
+        #endif
+
         return NO_AVAILABLE_PAGES_FAIL;
     }
 
     ULONG64 disk_idx = local_pte.disk_format.pagefile_idx;
-
+    
+    #if SHORTEN_DISK_PTE_HOLDTIMES
+    #else
     EnterCriticalSection(pte_lock);
 
     custom_spin_assert(allocated_page->page_lock == PAGE_LOCKED);
@@ -409,13 +504,26 @@ static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result
      * We then compare the PTEs before continuing on with the disk read. This way only a single
      * thread will complete the disk read for a given PTE.
      */
+    #endif 
 
-    // Another thread could have rescued this frame ahead of us
     if (read_page_from_disk(allocated_page, disk_idx) == ERROR) {
-        LeaveCriticalSection(pte_lock);
+        #if SHORTEN_DISK_PTE_HOLDTIMES
+        // We need to edit the PTE so that no threads waiting on the address to change are stuck in limbo
+        CRITICAL_SECTION* pte_lock = &pte_to_locksection(accessed_pte)->lock;
+        PTE pte_contents;
+        pte_contents.complete_format = 0;
+        pte_contents.disk_format.pagefile_idx = local_pte.disk_format.pagefile_idx;
+        pte_contents.disk_format.being_read_from_disk = PTE_NOT_BEING_READ_FROM_DISK;
 
-        // BW: Here, we would want to add it to the zero-out thread!
+        EnterCriticalSection(pte_lock);
+
+        write_pte_contents(accessed_pte, pte_contents);
+
+        LeaveCriticalSection(pte_lock);
+        #endif
+
         release_unneeded_page(allocated_page);
+
         return DISK_FAIL;
     }
 
@@ -423,7 +531,6 @@ static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result
 
     custom_spin_assert(allocated_page->page_lock == PAGE_LOCKED);
     custom_spin_assert(allocated_page->status != ACTIVE_STATUS);
-
 
     return SUCCESS;
 }
