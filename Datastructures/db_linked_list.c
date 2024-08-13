@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include "./db_linked_list.h"
+
 #include "../macros.h" 
 
 
@@ -26,6 +27,11 @@ DB_LL_NODE* db_create_node(void* item) {
     }
 
     new_node->item = item;
+
+    #if DEBUG_LISTS
+    new_node->listhead_ptr = NULL;
+    new_node->prev_listhead = NULL;
+    #endif
     
     return new_node;
 }
@@ -79,6 +85,7 @@ DB_LL_NODE* db_insert_at_head(DB_LL_NODE* listhead, void* item) {
     new_node->flink = front_node;
 
     #if DEBUG_LISTS
+
     new_node->listhead_ptr = listhead;
     #endif
 
@@ -137,6 +144,10 @@ int db_insert_node_at_head(DB_LL_NODE* listhead, DB_LL_NODE* node) {
     listhead->flink = node;
 
     #if DEBUG_LISTS
+    if (node->listhead_ptr != NULL) {
+        DebugBreak();
+    }
+
     node->listhead_ptr = listhead;
     #endif
 
@@ -165,6 +176,10 @@ int db_insert_node_at_tail(DB_LL_NODE* listhead, DB_LL_NODE* node) {
     old_tail->flink = node;
 
     #if DEBUG_LISTS
+    if (node->listhead_ptr != NULL) {
+        DebugBreak();
+    }
+
     node->listhead_ptr = listhead;
     #endif
 

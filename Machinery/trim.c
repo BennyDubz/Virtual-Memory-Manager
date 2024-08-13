@@ -90,6 +90,7 @@ LPTHREAD_START_ROUTINE thread_trimming() {
     ULONG64 trim_to_modified;
     ULONG64 trim_to_standby;
     ULONG64 trim_already_being_written;
+    BOOL signal_modified;
     ULONG64 total_trimmed = 0;
 
     PTE* pte_section_trim[TRIM_PER_SECTION];
@@ -101,6 +102,8 @@ LPTHREAD_START_ROUTINE thread_trimming() {
 
     while(TRUE) {
         WaitForSingleObject(trimming_event, INFINITE);
+
+        signal_modified = FALSE;
 
         // Go through each lock section and increment all valid PTEs
         for (ULONG64 lock_section = 0; lock_section < pagetable->num_locks; lock_section++) {            
@@ -127,7 +130,7 @@ LPTHREAD_START_ROUTINE thread_trimming() {
                 if (acquire_pte_lock) {
                     EnterCriticalSection(&curr_pte_locksection->lock);
 
-                    if (curr_pte_locksection->valid_pte_count == trim_to_modified) {
+                    if (curr_pte_locksection->valid_pte_count == section_num_ptes_trimmed) {
                         LeaveCriticalSection(&curr_pte_locksection->lock);
                         break;
                     }
@@ -136,7 +139,7 @@ LPTHREAD_START_ROUTINE thread_trimming() {
                 }
 
                 // There are no more PTEs left in this section for us to trim
-                if (curr_pte_locksection->valid_pte_count == trim_to_modified + trim_to_standby) {
+                if (curr_pte_locksection->valid_pte_count == section_num_ptes_trimmed) {
                     break;
                 }
 
@@ -228,13 +231,13 @@ LPTHREAD_START_ROUTINE thread_trimming() {
                 trim_addresses[trim_idx] = pte_to_va(curr_pte);
             }
 
-            // This will be an expensive call to MapUserPhysicalPages, so we want to break it up
+            // This will be an expensive call to MapUserPhysicalPages, so we want to batch at least a few addresses
             disconnect_va_batch_from_cpu(trim_addresses, section_num_ptes_trimmed);
+
+            curr_pte_locksection->valid_pte_count -= section_num_ptes_trimmed;
 
             LeaveCriticalSection(&curr_pte_locksection->lock);
 
-
-            
 
             /**
              * Now, we add all of our pages to the modified list or standby list depending on whether
@@ -260,11 +263,17 @@ LPTHREAD_START_ROUTINE thread_trimming() {
                 }
 
                 LeaveCriticalSection(&modified_list->lock); 
-                SetEvent(modified_to_standby_event);
+                signal_modified = TRUE;
+
+                // If we are desperate, set the event to start mod writing immediately
+                if (total_available_pages < physical_page_count / 100) {
+                    SetEvent(modified_to_standby_event);
+                }
             }   
 
 
             if (trim_to_standby > 0) {
+                BOOL signal_waiting_for_pages_event;
                 EnterCriticalSection(&standby_list->lock);
 
                 for (ULONG64 trim_idx = 0; trim_idx < trim_to_standby; trim_idx++) {
@@ -273,19 +282,25 @@ LPTHREAD_START_ROUTINE thread_trimming() {
                     standby_add_page(curr_page, standby_list);
                     release_pagelock(curr_page, 23);
                 }
+                
+                // We only want to set the event if we desperately need pages, and we check before we modify the global
+                signal_waiting_for_pages_event = (total_available_pages == 0);
+
                 InterlockedAdd64(&total_available_pages, trim_to_standby);
                 LeaveCriticalSection(&standby_list->lock);
 
-                // BW: Do we need to always set the event?
-                SetEvent(waiting_for_pages_event);
+                if (signal_waiting_for_pages_event == 0) {
+                    SetEvent(waiting_for_pages_event);
+                }
             }
 
 
         }
 
-        // Signal that the modified list should be populated
-        trim_count++;
-
+        // If we can, we only set the event here at the very end
+        if (signal_modified) {
+            SetEvent(modified_to_standby_event);
+        }
         
     }
 }
@@ -396,6 +411,7 @@ void faulter_trim_behind(PTE* accessed_pte) {
                 pages_trimmed_to_modified[trim_to_modified] = curr_page;
                 trim_to_modified++;
             }
+
         // If there is a saved pagefile index in the page, then we can trim it straight to standby
         } else {
             pages_trimmed_to_standby[trim_to_standby] = curr_page;
@@ -412,7 +428,6 @@ void faulter_trim_behind(PTE* accessed_pte) {
         trimmed_addresses[num_ptes_trimmed] = pte_to_va(curr_pte);
 
         num_ptes_trimmed++;
-        curr_pte_locksection->valid_pte_count--;
     }
 
     // A lot changed under us, our heuristic was wrong and we were unable to trim any PTEs
@@ -422,6 +437,8 @@ void faulter_trim_behind(PTE* accessed_pte) {
     }
 
     disconnect_va_batch_from_cpu(trimmed_addresses, num_ptes_trimmed);
+
+    curr_pte_locksection->valid_pte_count -= num_ptes_trimmed;
 
     LeaveCriticalSection(&curr_pte_locksection->lock);
 
@@ -444,11 +461,16 @@ void faulter_trim_behind(PTE* accessed_pte) {
         }    
         LeaveCriticalSection(&modified_list->lock);
 
-        SetEvent(modified_to_standby_event);
+        // We don't want to bother setting this event unless the mod-writer will do subtantial work
+        if (modified_list->list_length > MAX_PAGES_WRITABLE / 2) {
+            SetEvent(modified_to_standby_event);
+        }
+        
     }
     
     // Briefly enter the standby list to add our prepared pages - if there are any
     if (trim_to_standby > 0) {
+        BOOL signal_waiting_for_pages;
 
         EnterCriticalSection(&standby_list->lock);
         for (ULONG64 i = 0; i < trim_to_standby; i++) {
@@ -457,10 +479,16 @@ void faulter_trim_behind(PTE* accessed_pte) {
             standby_add_page(curr_page, standby_list);
             release_pagelock(curr_page, 24);
         }
+
+        signal_waiting_for_pages = (total_available_pages == 0);
+
         InterlockedAdd64(&total_available_pages, trim_to_standby);
         LeaveCriticalSection(&standby_list->lock);
 
-        SetEvent(waiting_for_pages_event);
+        // We only want to set this event if we were out of pages before - otherwise, we can avoid the overhead
+        if (signal_waiting_for_pages) {
+            SetEvent(waiting_for_pages_event);
+        }
     }
 }
 
@@ -523,8 +551,6 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
             // The list is empty
             if (potential_page == NULL) break;
 
-            custom_spin_assert(potential_page->status == MODIFIED_STATUS);
-
             // The rare case where the page we want to pop has its pagelock held. We surrender the modified listlock
             if (try_acquire_pagelock(potential_page, 8) == FALSE) {
                 LeaveCriticalSection(&modified_list->lock);
@@ -533,6 +559,7 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
                 continue;
             }
 
+            custom_spin_assert(potential_page->status == MODIFIED_STATUS);
             custom_spin_assert(potential_page->pagefile_idx == DISK_IDX_NOTUSED);
 
 
@@ -574,7 +601,8 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
 
         // First check to see if we wrote any pages at all - if we didn't we need to wait for available disk slots
         if (num_pages_written == 0) {
-            printf("out of disk slots for mod writer\n");
+            printf("out of disk slots for mod writer - count %llx - trying to write %llx\n", disk->total_available_slots, disk_batch.num_pages);
+            DebugBreak();
             for (ULONG64 i = 0; i < disk_batch.num_pages; i++) {
                 curr_page = disk_batch.pages_being_written[i];
                 acquire_pagelock(curr_page, 27);
@@ -618,7 +646,9 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
          * we just add the remainder back to the modified list
          */
         if (num_pages_written != disk_batch.num_pages) {
-            custom_spin_assert(FALSE);
+            printf("Not enough disk slots for mod writer - wrote %llx - count %llx  - trying to write %llx\n", num_pages_written, disk->total_available_slots, disk_batch.num_pages);
+            DebugBreak();
+
             ULONG64 start_index = disk_batch.num_pages - num_pages_written;
 
             for (ULONG64 i = start_index; i < disk_batch.num_pages; i++) {
@@ -659,7 +689,6 @@ LPTHREAD_START_ROUTINE thread_modified_to_standby() {
          * Acquire pagelocks ahead of time, then get the standby list lock
          */
         for (int i = 0; i < num_pages_written; i++) {
-            
             curr_page = disk_batch.pages_being_written[i];
             release_slot = FALSE;
 
@@ -773,7 +802,7 @@ static ULONG64 determine_address_approprate_permissions(PTE* pte, ULONG64 access
      * Unaccessed PTEs should always get readwrite permissions, as they are likely to 
      * write to an address that they have never used before now
      */
-    if (access_type == WRITE_ACCESS || is_used_pte(*pte) == FALSE) {
+    if (access_type == WRITE_ACCESS || is_used_pte(read_pte_contents(pte)) == FALSE) {
         #if 0
         if (VirtualProtect(pte_va, PAGE_SIZE, PAGE_READWRITE, &old_protection_storage_notused) == ERROR) {
             fprintf(stderr, "Failed to change permissions in set_address_approprate_permissions %d 0\n", GetLastError());
@@ -797,6 +826,42 @@ static ULONG64 determine_address_approprate_permissions(PTE* pte, ULONG64 access
 
 
 /**
+ * Determines the appropriate permissions for all of the ptes_in_question, and writes them into the permission_storage
+ */
+static void determine_batch_address_appropriate_permissions(PTE** ptes_in_question, PTE* original_accessed_pte, ULONG64 access_type, ULONG64 num_ptes, ULONG64* permission_storage) {
+    ULONG64 start_index;
+    PTE* curr_pte;
+
+    /**
+     * If we are doing a disk read, we may have speculated on the ahead PTEs while our original accessed PTE was being read in by someone else
+     * or was resolved. In that case, the original access type does not apply
+     */
+    if (original_accessed_pte != ptes_in_question[0]) {
+        start_index = 0;
+    } else {
+        if (access_type == WRITE_ACCESS || is_used_pte(read_pte_contents(original_accessed_pte)) == FALSE) {
+            permission_storage[0] = PAGE_READWRITE;
+        } else {
+            permission_storage[0] = PAGE_READONLY;
+        }
+        start_index = 1;
+    }
+
+    // Determine the permissions for the other PTEs
+    for (ULONG64 i = start_index; i < num_ptes; i++) {
+        curr_pte = ptes_in_question[i];
+
+        if (is_used_pte(read_pte_contents(curr_pte)) == FALSE) {
+            permission_storage[i] = PAGE_READWRITE;
+        } else {
+            permission_storage[i] = PAGE_READONLY;
+        }
+
+    }
+}
+
+
+/**
  * Connects the given PTE to the open page's physical frame and modifies the PTE
  * 
  * Sets the permission bits of the PTE in accordance with its status as well as the type of access
@@ -813,15 +878,8 @@ int connect_pte_to_page(PTE* pte, PAGE* open_page, ULONG64 access_type) {
     
     PTE_LOCKSECTION* pte_locksection = pte_to_locksection(pte);
 
-
     ULONG64 pfn = page_to_pfn(open_page);
     
-    #ifdef DEBUG_CHECKING
-    if (pte_valid_count_check(pte) == FALSE) {
-        DebugBreak();
-    }
-    #endif
-
     pte_locksection->valid_pte_count++;
 
     ULONG64 permissions = determine_address_approprate_permissions(pte, access_type);
@@ -860,13 +918,74 @@ int connect_pte_to_page(PTE* pte, PAGE* open_page, ULONG64 access_type) {
 
     write_pte_contents(pte, pte_contents);
 
-    #ifdef DEBUG_CHECKING
-    if (pte_valid_count_check(pte) == FALSE) {
-        DebugBreak();
-    }
-    #endif
 
     return SUCCESS;
+}
+
+
+/**
+ * Connects the list of given PTEs to their corresponding pages, and modifies all the PTEs to be
+ * in valid format. Assumes all PTEs are in the same PTE locksection
+ * 
+ * Sets the PTEs permission bits depending on whether or not they have preservable pagefile space and the type of access of the fault
+ * 
+ * Returns SUCCESS if there are no issues, ERROR otherwise 
+ */
+int connect_batch_ptes_to_pages(PTE** ptes_to_connect, PTE* original_accessed_pte, PAGE** pages, ULONG64 access_type, ULONG64 num_ptes) {
+    // All the PTEs are assumed to be in the same PTE locksection
+    PTE_LOCKSECTION* pte_locksection = pte_to_locksection(original_accessed_pte);
+
+    ULONG64 permissions[MAX_PAGES_READABLE];
+    ULONG64 pfns[MAX_PAGES_READABLE];
+    PVOID virtual_addresses[MAX_PAGES_READABLE];
+
+    determine_batch_address_appropriate_permissions(ptes_to_connect, original_accessed_pte, access_type, num_ptes, permissions);
+
+    PTE pte_contents;
+    pte_contents.complete_format = 0;
+    pte_contents.memory_format.valid = VALID;
+
+    PTE* curr_pte;
+
+    for (ULONG64 i = 0; i < num_ptes; i++) {
+        curr_pte = ptes_to_connect[i];
+        virtual_addresses[i] = pte_to_va(curr_pte);
+        pfns[i] = page_to_pfn(pages[i]);        
+        
+        // For MapUserPhysicalPages, we have to OR the leftmost bit of the pfn to set the actual hardware PTE permissions to readonly
+        if (permissions[i] == PAGE_READONLY) {
+            // This doesn't affect the frame number stored in the PTE, as that is only 40 bits wide and this is 64
+            pfns[i] |= PAGE_MAPUSERPHYSCAL_READONLY_MASK;
+        }
+    }
+
+    // This is the expensive operation we really want to batch!
+    if (MapUserPhysicalPagesScatter(virtual_addresses, num_ptes, pfns) == FALSE) {
+        fprintf(stderr, "Failed to map batch of pages in connect_batch_ptes_to_pages\n");
+        DebugBreak();
+        return ERROR;
+    }
+
+
+    for (ULONG64 i = 0; i < num_ptes; i++) {
+        curr_pte = ptes_to_connect[i];
+
+        if (permissions[i] == PAGE_READONLY) {
+            pte_contents.memory_format.protections = PTE_PROTREAD;
+        } else {
+            pte_contents.memory_format.protections = PTE_PROTREADWRITE;
+        }
+
+        pte_contents.memory_format.frame_number = pfns[i];
+        pte_locksection->valid_pte_count++;
+        
+        write_pte_contents(curr_pte, pte_contents);
+    }
+
+
+    return SUCCESS;
+
+
 }
 
 

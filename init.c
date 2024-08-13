@@ -41,6 +41,8 @@ ULONG64 physical_page_count;
 
 MEM_EXTENDED_PARAMETER vmem_parameters;
 
+volatile ULONG64 remaining_writable_addresses;
+
 
 /**
  * GLOBAL DATASTRUCTURES
@@ -312,7 +314,7 @@ static int init_simulation(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memor
 
     if (physical_page_count != NUMBER_OF_PHYSICAL_PAGES) {
 
-        fprintf (stderr, "init_simulation : allocated only %llu pages out of %u pages requested\n",
+        fprintf (stderr, "init_simulation : allocated only %llx pages out of %llx pages requested\n",
                 physical_page_count,
                 NUMBER_OF_PHYSICAL_PAGES);
     }
@@ -436,6 +438,9 @@ static int init_datastructures() {
         return ERROR;
     }
 
+    // 512 8-byte addresses fit into a 4KB page
+    remaining_writable_addresses = pagetable->num_virtual_pages * 512;
+
     zero_lists = initialize_zeroed_lists(page_storage_base, physical_page_numbers, physical_page_count);
     if (zero_lists == NULL) {
         fprintf(stderr, "Unable to allocate memory for zero_lists\n");
@@ -490,6 +495,10 @@ static int init_datastructures() {
     page_zeroing->curr_idx = 0;
     page_zeroing->total_slots_used = 0;
     page_zeroing->zeroing_ongoing = FALSE;
+
+    for (ULONG64 i = 0; i < NUM_THREAD_ZERO_SLOTS; i++) {
+        page_zeroing->status_map[i] = PAGE_SLOT_OPEN;
+    }
 
     return SUCCESS;
 }

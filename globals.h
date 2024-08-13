@@ -23,6 +23,9 @@ extern ULONG64 physical_page_count;
 
 extern MEM_EXTENDED_PARAMETER vmem_parameters;
 
+// Since we stamp the virtual addresses, we can keep track of the amount of un-stamped VAs
+extern volatile ULONG64 remaining_writable_addresses;
+
 
 /**
  * GLOBAL DATASTRUCTURES

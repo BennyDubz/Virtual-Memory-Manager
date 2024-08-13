@@ -684,7 +684,7 @@ PAGE* allocate_zeroed_frame() {
 
     custom_spin_assert(local_index < NUM_CACHE_SLOTS);
 
-    while (curr_attempts < NUM_CACHE_SLOTS) {
+    while (curr_attempts < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS) {
         // Check for empty list - we can quickly check here before acquiring the lock
         if (zero_lists->list_lengths[local_index] == 0) {
             curr_attempts ++;
@@ -696,7 +696,12 @@ PAGE* allocate_zeroed_frame() {
         
         DB_LL_NODE* section_listhead = zero_lists->listheads[local_index];
 
-        potential_page = acquire_list_tail_pagelock(section_listhead);
+        // If multiple threads are contending on the same sections, this will help alleviate contention
+        if (curr_attempts < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS / 2) {
+            potential_page = try_acquire_list_tail_pagelock(section_listhead);
+        } else {
+            potential_page = acquire_list_tail_pagelock(section_listhead);
+        }
 
         // We failed to get a page from this section, it was empty
         if (potential_page == NULL) {
@@ -735,39 +740,38 @@ ULONG64 allocate_batch_zeroed_frames(PAGE** page_storage, ULONG64 num_pages) {
         return 0;
     }
 
-    ULONG64 oldest_failure_idx = INFINITE;
+    ULONG64 num_consecutive_failures = 0;
     ULONG64 num_allocated = 0;
     ULONG64 local_index = ReadTimeStampCounter() % NUM_CACHE_SLOTS;
     PAGE* curr_page;
 
 
     /**
-     * We will continue until we have either looped around and failed on all of the lists,
-     * or until we have allocated the number of pages that we want
+     * We will continue until we fail to acquire a page several consecutive times in a row, or until
+     * we have acquired the number of pages that we want
      */
-    while (local_index != oldest_failure_idx && num_allocated < num_pages) {
+    while (num_consecutive_failures < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS && num_allocated < num_pages) {
+        // We make an opportunistic look at the number of pages before acquiring any locks
         if (zero_lists->list_lengths[local_index] == 0) {
-            // If this is our first failure in this loop of grabbing pages, set the failure index
-            if (oldest_failure_idx != INFINITE) {
-                oldest_failure_idx = local_index;
-            }
-
+            num_consecutive_failures++;
             local_index = (local_index + 1) % NUM_CACHE_SLOTS;
 
             continue;
         }
-        // By here, the odds are better that we will get a frame, but not guaranteed
 
+        // By here, the odds are better that we will get a frame, but not guaranteed
         DB_LL_NODE* cache_color_listhead = zero_lists->listheads[local_index];
 
-        curr_page = acquire_list_tail_pagelock(cache_color_listhead);
+        if (num_consecutive_failures < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS / 2) {
+            curr_page = try_acquire_list_tail_pagelock(cache_color_listhead);
+        } else {
+            curr_page = acquire_list_tail_pagelock(cache_color_listhead);
+        }
 
         // We failed to acquire a page - this list is now empty
         if (curr_page == NULL) {
 
-            if (oldest_failure_idx != INFINITE) {
-                oldest_failure_idx = local_index;
-            }
+            num_consecutive_failures++;
 
             local_index = (local_index + 1) % NUM_CACHE_SLOTS;
 
@@ -787,6 +791,7 @@ ULONG64 allocate_batch_zeroed_frames(PAGE** page_storage, ULONG64 num_pages) {
         LeaveCriticalSection(&zero_lists->list_locks[local_index]);
 
         page_storage[num_allocated] = curr_page;
+        num_consecutive_failures = 0;
         num_allocated++;
     }
 
@@ -797,7 +802,6 @@ ULONG64 allocate_batch_zeroed_frames(PAGE** page_storage, ULONG64 num_pages) {
 /**
  * Returns a page off the free list, if there are any. Otherwise, returns NULL
  */
-#define MAX_ATTEMPTS    NUM_CACHE_SLOTS / 10
 PAGE* allocate_free_frame() {
     
     /**
@@ -817,7 +821,7 @@ PAGE* allocate_free_frame() {
     
     ULONG64 local_index = ReadTimeStampCounter() % NUM_CACHE_SLOTS;
 
-    while (curr_attempts < MAX_ATTEMPTS) {
+    while (curr_attempts < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS) {
         // Check for empty list - we can quickly check here before acquiring the lock
         if (free_frames->list_lengths[local_index] == 0) {
             curr_attempts += 1;
@@ -829,13 +833,14 @@ PAGE* allocate_free_frame() {
         
         DB_LL_NODE* section_listhead = free_frames->listheads[local_index];
 
-        // if (curr_attempts < MAX_ATTEMPTS / 2) {
-        //     potential_page = try_acquire_list_tail_pagelock(section_listhead);
-        // } else {
-        //     potential_page = acquire_list_tail_pagelock(section_listhead);
-        // }
+        // If multiple threads are contending on the same sections, this will help alleviate contention
+        if (curr_attempts < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS / 2) {
+            potential_page = try_acquire_list_tail_pagelock(section_listhead);
+        } else {
+            potential_page = acquire_list_tail_pagelock(section_listhead);
+        }
 
-        potential_page = acquire_list_tail_pagelock(section_listhead);
+        // potential_page = acquire_list_tail_pagelock(section_listhead);
 
         // potential_page = try_acquire_list_tail_pagelock(section_listhead);
 
@@ -880,39 +885,39 @@ ULONG64 allocate_batch_free_frames(PAGE** page_storage, ULONG64 batch_size) {
         return 0;
     }
 
-    ULONG64 oldest_failure_idx = INFINITE;
+    ULONG64 num_consecutive_failures = 0;
     ULONG64 num_allocated = 0;
     ULONG64 local_index = ReadTimeStampCounter() % NUM_CACHE_SLOTS;
     PAGE* curr_page;
 
 
     /**
-     * We will continue until we have either looped around and failed on all of the lists,
-     * or until we have allocated the number of pages that we want
+     * We will continue until we fail to acquire a page several consecutive times in a row, or until
+     * we have acquired the number of pages that we want
      */
-    while (local_index != oldest_failure_idx && num_allocated < batch_size) {
+    while (num_consecutive_failures < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS && num_allocated < batch_size) {
+        
+        // We make an opportunistic look at the number of pages before acquiring any locks
         if (free_frames->list_lengths[local_index] == 0) {
-            // If this is our first failure in this loop of grabbing pages, set the failure index
-            if (oldest_failure_idx != INFINITE) {
-                oldest_failure_idx = local_index;
-            }
-
+            num_consecutive_failures++;
             local_index = (local_index + 1) % NUM_CACHE_SLOTS;
 
             continue;
         }
-        // By here, the odds are better that we will get a frame, but not guaranteed
 
+        // By here, the odds are better that we will get a frame, but not guaranteed
         DB_LL_NODE* cache_color_listhead = free_frames->listheads[local_index];
 
-        curr_page = acquire_list_tail_pagelock(cache_color_listhead);
+        if (num_consecutive_failures < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS / 2) {
+            curr_page = try_acquire_list_tail_pagelock(cache_color_listhead);
+        } else {
+            curr_page = acquire_list_tail_pagelock(cache_color_listhead);
+        }
 
         // We failed to acquire a page - this list is now empty
         if (curr_page == NULL) {
 
-            if (oldest_failure_idx != INFINITE) {
-                oldest_failure_idx = local_index;
-            }
+            num_consecutive_failures++;
 
             local_index = (local_index + 1) % NUM_CACHE_SLOTS;
 
@@ -932,6 +937,7 @@ ULONG64 allocate_batch_free_frames(PAGE** page_storage, ULONG64 batch_size) {
         LeaveCriticalSection(&free_frames->list_locks[local_index]);
 
         page_storage[num_allocated] = curr_page;
+        num_consecutive_failures = 0;
         num_allocated++;
     }
 
@@ -944,24 +950,19 @@ ULONG64 allocate_batch_free_frames(PAGE** page_storage, ULONG64 batch_size) {
  * 
  * Takes many frames off of the standby list and uses some to populate the free frames list, while also
  * adding some to the zeroing-threads buffer. If there are enough pages for the zeroing thread to zero-out,
- * then it will be signalled
+ * then it will be signaled
  */
-#define NUM_PAGES_FAULTER_REFRESH   NUM_CACHE_SLOTS * 2
-#define FREE_FRAMES_PORTION   (NUM_PAGES_FAULTER_REFRESH * 3 / 4)
-#define ONLY_ONE_REFRESHER 1
-
 #if ONLY_ONE_REFRESHER
 long free_zero_refresh_ongoing = FALSE;
 #endif
 
-void faulter_refresh_free_and_zero_lists() {
+static void faulter_refresh_free_and_zero_lists() {
     
     #if ONLY_ONE_REFRESHER
     if (InterlockedOr(&free_zero_refresh_ongoing, TRUE) == TRUE) {
         return;
     }
     #endif
-
 
     PAGE* pages_to_refresh[NUM_PAGES_FAULTER_REFRESH];
 
@@ -1048,16 +1049,16 @@ void faulter_refresh_free_and_zero_lists() {
 }
 
 
+
 #if ONLY_ONE_REFRESHER
 long free_frames_refresh_ongoing = FALSE;
 #endif
-
 /**
  * To be called when a faulter needs to only refresh the free frames list, and not the zero list
  * 
  * This helps us reduce contention on the free list
  */
-void faulter_refresh_free_frames() {
+static void faulter_refresh_free_frames() {
     
     #if ONLY_ONE_REFRESHER
     if (InterlockedOr(&free_frames_refresh_ongoing, TRUE) == TRUE) {
@@ -1093,14 +1094,23 @@ void faulter_refresh_free_frames() {
 }
 
 
-
 /**
- * To be called by the faulting thread when the number of pages left in the standby cache is low 
+ * Determines whether or not a faulter should refresh the zero and free lists with pages from the standby list using pre-defined macros 
+ * and the total amount of available pages compared to the total number of physical pages
  * 
- * Pops many pages off the standby list to be added onto the cache for quicker access
+ * In the future, this would be made more dynamic (perhaps based moreso on the rate of page usage, where they're being used, etc - rather than simple macros)
  */
-void faulter_refresh_standby_cache() {
-    return;
+void potential_faulter_list_refresh() {
+    if (standby_list->list_length > physical_page_count / STANDBY_LIST_REFRESH_PROPORTION) {
+        if (free_frames->total_available + zero_lists->total_available < physical_page_count / TOTAL_ZERO_AND_FREE_LIST_REFRESH_PROPORTION) {
+            faulter_refresh_free_and_zero_lists();
+        } 
+        #if 1
+        else if (free_frames->total_available < physical_page_count / FREE_LIST_REFRESH_PROPORTION) {
+            faulter_refresh_free_frames();
+        }
+        #endif
+    }
 }
 
 
@@ -1178,6 +1188,334 @@ ULONG64 standby_pop_batch(PAGE** page_storage, ULONG64 batch_size) {
 }
 
 
+/**
+ * Tries to find an available page from the zero lists, free lists, or standby. If found,
+ * returns a pointer to the page. Otherwise, returns NULL. If zero_page_preferred is TRUE,
+ * we will search the zero lists first - otherwise, we search the free list first. Both are preferable to standby.
+ * 
+ * If there are no available pages, the trimming thread is signaled and the modified writing thread is signaled if appropriate.
+ * The calling thread will wait for a signal for available pages before returning NULL
+ */
+PAGE* find_available_page(BOOL zeroed_page_preferred) {
+
+    PAGE* allocated_page;
+    BOOL zero_first;
+
+    
+    // Since disk reads overwrite page contents, we do not need zeroed out pages.
+    // and we would rather them be saved for accesses that do need zeroed pages
+    if (zeroed_page_preferred == FALSE || free_frames->total_available < REDUCE_FREE_LIST_PRESSURE_AMOUNT) {
+        zero_first = FALSE;
+    } else {
+        zero_first = TRUE;
+    }
+
+    if (zero_first) {
+        // If we succeed on the zeroed list, this is the best case scenario as we don't have to do anything else
+        if ((allocated_page = allocate_zeroed_frame()) != NULL) {
+
+            return allocated_page;
+        }
+
+        // If we succeed on the free list, we may still have to zero out the frame later
+        if ((allocated_page = allocate_free_frame()) != NULL) {
+
+            #if DEBUG_PAGELOCK
+            custom_spin_assert(allocated_page->holding_threadid == GetCurrentThreadId());
+            #endif
+            return allocated_page;
+        }
+    } else {
+        // In this case - we don't need the pages to be zeroed already - so the free list is fine
+        if ((allocated_page = allocate_free_frame()) != NULL) {
+
+            #if DEBUG_PAGELOCK
+            custom_spin_assert(allocated_page->holding_threadid == GetCurrentThreadId());
+            #endif
+            return allocated_page;
+        }
+
+        // We still prefer the faster access to the zeroed list than anything on standby
+        if ((allocated_page = allocate_zeroed_frame()) != NULL) {
+
+            return allocated_page;
+        }
+    }
+
+
+    /**
+     * Now we have to try to get a page from the standby list
+     */
+    if ((allocated_page = standby_pop_page(standby_list)) == NULL) {
+        ResetEvent(waiting_for_pages_event);
+
+        SetEvent(trimming_event);
+
+        if (modified_list->list_length > 0) {
+            SetEvent(modified_to_standby_event);
+        }
+
+        WaitForSingleObject(waiting_for_pages_event, INFINITE);
+
+        return NULL;
+    }
+
+
+    #if DEBUG_PAGELOCK
+    custom_spin_assert(allocated_page->holding_threadid == GetCurrentThreadId());
+    #endif
+
+    // The pagelock is acquired in standby_pop_page
+    return allocated_page;
+}
+
+
+/**
+ * Tries to find num_pages pages across the zeroed/free/standby lists. 
+ * If zeroed_pages_preferred is TRUE, we will search the zero list first. Otherwise, we search the free list first. 
+ * 
+ * Returns the number of pages written into the page_storage, if we find zero pages, we will wait for the signal for available pages
+ * and return 0
+ */
+ULONG64 find_batch_available_pages(BOOL zeroed_pages_preferred, PAGE** page_storage, ULONG64 num_pages) {
+    BOOL zero_first;
+    ULONG64 total_allocated_pages = 0;
+
+    
+    // Since disk reads overwrite page contents, we do not need zeroed out pages.
+    // and we would rather them be saved for accesses that do need zeroed pages
+    if (zeroed_pages_preferred == FALSE || free_frames->total_available < REDUCE_FREE_LIST_PRESSURE_AMOUNT) {
+        zero_first = FALSE;
+    } else {
+        zero_first = TRUE;
+    }
+
+    // Look in the zero lists first
+    if (zero_first) {
+        total_allocated_pages += allocate_batch_zeroed_frames(page_storage, num_pages);
+
+        // If we have enough pages, we can return now
+        if (total_allocated_pages == num_pages) {
+            return num_pages;
+        }
+
+        total_allocated_pages += allocate_batch_free_frames(&page_storage[total_allocated_pages], num_pages - total_allocated_pages);
+
+        if (total_allocated_pages == num_pages) {
+            return num_pages;
+        }
+
+    } else {
+        total_allocated_pages += allocate_batch_free_frames(page_storage, num_pages);
+
+        if (total_allocated_pages == num_pages) {
+            return num_pages;
+        }
+
+        total_allocated_pages += allocate_batch_zeroed_frames(&page_storage[total_allocated_pages], num_pages - total_allocated_pages);
+
+        if (total_allocated_pages == num_pages) {
+            return num_pages;
+        }
+    }
+
+    // At this point, we need to take pages from the standby list
+    total_allocated_pages += standby_pop_batch(&page_storage[total_allocated_pages], num_pages - total_allocated_pages);
+
+    // We failed to get pages from any of the lists
+    if (total_allocated_pages == 0) {
+        ResetEvent(waiting_for_pages_event);
+
+        SetEvent(trimming_event);
+
+        if (modified_list->list_length > 0) {
+            SetEvent(modified_to_standby_event);
+        }
+
+        WaitForSingleObject(waiting_for_pages_event, INFINITE);
+
+        return 0;
+    }
+
+    return total_allocated_pages;
+}
+
+
+/**
+ * Rescues the given page from the modified or standby list, if it is in either. 
+ * 
+ * Assumes the pagelock was acquired beforehand.
+ * 
+ * Returns SUCCESS if the page is rescued, ERROR otherwise
+ */
+int rescue_page(PAGE* page) {
+
+    if (page_is_modified(*page)) {
+        if (modified_rescue_page(page) == ERROR) {
+            return ERROR;
+        }
+        custom_spin_assert(page->page_lock == PAGE_LOCKED);
+        custom_spin_assert(page->status == MODIFIED_STATUS);
+        return SUCCESS;
+    }
+
+    if (page_is_standby(*page)) {
+        if (standby_rescue_page(page) == ERROR) {
+            return ERROR;
+        }
+        custom_spin_assert(page->page_lock == PAGE_LOCKED);
+        custom_spin_assert(page->status == STANDBY_STATUS);
+        return SUCCESS;
+    }
+
+    return ERROR;
+}
+
+
+/**
+ * Rescues the given page from the modified list, if it can be found
+ * 
+ * Returns SUCCESS if the rescue page was found and removed, ERROR otherwise
+ */
+int modified_rescue_page(PAGE* page) {
+    // The page is not in the modified list, but is instead being written to disk, but we can still take it
+    if (page->writing_to_disk == PAGE_BEING_WRITTEN && page->modified == PAGE_NOT_MODIFIED) {
+        #if DEBUG_LISTS
+        custom_spin_assert(page->frame_listnode->listhead_ptr == NULL);
+        #endif
+        return SUCCESS;
+    }
+
+    EnterCriticalSection(&modified_list->lock);
+
+    if (db_remove_from_middle(modified_list->listhead, page->frame_listnode) == ERROR) {
+        LeaveCriticalSection(&modified_list->lock);
+        DebugBreak();
+        return ERROR;
+    }
+
+    modified_list->list_length--;
+
+    LeaveCriticalSection(&modified_list->lock);
+
+    return SUCCESS;
+}
+
+
+/**
+ * Rescues the given page from the standby list, if it can be found
+ * 
+ * Returns SUCCESS if the rescue page was found and removed, ERROR otherwise
+ */
+int standby_rescue_page(PAGE* page) {
+    EnterCriticalSection(&standby_list->lock);
+
+    if (db_remove_from_middle(standby_list->listhead, page->frame_listnode) == ERROR) {
+        LeaveCriticalSection(&standby_list->lock);
+        DebugBreak();
+        return ERROR;
+    }
+
+    standby_list->list_length--;
+    InterlockedDecrement64(&total_available_pages);
+
+    LeaveCriticalSection(&standby_list->lock);
+
+    return SUCCESS;
+}
+
+
+/**
+ * Returns the given page to its appropriate list after it is revealed we no longer need it
+ * 
+ * Assumes that we have the pagelock
+ */
+void release_unneeded_page(PAGE* page) {
+    if (page->status == STANDBY_STATUS) {
+        EnterCriticalSection(&standby_list->lock);
+
+        standby_add_page(page, standby_list);
+
+        InterlockedIncrement64(&total_available_pages);
+
+        LeaveCriticalSection(&standby_list->lock);
+    } else if (page->status == MODIFIED_STATUS) {
+       DebugBreak();
+    } else if (page->status == FREE_STATUS) {
+        free_frames_add(page);
+    } else if (page->status == ZERO_STATUS) {
+        zero_lists_add(page);
+    } else {
+        DebugBreak();
+    }
+
+    custom_spin_assert(page->page_lock == PAGE_LOCKED);
+    release_pagelock(page, 12);
+
+}
+
+
+/**
+ * Adds the given page to its proper slot in the zero list
+ */
+void zero_lists_add(PAGE* page) {
+    // Modulo operation based on the pfn to put it alongside other cache-colliding pages
+    int listhead_idx = page_to_pfn(page) % NUM_CACHE_SLOTS;
+
+    DB_LL_NODE* relevant_listhead = zero_lists->listheads[listhead_idx];
+
+    #ifdef DEBUG_CHECKING
+    int dbg_result;
+    if ((dbg_result = page_is_isolated(page)) != ISOLATED) {
+        DebugBreak();
+    }
+    #endif
+
+    EnterCriticalSection(&zero_lists->list_locks[listhead_idx]);
+
+    page->status = ZERO_STATUS;
+
+    db_insert_node_at_head(relevant_listhead, page->frame_listnode);
+    zero_lists->list_lengths[listhead_idx]++;
+    
+    InterlockedIncrement64(&total_available_pages);
+
+    InterlockedIncrement64(&zero_lists->total_available);
+
+    LeaveCriticalSection(&zero_lists->list_locks[listhead_idx]);
+}
+
+
+/**
+ * Adds the given page to its proper slot in the free list
+ */
+void free_frames_add(PAGE* page) {
+    // Modulo operation based on the pfn to put it alongside other cache-colliding pages
+    int listhead_idx = page_to_pfn(page) % NUM_CACHE_SLOTS;
+
+    DB_LL_NODE* relevant_listhead = free_frames->listheads[listhead_idx];
+
+    #ifdef DEBUG_CHECKING
+    int dbg_result;
+    if ((dbg_result = page_is_isolated(page)) != ISOLATED) {
+        DebugBreak();
+    }
+    #endif
+
+    EnterCriticalSection(&free_frames->list_locks[listhead_idx]);
+
+    page->status = FREE_STATUS;
+
+    db_insert_node_at_head(relevant_listhead, page->frame_listnode);
+    free_frames->list_lengths[listhead_idx]++;
+    
+    InterlockedIncrement64(&total_available_pages);
+
+    InterlockedIncrement64(&free_frames->total_available);
+
+    LeaveCriticalSection(&free_frames->list_locks[listhead_idx]);
+}
+
 
 /**
  * Spins until the pagelock for the given page can be acquired and returns
@@ -1199,6 +1537,9 @@ void acquire_pagelock(PAGE* page, ULONG64 origin_code) {
         #if LIGHT_DEBUG_PAGELOCK
         if (old_lock_status == PAGE_UNLOCKED) {
             page->holding_threadid = GetCurrentThreadId();
+            page->five_ago = page->four_ago;
+            page->four_ago = page->three_ago;
+            page->three_ago = page->two_ago;
             page->two_ago = page->prev_code;
             page->prev_code = page->origin_code;
             page->origin_code = origin_code;
@@ -1231,6 +1572,9 @@ void release_pagelock(PAGE* page, ULONG64 origin_code) {
         DebugBreak();
     }
     page->holding_threadid = 0;
+    page->five_ago = page->four_ago;
+    page->four_ago = page->three_ago;
+    page->three_ago = page->two_ago;
     page->two_ago = page->prev_code;
     page->prev_code = page->origin_code;
     page->origin_code = origin_code;
@@ -1263,6 +1607,9 @@ BOOL try_acquire_pagelock(PAGE* page, ULONG64 origin_code) {
     #if LIGHT_DEBUG_PAGELOCK
     if (InterlockedCompareExchange(&page->page_lock, PAGE_LOCKED, PAGE_UNLOCKED) == PAGE_UNLOCKED) {
         page->holding_threadid = GetCurrentThreadId();
+        page->five_ago = page->four_ago;
+        page->four_ago = page->three_ago;
+        page->three_ago = page->two_ago;
         page->two_ago = page->prev_code;
         page->prev_code = page->origin_code;
         page->origin_code = origin_code;

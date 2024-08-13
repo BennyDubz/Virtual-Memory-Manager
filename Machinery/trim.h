@@ -51,6 +51,17 @@ int connect_pte_to_page(PTE* pte, PAGE* open_page, ULONG64 access_type);
 
 
 /**
+ * Connects the list of given PTEs to their corresponding pages, and modifies all the PTEs to be
+ * in valid format. Assumes all PTEs are in the same PTE locksection
+ * 
+ * Sets the PTEs permission bits depending on whether or not they have preservable pagefile space and the type of access of the fault
+ * 
+ * Returns SUCCESS if there are no issues, ERROR otherwise 
+ */
+int connect_batch_ptes_to_pages(PTE** ptes_to_connect, PTE* original_accessed_pte, PAGE** pages, ULONG64 access_type, ULONG64 num_ptes);
+
+
+/**
  * Disconnects the PTE from the CPU, but **does not** change the PTE structure
  * as this may be used for both disk and transition format PTEs
  */

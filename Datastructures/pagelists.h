@@ -9,7 +9,7 @@
 
 // If this is 1, then we will use normal critical sections instead of just the bit
 #define DEBUG_PAGELOCK 0
-#define LIGHT_DEBUG_PAGELOCK 0
+#define LIGHT_DEBUG_PAGELOCK 1
 
 #include <windows.h>
 #include "../hardware.h"
@@ -65,9 +65,14 @@ typedef struct {
 
     #elif LIGHT_DEBUG_PAGELOCK
     ULONG64 holding_threadid;
+    PTE acquiring_pte_copy;
+    ULONG64 acquiring_access_type;
     ULONG64 origin_code;
     ULONG64 prev_code;
     ULONG64 two_ago;
+    ULONG64 three_ago;
+    ULONG64 four_ago;
+    ULONG64 five_ago;
     #endif
     DB_LL_NODE* frame_listnode;
 } PAGE;

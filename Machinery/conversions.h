@@ -19,6 +19,12 @@ PTE* va_to_pte(PULONG_PTR virtual_address);
 
 
 /**
+ * Returns the index of the PTE in the pagetable based off its address
+ */
+ULONG64 pte_to_pagetable_idx(PTE* pte);
+
+
+/**
  * Returns the base virtual address associated with the given PTE, or NULL otherwise
  * 
  */

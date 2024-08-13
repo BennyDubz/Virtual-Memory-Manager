@@ -13,6 +13,7 @@
 #include "../hardware.h"
 
 
+
 /**
  * Given a virtual address, return the relevant PTE from the pagetable
  * 
@@ -36,6 +37,23 @@ PTE* va_to_pte(PULONG_PTR virtual_address) {
 
 
 /**
+ * Returns the index of the PTE in the pagetable based off its address
+ */
+ULONG64 pte_to_pagetable_idx(PTE* pte) {
+    if (pte == NULL) {
+        fprintf(stderr, "NULL PTE given to pte_to_va");
+        return NULL;
+    }
+
+    ULONG64 base_address_pte_list = (ULONG64) pagetable->pte_list;
+    ULONG64 pte_address = (ULONG64) pte;
+
+    return (ULONG64) ((pte_address - base_address_pte_list) / sizeof(PTE));
+
+}
+
+
+/**
  * Returns the base virtual address associated with the given PTE, or NULL otherwise
  * 
  */
@@ -45,7 +63,6 @@ PULONG_PTR pte_to_va(PTE* pte) {
         return NULL;
     }
 
-    //BW: Implement additional safety checks
     ULONG64 base_address_pte_list = (ULONG64) pagetable->pte_list;
     ULONG64 pte_address = (ULONG64) pte;
 
@@ -108,7 +125,10 @@ ULONG64 page_to_pfn(PAGE* page) {
  */
 PULONG_PTR disk_idx_to_addr(ULONG64 disk_idx) {
     if (disk_idx > DISK_STORAGE_SLOTS) {
-        fprintf(stderr, "NULL diskbase or invalid disk_idx given to disk_idx_to_addr\n");
+        fprintf(stderr, "Invalid disk_idx given to disk_idx_to_addr\n");
+        for (ULONG64 i = 0; i < 0xFFFFFFFFFFFFFFFF; i++) {
+
+        }
         return NULL;
     }
     
@@ -147,7 +167,8 @@ CRITICAL_SECTION* disk_idx_to_lock(ULONG64 disk_idx) {
         return NULL;
     }
 
-    ULONG64 lock_index = disk_idx / (DISK_STORAGE_SLOTS / disk->num_locks);
+    //ULONG64 lock_index = disk_idx / (DISK_STORAGE_SLOTS / disk->num_locks);
+    ULONG64 lock_index = disk_idx / (disk->slots_per_lock);
 
     return &disk->disk_slot_locks[lock_index];
 }

@@ -28,9 +28,9 @@
 /**
  * CONVERSION MACROS
  */
-#define KB(x) (x * 1024)
+#define KB(x) (((ULONG64) x) * 1024)
 
-#define MB(x) (x * 1024 * 1024)
+#define MB(x) (((ULONG64) x) * KB(1024))
 
-#define GB(x) (x * 1024 * 1024 * 1024)
+#define GB(x) (((ULONG64) x) * MB(1024))
 

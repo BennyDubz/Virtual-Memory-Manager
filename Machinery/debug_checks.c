@@ -12,6 +12,7 @@
 #include "./conversions.h"
 #include "./debug_checks.h"
 
+void custom_spin_assert(BOOL expression);
 
 
 /**
@@ -217,10 +218,15 @@ void debug_break_all_va_info(PULONG_PTR arbitrary_va) {
         disk_idx = relevant_page->pagefile_idx;
     }
 
-    DebugBreak();
+    acquire_pagelock(relevant_page, 0xFFFFFF);
+
+    custom_spin_assert(FALSE);
 }
 
 
+/**
+ * A spinning debugbreak specific to the disk index checking
+ */
 static void singly_allocated_disk_idx_debugbreak(ULONG64 disk_idx, PTE* found_pte, PTE* curr_pte, PAGE* found_page, PAGE* curr_page) {
     PULONG_PTR disk_slot_addr = disk_idx_to_addr(disk_idx);
 
@@ -228,7 +234,15 @@ static void singly_allocated_disk_idx_debugbreak(ULONG64 disk_idx, PTE* found_pt
 
     PULONG_PTR curr_pte_va = pte_to_va(curr_pte);
 
-    DebugBreak();
+    if (curr_page != NULL) {
+        acquire_pagelock(curr_page, 0xAAAAAA);
+    } 
+
+    if (found_page != NULL) {
+        acquire_pagelock(found_page, 0xBBBBBB);
+    }
+
+    custom_spin_assert(FALSE);
 }
 
 
@@ -290,7 +304,7 @@ void singly_allocated_disk_idx_check(ULONG64 disk_idx) {
         }
     }
 
-    if (found_pte == NULL) DebugBreak();
+    // if (found_pte == NULL) DebugBreak();
 }
 
 

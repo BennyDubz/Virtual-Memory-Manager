@@ -19,7 +19,7 @@
  * Returns a pointer to a list of PTEs with num_physical_frames entries, or NULL upon an error
  */
 PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base) {
-    printf("Number of virtual pages: %llX\n", num_virtual_pages);
+    printf("Num virtual pages: 0x%llX\n", num_virtual_pages);
     
     PAGETABLE* pagetable = (PAGETABLE*) malloc(sizeof(PAGETABLE));
 

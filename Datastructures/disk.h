@@ -13,8 +13,8 @@
 #include <windows.h>
 
 #define DISK_STORAGE_SLOTS (DISK_SIZE / PAGE_SIZE)
-#define DISK_WRITE_SLOTS 8
-#define DISK_READ_SLOTS 512
+
+#define DISK_READ_SLOTS     max(DISK_STORAGE_SLOTS >> 8, 256)
 #define DISK_REFRESH_BOUNDARY (DISK_READ_SLOTS / 2)
 
 #define DISK_READ_OPEN 0
@@ -22,7 +22,10 @@
 #define DISK_READ_NEEDS_FLUSH 2 // We will clear all of these slots to 0 simultaneously
 
 // For the large disk write slot
-#define MAX_PAGES_WRITABLE  KB(16)
+#define MAX_PAGES_WRITABLE      max(DISK_STORAGE_SLOTS >> 6, 512)
+
+// The maximum number of pages readable from a single thread
+#define MAX_PAGES_READABLE      16
 
 
 #define DISK_USEDSLOT 0
@@ -57,6 +60,7 @@ typedef struct {
 
     CRITICAL_SECTION* disk_slot_locks;
     ULONG64 num_locks;
+    ULONG64 slots_per_lock;
     ULONG64* open_slot_counts;
     volatile ULONG64 total_available_slots;
 

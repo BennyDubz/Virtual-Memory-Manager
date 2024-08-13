@@ -7,18 +7,69 @@
 
 #define NUM_FAULTER_ZERO_SLOTS 256
 
-#define NUM_THREAD_ZERO_SLOTS 1024
+#define NUM_THREAD_ZERO_SLOTS   (NUM_CACHE_SLOTS * 4)
 
+
+/**
+ * These are for the page zeroing thread's structures
+ */
 #define PAGE_SLOT_OPEN 0
 #define PAGE_SLOT_CLAIMED 1
 #define PAGE_SLOT_READY 2
 
-
+/**
+ * These are for faulters zeroing out pages themselves
+ */
 #define ZERO_SLOT_OPEN 0
 #define ZERO_SLOT_USED 1
 #define ZERO_SLOT_NEEDS_FLUSH 2
 
+
+/**
+ * These are proportions of the total number of available pages that help determine whether or not we 
+ * take pages from the standby list to add to the free and zero lists
+ */
+
+// If (number of physical pages) / STANDBY_LIST_REFRESH_PROPORTION is more than the total amount of available pages, we will allow threads
+// to take pages from the standby list
+#define STANDBY_LIST_REFRESH_PROPORTION 10
+
+// If (number of physical pages) / TOTAL_ZERO_AND_FREE_LIST_REFRESH_PROPORTION is more than the total amount of pages in the free and zero lists (and we have enough pages in standby),
+// we will refresh both the free and zero lists with pages
+#define TOTAL_ZERO_AND_FREE_LIST_REFRESH_PROPORTION 20
+
+// If (number of physical pages) / TOTAL_ZERO_AND_FREE_LIST_REFRESH_PROPORTION is more than the total amount of pages in the free lists (and we have enough pages in standby),
+// we will refresh the free lists with pages. We also have this one as with many disk reads, the demand for free frames is very high and we do not need to unnecessarily zero out pages
+#define FREE_LIST_REFRESH_PROPORTION 25
+
+
+/** 
+ * These determine the number of pages we take off the standby list to add to the zero/free lists when we are refreshing the lists
+ */
+#define NUM_PAGES_FAULTER_REFRESH   NUM_CACHE_SLOTS * 6
+
+// When refreshing both the free and zero lists, this proportion goes to the free lists
+#define FREE_FRAMES_PORTION   NUM_PAGES_FAULTER_REFRESH / 2
+
+// Whether or not only a single thread can refresh these lists at once. Currently experimenting with this as multiple refreshing threads might just create
+// standby list-lock contention and overall slow things down. However, if we had a large amount of threads, they might overwhelm the refreshing
+#define ONLY_ONE_REFRESHER 1
+
+/**
+ * Rather than search through every single cache-color / list section of the free/zero lists, we bail after a certain number of attempts to avoid large linear walks
+ * when these lists are sparse. After this many attempts, we will opt to try looking for pages in a different list
+ */
+#define MAX_ATTEMPTS_FREE_OR_ZERO_LISTS    max(NUM_CACHE_SLOTS / 10, 1)
+
+/**
+ * When looking for available pages without any preference for zeroed pages, 
+ * we might opt to instead search the zero-list first anyway if there are not a lot of pages on the free list.
+ * This helps us potentially reduce contention on the free list
+ */
+#define REDUCE_FREE_LIST_PRESSURE_AMOUNT    NUM_CACHE_SLOTS * 4
+
 #include "../Datastructures/datastructures.h"
+#include "../hardware.h"
 
 #ifndef PAGE_ZEROING_STRUCT_T
 #define PAGE_ZEROING_STRUCT_T
@@ -101,11 +152,12 @@ void faulter_refresh_free_and_zero_lists();
 
 
 /**
- * To be called when a faulter needs to only refresh the free frames list, and not the zero list
+ * Determines whether or not a faulter should refresh the zero and free lists with pages from the standby list using pre-defined macros 
+ * and the total amount of available pages compared to the total number of physical pages
  * 
- * This helps us reduce contention on the free list
+ * In the future, this would be made more dynamic (perhaps based moreso on the rate of page usage, where they're being used, etc - rather than simple macros)
  */
-void faulter_refresh_free_frames();
+void potential_faulter_list_refresh();
 
 
 /**
@@ -122,6 +174,73 @@ PAGE* standby_pop_page();
  * Writes the pages' pointers into page_storage
  */
 ULONG64 standby_pop_batch(PAGE** page_storage, ULONG64 batch_size);
+
+
+/**
+ * Tries to find an available page from the zero lists, free lists, or standby. If found,
+ * returns a pointer to the page. Otherwise, returns NULL. If zero_page_preferred is TRUE,
+ * we will search the zero lists first - otherwise, we search the free list first. Both are preferable to standby.
+ * 
+ * If there are no available pages, the trimming thread is signaled and the modified writing thread is signaled if appropriate.
+ * The calling thread will wait for a signal for available pages before returning NULL
+ */
+PAGE* find_available_page(BOOL zeroed_page_preferred);
+
+
+/**
+ * Tries to find num_pages pages across the zeroed/free/standby lists. 
+ * If zeroed_pages_preferred is TRUE, we will search the zero list first. Otherwise, we search the free list first. 
+ * 
+ * Returns the number of pages written into the page_storage, if we find zero pages, we will wait for the signal for available pages
+ * and return 0
+ */
+ULONG64 find_batch_available_pages(BOOL zeroed_pages_preferred, PAGE** page_storage, ULONG64 num_pages);
+
+
+/**
+ * Rescues the given page from the modified or standby list, if it is in either. 
+ * 
+ * Assumes the pagelock was acquired beforehand.
+ * 
+ * Returns SUCCESS if the page is rescued, ERROR otherwise
+ */
+int rescue_page(PAGE* page);
+
+
+/**
+ * Rescues the given page from the modified list, if it can be found
+ * 
+ * Returns SUCCESS if the rescue page was found and removed if applicable, ERROR otherwise
+ */
+int modified_rescue_page(PAGE* page);
+
+
+/**
+ * Rescues the given page from the standby list, if it can be found
+ * 
+ * Returns SUCCESS if the rescue page was found and removed, ERROR otherwise
+ */
+int standby_rescue_page(PAGE* page);
+
+
+/**
+ * Returns the given page to its appropriate list after it is revealed we no longer need it
+ * 
+ * Assumes that we have the pagelock for the given page, and releases it at the end of the function
+ */
+void release_unneeded_page(PAGE* page);
+
+
+/**
+ * Adds the given page to its proper slot in the zero list
+ */
+void zero_lists_add(PAGE* page);
+
+
+/**
+ * Adds the given page to its proper slot in the free list
+ */
+void free_frames_add(PAGE* page);
 
 
 /**

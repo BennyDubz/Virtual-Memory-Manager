@@ -12,16 +12,16 @@
 #include "./Machinery/debug_checks.h"
 
 
-#define NUM_USERMODE_THREADS        8
+#define NUM_USERMODE_THREADS        ((ULONG64) (12))
 #define MAX_CONSECUTIVE_ACCESSES    64
-#define TOTAL_ACCESS_AMOUNT         MB(5)
+#define TOTAL_ACCESS_AMOUNT         (MB(10))
 
 /**
  * Reads are more common in the real world - if (random_number % WRITE_PROBABILITY_MODULO == 0) then we write to the address
  * This allows us to properly demonstrate how the fault handler distinguishes reads and writes, and how we
  * take advantage of using READONLY permissions to preserve pagefile space and therefore speed up trimming and improve page availability
  */
-#define WRITE_PROBABILITY_MODULO  5
+#define WRITE_PROBABILITY_MODULO  10
 
 HANDLE simulation_threads[NUM_USERMODE_THREADS];
 HANDLE thread_start_event;
@@ -56,6 +56,7 @@ void usermode_virtual_memory_simulation () {
         return;
     }
 
+
     ULONG64 virtual_address_size_in_unsigned_chunks = virtual_address_size / sizeof(ULONG_PTR);
 
     SIM_PARAMS thread_params[NUM_USERMODE_THREADS];
@@ -83,6 +84,8 @@ void usermode_virtual_memory_simulation () {
     #ifdef LENIENT_DISK
     printf("No simulated disk slowdown: lenient disk is on\n");
     #endif
+
+    printf("0x%llx threads will perform a total of 0x%llX accesses\n",(ULONG64) NUM_USERMODE_THREADS, (ULONG64) TOTAL_ACCESS_AMOUNT);
 
     // Initialize fault failure tracking array
     for (int i = 0; i < NUM_FAULT_RETURN_VALS; i++) {
@@ -120,17 +123,17 @@ void usermode_virtual_memory_simulation () {
 
     timer = clock() - timer;
     double time_taken = (double) (timer) / CLOCKS_PER_SEC;
-    printf("usermode_virtual_memory_simulation : finished accessing %d random virtual addresses over %d threads\n", TOTAL_ACCESS_AMOUNT, NUM_USERMODE_THREADS);
-    printf("usermode_virtual_memory_simulation : total of %lld fault failures\n", total_fault_failures);
+    printf("usermode_virtual_memory_simulation : finished accessing 0x%llX random virtual addresses over 0x%llx threads\n", TOTAL_ACCESS_AMOUNT, NUM_USERMODE_THREADS);
+    printf("usermode_virtual_memory_simulation : total of 0x%llX fault failures\n", total_fault_failures);
     printf("usermode_virtual_memory_simulation : total time was %f seconds\n", time_taken);
     printf("usermode_virtual_memory_simulation : fault breakdown:\n");
 
-    printf("\tSuccessful faults: %lld\n", fault_results[SUCCESSFUL_FAULT]);
-    printf("\tFailures due to rejection (invalid address): %lld\n", fault_results[REJECTION_FAIL]);
-    printf("\tFailures due to lack of available pages: %lld\n", fault_results[NO_AVAILABLE_PAGES_FAIL]);
-    printf("\tFailures due to failed rescues of transition PTEs: %lld\n", fault_results[RESCUE_FAIL]);
-    printf("\tFailures due to disk waiting: %lld\n", fault_results[DISK_FAIL]);
-    printf("\tFailures due to races between user threads: %lld\n", fault_results[RACE_CONDITION_FAIL]);
+    printf("\tSuccessful faults: 0x%llX\n", fault_results[SUCCESSFUL_FAULT]);
+    printf("\tFailures due to rejection (invalid address): 0x%llX\n", fault_results[REJECTION_FAIL]);
+    printf("\tFailures due to lack of available pages: 0x%llX\n", fault_results[NO_AVAILABLE_PAGES_FAIL]);
+    printf("\tFailures due to failed rescues of transition PTEs: 0x%llX\n", fault_results[RESCUE_FAIL]);
+    printf("\tFailures due to disk waiting: 0x%llX\n", fault_results[DISK_FAIL]);
+    printf("\tFailures due to races between user threads: 0x%llX\n", fault_results[RACE_CONDITION_FAIL]);
 
     //
     // Now that we're done with our memory we can be a good
@@ -173,7 +176,6 @@ int thread_access_random_addresses(void* params) {
 
     WaitForSingleObject(thread_start_event, INFINITE);
 
-    printf("Thread starting \n");
     for (i = 0; i < TOTAL_ACCESS_AMOUNT / NUM_USERMODE_THREADS; i += 1) {
 
         if (consecutive_accesses == 0) {
@@ -219,6 +221,7 @@ int thread_access_random_addresses(void* params) {
                 if (ReadTimeStampCounter() % WRITE_PROBABILITY_MODULO == 0) {
                     access_type = WRITE_ACCESS;
                     *arbitrary_va = (ULONG_PTR) arbitrary_va;
+                    InterlockedDecrement64(&remaining_writable_addresses);
                 }
             } else if((ULONG_PTR) *arbitrary_va != (ULONG_PTR) arbitrary_va) {
                 debug_break_all_va_info(arbitrary_va);

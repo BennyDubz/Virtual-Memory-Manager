@@ -39,6 +39,7 @@ typedef struct {
     ULONG64 protections:2;
 } VALID_PTE;
 
+
 /**
  * For frames that are currently invalid, and is on the disk. It is already being used by another process 
  * and is not rescuable. We need to fetch it from the disk at the pagefile address in order to access this VA again
@@ -80,7 +81,7 @@ typedef struct {
 
 typedef struct {
     CRITICAL_SECTION lock;
-    ULONG64 valid_pte_count;
+    volatile ULONG64 valid_pte_count;
     ULONG64 locksection_idx;
 } PTE_LOCKSECTION;
 
