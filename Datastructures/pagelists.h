@@ -9,7 +9,7 @@
 
 // If this is 1, then we will use normal critical sections instead of just the bit
 #define DEBUG_PAGELOCK 0
-#define LIGHT_DEBUG_PAGELOCK 1
+#define LIGHT_DEBUG_PAGELOCK 0
 
 #include <windows.h>
 #include "../hardware.h"
@@ -126,6 +126,7 @@ BOOL page_is_modified(PAGE page);
  */
 BOOL page_is_standby(PAGE page);
 
+
 /**
  * #######################################
  * ZEROED PAGES LIST STRUCTS AND FUNCTIONS
@@ -165,11 +166,13 @@ typedef struct {
  */
 ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR physical_frame_numbers, ULONG64 num_physical_frames);
 
+
 /**
  * ######################################
  * FREE FRAMES LIST STRUCTS AND FUNCTIONS
  * ######################################
  */
+
 
 #ifndef FREE_FRAMES_T
 #define FREE_FRAMES_T
@@ -179,7 +182,6 @@ ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR 
 typedef struct {
     DB_LL_NODE* listheads[NUM_CACHE_SLOTS];
 
-    // BW: Note the potential for race conditions keeping track of this!  
     volatile ULONG64 list_lengths[NUM_CACHE_SLOTS]; 
     volatile ULONG64 total_available;
 
@@ -269,9 +271,5 @@ STANDBY_LIST* initialize_standby_list();
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
 int standby_add_page(PAGE* page, STANDBY_LIST* standby_list);
-
-
-// Standby_pop_page requires access to other PTEs, and therefore the global pagetable, so it is not in
-// this header.
 
 #endif

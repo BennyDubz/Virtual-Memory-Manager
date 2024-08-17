@@ -18,7 +18,6 @@
 #define PTE_PROTWRITE 2
 #define PTE_PROTREADWRITE  PTE_PROTREAD | PTE_PROTWRITE
 
-
 /**
  * Influences disk reads by allowing us to "lock" a disk PTE until we are finished reading it from the disk 
  * Prevents unnecessesary disk reads and reduces PTE lock contention
@@ -77,25 +76,22 @@ typedef struct {
 #ifndef PAGETABLE_T
 #define PAGETABLE_T
 
-// #define PAGETABLE_NUMLOCKS ((VIRTUAL_ADDRESS_SIZE / PAGE_SIZE) >> 8)
-
 typedef struct {
     CRITICAL_SECTION lock;
     volatile ULONG64 valid_pte_count;
     ULONG64 locksection_idx;
 } PTE_LOCKSECTION;
 
+
 typedef struct {
     PTE* pte_list;
     ULONG64 num_virtual_pages;
+
     // To allow calculations from PTEs to virtual addresses and vice verca
     ULONG64 vmem_base;
-
     ULONG64 num_locks;
     PTE_LOCKSECTION* pte_locksections;
-    // CRITICAL_SECTION* pte_locks;
-    // volatile ULONG64* valid_pte_counts;
-    // LOCK
+
 } PAGETABLE;
 
 #define MAX_AGE (1 << 4) - 1
@@ -105,7 +101,7 @@ typedef struct {
 #endif
 
 /**
- * Initializes the pagetable with all VALID_PTE entries, but all have the valid bit set to 0
+ * Initializes the pagetable with empty PTE entries
  * 
  * Returns a pointer to a pagetable containing all invalid PTEs ready for assignment
  */

@@ -35,7 +35,7 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
 
 static int handle_unaccessed_pte_fault(PTE local_pte, PAGE** result_page_storage);
 
-static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result_page_storage);
+static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result_page_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage);
 
 static BOOL acquire_disk_pte_read_rights(PTE* accessed_pte, PTE local_pte);
 
@@ -120,12 +120,16 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
 
     } else if (is_transition_format(local_pte)) {
 
-        if ((handler_result = handle_transition_pte_fault(local_pte, accessed_pte, allocated_pages)) != SUCCESS) {
+        if ((handler_result = handle_transition_pte_fault(local_pte, accessed_pte, allocated_pages, ptes_to_connect, &num_ptes_to_connect)) != SUCCESS) {
             return handler_result;
         }
 
+        custom_spin_assert(is_transition_format(*ptes_to_connect[0]));
+
+        #if 0
         ptes_to_connect[0] = accessed_pte;
         num_ptes_to_connect = 1;
+        #endif
 
     } else if (is_disk_format(local_pte)) {
 
@@ -392,7 +396,7 @@ static int handle_unaccessed_pte_fault(PTE local_pte, PAGE** result_page_storage
  * 
  * Returns SUCCESS if there are no issues, or RESCUE_FAIL otherwise
  */
-static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result_page_storage) {
+static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result_page_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage) {
     ULONG64 pfn = local_pte.transition_format.frame_number;
 
     PAGE* page_to_rescue = pfn_to_page(pfn);
@@ -406,6 +410,108 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
         return RESCUE_FAIL;
     }
 
+    
+    ULONG64 trailing_count = get_trailing_valid_pte_count(accessed_pte);
+
+    ULONG64 num_to_speculate;
+
+    if (total_available_pages < physical_page_count / SPECULATIVE_PAGE_MINIMUM_PROPORTION) {
+        num_to_speculate = 0;
+    } else {
+        num_to_speculate = min(get_trailing_valid_pte_count(accessed_pte), MAX_PAGES_TRANSITION_RESCUE - 1);
+    }
+
+    ULONG64 accessed_pte_idx = pte_to_pagetable_idx(accessed_pte);
+    ULONG64 total_pages_acquired = 1;
+
+    PAGE* modified_rescues[MAX_PAGES_TRANSITION_RESCUE];
+    ULONG64 num_modifed_rescues = 0;
+    PAGE* standby_rescues[MAX_PAGES_TRANSITION_RESCUE];
+    ULONG64 num_standby_rescues = 0;
+
+    result_page_storage[0] = page_to_rescue;
+    ptes_to_connect_storage[0] = accessed_pte;
+
+    /**
+     * Find where our first, most important page, needs to go
+     */
+    if (page_to_rescue->status == MODIFIED_STATUS) {
+        modified_rescues[num_modifed_rescues] = page_to_rescue;
+        num_modifed_rescues++;
+    } else {
+        standby_rescues[num_standby_rescues] = page_to_rescue;
+        num_standby_rescues++;
+    }
+
+    /**
+     * If there are valid PTEs behind us and we are not at the end of our pagetable,
+     * then we can speculate on the PTEs ahead of us - and rescue other transition format PTEs
+     */
+    if (num_to_speculate > 0 && accessed_pte_idx < pagetable->num_virtual_pages - 1) {
+        PTE pte_copy;
+        PTE* curr_pte;
+        ULONG64 end_index = min(accessed_pte_idx + num_to_speculate, pagetable->num_virtual_pages - 1);
+        PAGE* possible_page;
+
+        for (ULONG64 speculative_pte_idx = accessed_pte_idx + 1; speculative_pte_idx < end_index; speculative_pte_idx++) {
+            curr_pte = &pagetable->pte_list[speculative_pte_idx];
+            pte_copy = read_pte_contents(curr_pte);
+
+            if (is_transition_format(pte_copy) == FALSE) {
+                continue;
+            } 
+
+            possible_page = pfn_to_page(pte_copy.transition_format.frame_number);
+
+            /**
+             * We don't want the faulting thread to have to wait an excessive amount of time for pagelocks
+             */
+            if (try_acquire_pagelock(possible_page, 37) == FALSE) {
+                continue;
+            }
+
+            /**
+             * We know the PTE cannot be in transition format anymore if the page is in neither of these statuses
+             */
+            if (possible_page->status != MODIFIED_STATUS && possible_page->status != STANDBY_STATUS) {
+                release_pagelock(possible_page, 38);
+                continue;
+            }
+
+            /**
+             * Finally, this addresses a race condition where the PTE was re-allocated to someone else, and then
+             * they were trimmed again - so this page is in the correct status, but no longer references the correct PTE
+             */
+            if (possible_page->pte != &pagetable->pte_list[speculative_pte_idx]) {
+                release_pagelock(possible_page, 39);
+                continue;
+            }
+
+            /**
+             * At this point, we can be certain that the PTE ahead of us is still in transition format and this is still
+             * the page that is connected to it. Now that we have the pagelock, we can now rescue it
+             */
+
+            result_page_storage[num_modifed_rescues + num_standby_rescues] = possible_page;
+            ptes_to_connect_storage[num_modifed_rescues + num_standby_rescues] = curr_pte;
+
+            if (possible_page->status == MODIFIED_STATUS) {
+                modified_rescues[num_modifed_rescues] = possible_page;
+                num_modifed_rescues ++;
+            } else {
+                standby_rescues[num_standby_rescues] = possible_page;
+                num_standby_rescues++;
+            }
+        }
+    }
+
+    rescue_batch_pages(modified_rescues, num_modifed_rescues, standby_rescues, num_standby_rescues);
+
+    *num_ptes_to_connect_storage = num_modifed_rescues + num_standby_rescues;
+
+    return SUCCESS;
+
+    #if 0
     // We now try to rescue the page from the modified or standby list
     if (rescue_page(page_to_rescue) == ERROR) {
         DebugBreak();
@@ -423,6 +529,7 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
     #endif
 
     return SUCCESS;    
+    #endif
 }
 
 #if 0
@@ -606,7 +713,7 @@ static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result
 
     ULONG64 num_pte_rights_to_acquire;
 
-    if (total_available_pages < physical_page_count / STANDBY_LIST_REFRESH_PROPORTION) {
+    if (total_available_pages < physical_page_count / SPECULATIVE_PAGE_MINIMUM_PROPORTION) {
         num_pte_rights_to_acquire = 1;
     } else {
         // Determine how many PTEs we might try to speculatively read from the disk, if we have available pages

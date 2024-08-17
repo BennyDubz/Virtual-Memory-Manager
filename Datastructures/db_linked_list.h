@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <windows.h>
 
-#define DEBUG_LISTS 1
+#define DEBUG_LISTS 0
 
 #ifndef DBLIST
 #define DBLIST

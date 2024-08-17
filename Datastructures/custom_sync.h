@@ -9,4 +9,7 @@
 
 #include <windows.h>
 
+/**
+ * We use this to initialize critical sections with high spincounts if we want
+ */
 void initialize_lock(CRITICAL_SECTION* critsec);

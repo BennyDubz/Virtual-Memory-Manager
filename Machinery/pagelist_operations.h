@@ -49,7 +49,7 @@
 /** 
  * These determine the number of pages we take off the standby list to add to the zero/free lists when we are refreshing the lists
  */
-#define NUM_PAGES_FAULTER_REFRESH   NUM_CACHE_SLOTS * 2
+#define NUM_PAGES_FAULTER_REFRESH   NUM_CACHE_SLOTS * 8
 
 // When refreshing both the free and zero lists, this proportion goes to the free lists
 #define FREE_FRAMES_PORTION   NUM_PAGES_FAULTER_REFRESH / 2
@@ -207,6 +207,15 @@ PAGE* find_available_page(BOOL zeroed_page_preferred);
  * Returns the number of pages written into the page_storage. We do not guarentee that we return any pages, and might return 0
  */
 ULONG64 find_batch_available_pages(BOOL zeroed_pages_preferred, PAGE** page_storage, ULONG64 num_pages);
+
+
+/**
+ * Rescues all of the pages from both the modified and standby lists
+ * 
+ * Assumes that all pages' pagelocks are acquired, and that the pre-sorted pages are in the appropriate lists
+ * with their correct statuses
+ */
+void rescue_batch_pages(PAGE** modified_rescues, ULONG64 num_modified_rescues, PAGE** standby_rescues, ULONG64 num_standby_rescues);
 
 
 /**

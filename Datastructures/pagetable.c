@@ -14,9 +14,9 @@
 #include "./custom_sync.h"
 
 /**
- * Initializes the pagetable with all VALID_PTE entries, but all have the valid bit set to 0
+ * Initializes the pagetable with empty PTE entries
  * 
- * Returns a pointer to a list of PTEs with num_physical_frames entries, or NULL upon an error
+ * Returns a pointer to a pagetable containing all invalid PTEs ready for assignment
  */
 PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base) {
     printf("Num virtual pages: 0x%llX\n", num_virtual_pages);

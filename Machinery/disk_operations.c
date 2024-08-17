@@ -322,8 +322,6 @@ int read_page_from_disk(PAGE* open_page, ULONG64 disk_idx) {
 
     ULONG64 disk_readsection;
 
-    DISK_RW_SLOT* read_slot;
-
     // Someone else likely beat us to freeing this disk slot
     if (disk->disk_slot_statuses[disk_idx] == DISK_FREESLOT) { 
         DebugBreak();

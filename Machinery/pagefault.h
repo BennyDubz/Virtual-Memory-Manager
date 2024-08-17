@@ -8,6 +8,8 @@
 #include "../macros.h"
 #include "../hardware.h"
 #include "../globals.h"
+#include "../Datastructures/datastructures.h"
+#include "./pagelist_operations.h"
 
 
 /**
@@ -33,6 +35,15 @@
 // There was a race condition that caused the fault to fail on a valid PTE -
 // it was likely trimmed or another thread faulted on the same PTE
 #define VALID_PTE_RACE_CONTIION_FAIL 7
+
+
+/**
+ * Other pagefault macros
+ */
+#define MAX_PAGES_TRANSITION_RESCUE     MAX_PAGES_READABLE
+
+// If we have less than (total physical pages / proportion) pages, we will resolve just the current fault and not speculate ahead
+#define SPECULATIVE_PAGE_MINIMUM_PROPORTION     STANDBY_LIST_REFRESH_PROPORTION
 
 
 /**

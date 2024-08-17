@@ -25,39 +25,44 @@
 
 #define DISK_REFRESH_BOUNDARY (DISK_READSECTIONS / 2)
 
+/**
+ * Rather than have a single page-sized virtual address for the disk reads, 
+ * we have a large one that we break into sections of (DISK_READSECTION_SIZE * PAGE_SIZE).
+ * 
+ * If the readsection is open, then its corresponding section of the large virtual address is unmapped.
+ * 
+ * If the readsection is used, then its corresponding section of the large virtual address is potentially mapped -
+ * but the using thread is not done with it yet
+ * 
+ * If the readsection needs to be flushed, the thread that used the address is finished with it. However, the
+ * address is still mapped and needs to be unmapped. However, this unmapping is expensive as we need to make
+ * another call to MapUserPhysicalPages. Therefore, we wait for many readsections to require being flushed before we
+ * clear them all at once - finally setting them to open.
+ */
 #define DISK_READSECTION_OPEN 0
 #define DISK_READSECTION_USED 1
-#define DISK_READSECTION_NEEDS_FLUSH 2 // We will clear all of these slots to 0 simultaneously
+#define DISK_READSECTION_NEEDS_FLUSH 2 
 
-// For the large disk write slot
+// This determines the size of the large write slot that the mod-writer uses
 #define MAX_PAGES_WRITABLE      max(DISK_STORAGE_SLOTS >> 4, 512)
 
+// For storage slots on the disk
 #define DISK_USEDSLOT 0
 #define DISK_FREESLOT 1
 
 #define DISK_IDX_NOTUSED 0
 
 
-
 #ifndef DISK_T
 #define DISK_T
-
-/**
- * We have these bundled as we must never have to reallocate memory for the listnode
- * after we first create it. The disk must work even if we later run out of memory and can
- * no longer malloc.
- */
-typedef struct {
-    PULONG_PTR rw_address;
-    DB_LL_NODE* listnode;
-} DISK_RW_SLOT;
-
 
 typedef struct {
     /**
      *  Since we cannot actually access the disk, we need to use some of the virtual memory of the process
      *  that is running the simulation. We will actually commit the memory so that the disk should always
      *  be able to be initialized at the beginning of the simulation
+     * 
+     * If we fail to malloc the amount of memory we need for the disk, then we do not run the simulation
      */
     PULONG_PTR base_address;
     UCHAR* disk_slot_statuses;
@@ -69,9 +74,10 @@ typedef struct {
     volatile ULONG64 total_available_slots;
 
     /**
-     * To support batched writing, we will have a special virtual address that can map in many physical pages
+     * This supports the batched writing of many pages to the disk from the mod-writer
      */
     PULONG_PTR disk_large_write_slot;
+
 
     /**
      * We maintain the disk read slots in their own array that we can use
@@ -87,8 +93,6 @@ typedef struct {
     // We use interlocked operations to help reduce the amount of linear searching that threads will have to do
     volatile ULONG64 disk_read_curr_idx; 
 
-    // DB_LL_NODE* disk_read_listhead;
-    // CRITICAL_SECTION disk_read_list_lock;
 
 } DISK;
 

@@ -1468,6 +1468,51 @@ ULONG64 find_batch_available_pages(BOOL zeroed_pages_preferred, PAGE** page_stor
 
 
 /**
+ * Rescues all of the pages from both the modified and standby lists
+ * 
+ * Assumes that all pages' pagelocks are acquired, and that the pre-sorted pages are in the appropriate lists
+ * with their correct statuses
+ */
+void rescue_batch_pages(PAGE** modified_rescues, ULONG64 num_modified_rescues, PAGE** standby_rescues, ULONG64 num_standby_rescues) {
+    PAGE* curr_page;
+    if (num_modified_rescues > 0) {
+        ULONG64 num_removed = 0;
+        EnterCriticalSection(&modified_list->lock);
+
+        for (ULONG64 i = 0; i < num_modified_rescues; i++) {
+            curr_page = modified_rescues[i];
+
+            // The page is not in the modified list, but is instead being written to disk, but we can still take it
+            if (curr_page->writing_to_disk == PAGE_BEING_WRITTEN && curr_page->modified == PAGE_NOT_MODIFIED) {
+                continue;
+            }
+
+            db_remove_from_middle(modified_list->listhead, modified_rescues[i]->frame_listnode);
+            num_removed++;
+        }
+
+        modified_list->list_length -= num_removed;
+
+        LeaveCriticalSection(&modified_list->lock);
+    }
+
+    if (num_standby_rescues > 0) {
+        EnterCriticalSection(&standby_list->lock);
+
+        for (ULONG64 i = 0; i < num_standby_rescues; i++) {
+            db_remove_from_middle(standby_list->listhead, standby_rescues[i]->frame_listnode);
+        }
+
+        standby_list->list_length -= num_standby_rescues;
+
+        LeaveCriticalSection(&standby_list->lock);
+
+        InterlockedAdd64(&total_available_pages, - num_standby_rescues);
+    }
+}
+
+
+/**
  * Rescues the given page from the modified or standby list, if it is in either. 
  * 
  * Assumes the pagelock was acquired beforehand.
@@ -1548,6 +1593,77 @@ int standby_rescue_page(PAGE* page) {
     LeaveCriticalSection(&standby_list->lock);
 
     return SUCCESS;
+}
+
+/**
+ * Releases all of the pages by returning them to their original lists
+ * 
+ * This is only done when we acquire pages to resolve an unaccessed PTE's fault and may have
+ * speculatively brought in several pages to map several PTEs ahead of them as well. However,
+ * another thread had already mapped those PTEs so we no longer need those pages.
+ * 
+ * We return these pages back to the zero/free/standby lists as appropriate
+ */
+void release_batch_unneeded_pages(PAGE** pages, ULONG64 num_pages) {
+
+    /**
+     * We have to sort the pages first so that we add them to the correct lists
+     */
+    ULONG64 num_standby_pages = 0;
+
+    // As of right now, MAX_PAGES_READABLE is the maximum that we would speculate... this is temporary
+    PAGE* standby_pages[MAX_PAGES_READABLE];
+
+    ULONG64 num_zero_pages = 0;
+    PAGE* zeroed_pages[MAX_PAGES_READABLE];
+
+    ULONG64 num_free_pages = 0;
+    PAGE* free_pages[MAX_PAGES_READABLE];
+
+    PAGE* curr_page;
+    for (ULONG64 i = 0; i < num_pages; i++) {
+        curr_page = pages[i];
+
+        if (curr_page->status == STANDBY_STATUS) {
+            standby_pages[num_standby_pages] = curr_page;
+            num_standby_pages++;
+            continue;
+        } else if (curr_page->status == ZERO_STATUS) {
+            zeroed_pages[num_zero_pages] = curr_page;
+            num_zero_pages++;
+            continue;
+        } else if (curr_page->status == FREE_STATUS) {
+            free_pages[num_free_pages] = curr_page;
+            num_free_pages++;
+            continue;
+        }
+
+        custom_spin_assert(FALSE);
+    }
+
+    /**
+     * We handle the standby pages first as there is a chance that these pages can be rescued still, preventing
+     * unnecessary disk reads
+     */
+    if (num_standby_pages > 0) {
+        create_chain_of_pages(standby_pages, num_standby_pages, STANDBY_STATUS);
+
+        EnterCriticalSection(&standby_list->lock);
+
+        db_insert_section_at_tail(standby_list->listhead, standby_pages[0]->frame_listnode, standby_pages[num_standby_pages - 1]->frame_listnode);
+
+        LeaveCriticalSection(&standby_list->lock);
+    }
+
+    if (num_zero_pages > 0) {
+        zero_list_add_batch(zeroed_pages, num_zero_pages);
+    }
+
+    if (num_free_pages > 0) {
+        free_frames_add_batch(free_pages, num_free_pages);
+    }
+
+
 }
 
 
