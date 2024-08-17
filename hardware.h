@@ -40,7 +40,7 @@
 #define CACHE_SIZE      KB(16)
 
 /**
- * Right now, we need the + 1 as we do not use the 0th disk slot.
+ * Right now, we need the + 2 as we do not use the 0th disk slot, and we need an extra for mod-writing when all other slots are taken.
  * 
  * Currently, we use excess disk space to support us being able to preserve disk slots - keeping a note of them on the physical pages when we **read** from 
  * a virtual address that had a corresponding copy on the disk (whether it be a rescue, or a disk-read). This allows us to trim pages straight to the standby
@@ -48,7 +48,7 @@
  * 
  * Typically, the total commit limit would be:
  * 
- * disk space + physical memory - 2 (bc we don't use the first slot)
+ * disk space + physical memory - 2 (bc we don't use the first slot, and we need 1 in reserve)
  * 
  * But this means we cannot double-store content in pages and on the disk. Normally, we would start to disallow the double-storage of data on physical memory
  * and on disk if we are running low on pagefile space - but I haven't implemented this yet (but might in the future).

@@ -61,6 +61,8 @@ MODIFIED_LIST* modified_list;
 
 PAGE_ZEROING_STRUCT* page_zeroing;
 
+THREAD_SIMULATION_INFORMATION thread_information;
+
 #if DEBUG_PAGELOCK
 PAGE_LOGSTRUCT page_log[LOG_SIZE];
 
@@ -87,11 +89,11 @@ HANDLE disk_open_slots_event;
 
 HANDLE pagetable_to_modified_event;
 
-HANDLE modified_to_standby_event;
+HANDLE modified_writer_event;
 
 HANDLE zero_pages_event;
 
-ULONG64 num_child_threads;
+ULONG64 num_worker_threads;
 
 HANDLE* threads;
 
@@ -229,7 +231,7 @@ CreateSharedMemorySection (
 
 static int init_simulation(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memory_size_storage);
 static int init_datastructures();
-static int init_multithreading();
+static int init_multithreading(ULONG64 num_usermode_threads);
 
 
 /**
@@ -240,7 +242,7 @@ static int init_multithreading();
  * 
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
-int init_all(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memory_size_storage) {
+int init_all(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memory_size_storage, ULONG64 num_usermode_threads) {
     int return_code;
 
     return_code = init_simulation(vmem_base_storage, virtual_memory_size_storage);
@@ -252,7 +254,7 @@ int init_all(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memory_size_storage
 
     if (return_code == ERROR) return ERROR;
 
-    return_code = init_multithreading();
+    return_code = init_multithreading(num_usermode_threads);
     printf("Initialized threads\n");
 
     if (return_code == ERROR) return ERROR;
@@ -279,7 +281,7 @@ static int init_simulation(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memor
     // right to do.
     //
 
-    privilege = GetPrivilege ();
+    privilege = GetPrivilege();
 
     if (privilege == FALSE) {
         printf ("full_virtual_memory_test : could not get privilege\n");
@@ -295,14 +297,14 @@ static int init_simulation(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memor
 
     physical_page_count = NUMBER_OF_PHYSICAL_PAGES;
 
-    physical_page_numbers = malloc (physical_page_count * sizeof (ULONG_PTR));
+    physical_page_numbers = malloc(physical_page_count * sizeof (ULONG_PTR));
 
     if (physical_page_numbers == NULL) {
         fprintf (stderr,"init_simulation : could not allocate array to hold physical page numbers\n");
         return ERROR;
     }
 
-    allocated = AllocateUserPhysicalPages (physical_page_handle,
+    allocated = AllocateUserPhysicalPages(physical_page_handle,
                                            &physical_page_count,
                                            physical_page_numbers);
 
@@ -314,7 +316,7 @@ static int init_simulation(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memor
 
     if (physical_page_count != NUMBER_OF_PHYSICAL_PAGES) {
 
-        fprintf (stderr, "init_simulation : allocated only %llx pages out of %llx pages requested\n",
+        fprintf (stderr, "init_simulation : allocated only %llX pages out of %llX pages requested\n",
                 physical_page_count,
                 NUMBER_OF_PHYSICAL_PAGES);
     }
@@ -360,51 +362,10 @@ static int init_simulation(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memor
                        &vmem_parameters,
                        1);
 
-    DWORD old_prot;
-
-
     if (vmem_base == NULL) {
         printf ("init : could not reserve memory for usermode simulation\n");
         return ERROR;
     }
-
-    #if 0
-    ULONG64 page_read_only_prot = ((ULONG64) physical_page_numbers[0]) | PAGE_MAPUSERPHYSCAL_READONLY_MASK;
-
-    if (MapUserPhysicalPages(vmem_base, 1, &page_read_only_prot) == FALSE) {
-        printf("Failed to map readonly page\n");
-        DebugBreak();
-    }
-
-    bool status;
-
-    __try {
-        *vmem_base = 0xFFFFFFFF;
-        status = TRUE;
-
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-
-        status = FALSE;
-    }
-
-    DebugBreak();
-
-    if (MapUserPhysicalPages(vmem_base, 1, &physical_page_numbers[0]) == FALSE) {
-        printf("Failed to map readonly page\n");
-        DebugBreak();
-    }
-
-    __try {
-        *vmem_base = 0xAAAAAAAA;
-        status = TRUE;
-
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-
-        status = FALSE;
-    }
-
-    DebugBreak();
-    #endif
 
     *virtual_memory_size_storage = virtual_address_size;
     *vmem_base_storage = vmem_base;
@@ -510,7 +471,7 @@ static int init_datastructures() {
  * 
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
-static int init_multithreading() {
+static int init_multithreading(ULONG64 num_usermode_threads) {
     
 
     //BW: This could later be turned into a manual-reset lock if we are able to write
@@ -523,7 +484,7 @@ static int init_multithreading() {
 
     pagetable_to_modified_event = CreateEvent(NULL, FALSE, FALSE, NULL);
 
-    modified_to_standby_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+    modified_writer_event = CreateEvent(NULL, FALSE, FALSE, NULL);
 
     disk_write_available_event = CreateEvent(NULL, FALSE, FALSE, NULL);
 
@@ -535,22 +496,89 @@ static int init_multithreading() {
     zero_pages_event = CreateEvent(NULL, FALSE, FALSE, NULL);
 
     // Does not include this thread that handles page faults, and does not include worker threads
-    num_child_threads = 4; 
+    num_worker_threads = 4; 
 
-    threads = (HANDLE*) malloc(sizeof(HANDLE) * num_child_threads);
+    threads = (HANDLE*) malloc(sizeof(HANDLE) * num_worker_threads);
 
     if (threads == NULL) {
         fprintf(stderr, "Failed to allocate memory for thread creation in init_multithreading\n");
         return ERROR;
     }
+    
+    /** 
+     * Aging setup
+     */
+    WORKER_THREAD_PARAMETERS* aging_params = (WORKER_THREAD_PARAMETERS*) malloc(sizeof(WORKER_THREAD_PARAMETERS));
 
-    threads[0] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) thread_aging, NULL, 0, NULL);
+    if (aging_params == NULL) {
+        fprintf(stderr, "Failed to allocate memory for worker thread parameters in init_multithreading\n");
+    }
+    
+    aging_params->thread_idx = num_usermode_threads;
+    aging_params->other_parameters = NULL;
 
-    threads[1] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) thread_trimming, NULL, 0, NULL);
+    threads[0] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) thread_aging, aging_params, 0, NULL);
 
-    threads[2] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) thread_modified_to_standby, NULL, 0, NULL);
+    /**
+     * Trimming setup
+     */
+    WORKER_THREAD_PARAMETERS* trim_params = (WORKER_THREAD_PARAMETERS*) malloc(sizeof(WORKER_THREAD_PARAMETERS));
 
-    threads[3] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) thread_populate_zero_lists, &vmem_parameters, 0, NULL);
+    if (trim_params == NULL) {
+        fprintf(stderr, "Failed to allocate memory for worker thread parameters in init_multithreading\n");
+    }
+    
+    trim_params->thread_idx = num_usermode_threads + 1;
+    trim_params->other_parameters = NULL;
+
+    threads[1] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) thread_trimming, trim_params, 0, NULL);
+
+    /**
+     * Mod writer setup
+     */
+    WORKER_THREAD_PARAMETERS* mod_writer_params = (WORKER_THREAD_PARAMETERS*) malloc(sizeof(WORKER_THREAD_PARAMETERS));
+
+    if (mod_writer_params == NULL) {
+        fprintf(stderr, "Failed to allocate memory for worker thread parameters in init_multithreading\n");
+    }
+    
+    mod_writer_params->thread_idx = num_usermode_threads + 2;
+    mod_writer_params->other_parameters = NULL;
+
+    threads[2] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) thread_modified_writer, mod_writer_params, 0, NULL);
+
+
+    /**
+     * Zeroing thread setup
+     */
+    WORKER_THREAD_PARAMETERS* zeroer_params = (WORKER_THREAD_PARAMETERS*) malloc(sizeof(WORKER_THREAD_PARAMETERS));
+
+    if (zeroer_params == NULL) {
+        fprintf(stderr, "Failed to allocate memory for worker thread parameters in init_multithreading\n");
+    }
+    
+    zeroer_params->thread_idx = num_usermode_threads + 3;
+    zeroer_params->other_parameters = &vmem_parameters;
+
+    threads[3] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) thread_populate_zero_lists, zeroer_params, 0, NULL);
+    
+    /**
+     * All thread (simulation and worker) local storage setup
+     */
+    THREAD_LOCAL_STORAGE* thread_storage = (THREAD_LOCAL_STORAGE*) malloc(sizeof(THREAD_LOCAL_STORAGE) * (num_usermode_threads + num_worker_threads));
+
+    if (thread_storage == NULL) {
+        fprintf(stderr, "Failed to allocate memory for thread local storage\n");
+        return ERROR;
+    }
+
+    for (ULONG64 thread_idx = 0; thread_idx < num_usermode_threads + num_worker_threads; thread_idx++) {
+        thread_storage[thread_idx].list_refresh_status = LIST_REFRESH_NOT_ONGOING;
+        // The thread handles will be initialized when we create the usermode threads in the parent usermode_simulation thread
+    }
+
+    thread_information.total_thread_count = num_usermode_threads + num_worker_threads;
+    thread_information.thread_local_storages = thread_storage;
 
 
     return SUCCESS;

@@ -36,17 +36,20 @@
 
 // If (number of physical pages) / TOTAL_ZERO_AND_FREE_LIST_REFRESH_PROPORTION is more than the total amount of pages in the free and zero lists (and we have enough pages in standby),
 // we will refresh both the free and zero lists with pages
-#define TOTAL_ZERO_AND_FREE_LIST_REFRESH_PROPORTION 20
+#define TOTAL_ZERO_AND_FREE_LIST_REFRESH_PROPORTION 12
 
-// If (number of physical pages) / TOTAL_ZERO_AND_FREE_LIST_REFRESH_PROPORTION is more than the total amount of pages in the free lists (and we have enough pages in standby),
-// we will refresh the free lists with pages. We also have this one as with many disk reads, the demand for free frames is very high and we do not need to unnecessarily zero out pages
-#define FREE_LIST_REFRESH_PROPORTION 25
+// If (number of physical pages) / (free or zero)_LIST_REFRESH_PROPORTION is more than the total amount of pages in the free lists or the zero lists (and we have enough pages in standby),
+// we will refresh the respective lists with pages. 
+// This allows us to make targeted refreshes on either the zero lists or the free lists if either are independently running low
+#define FREE_LIST_REFRESH_PROPORTION 15
+#define ZERO_LIST_REFRESH_PROPORTION 25
+
 
 
 /** 
  * These determine the number of pages we take off the standby list to add to the zero/free lists when we are refreshing the lists
  */
-#define NUM_PAGES_FAULTER_REFRESH   NUM_CACHE_SLOTS * 6
+#define NUM_PAGES_FAULTER_REFRESH   NUM_CACHE_SLOTS * 2
 
 // When refreshing both the free and zero lists, this proportion goes to the free lists
 #define FREE_FRAMES_PORTION   NUM_PAGES_FAULTER_REFRESH / 2
@@ -59,7 +62,7 @@
  * Rather than search through every single cache-color / list section of the free/zero lists, we bail after a certain number of attempts to avoid large linear walks
  * when these lists are sparse. After this many attempts, we will opt to try looking for pages in a different list
  */
-#define MAX_ATTEMPTS_FREE_OR_ZERO_LISTS    max(NUM_CACHE_SLOTS / 10, 1)
+#define MAX_ATTEMPTS_FREE_OR_ZERO_LISTS    NUM_CACHE_SLOTS //max(NUM_CACHE_SLOTS / 5, 1)
 
 /**
  * When looking for available pages without any preference for zeroed pages, 
@@ -148,16 +151,18 @@ ULONG64 allocate_batch_free_frames(PAGE** page_storage, ULONG64 batch_size);
  * adding some to the zeroing-threads buffer. If there are enough pages for the zeroing thread to zero-out,
  * then it will be signalled
  */
-void faulter_refresh_free_and_zero_lists();
+void refresh_free_and_zero_lists();
 
 
 /**
  * Determines whether or not a faulter should refresh the zero and free lists with pages from the standby list using pre-defined macros 
  * and the total amount of available pages compared to the total number of physical pages
  * 
+ * Takes the thread index of the calling thread as parameter so that we can access the thread local storage
+ * 
  * In the future, this would be made more dynamic (perhaps based moreso on the rate of page usage, where they're being used, etc - rather than simple macros)
  */
-void potential_faulter_list_refresh();
+void potential_list_refresh(ULONG64 thread_idx);
 
 
 /**
@@ -177,6 +182,14 @@ ULONG64 standby_pop_batch(PAGE** page_storage, ULONG64 batch_size);
 
 
 /**
+ * This should be called whenever threads fail to acquire any pages, and need to wait for pages to be available.
+ * 
+ * This signals the trimmer as well as the modified writer if appropriate so that we start replenishing pages.
+ */
+void wait_for_pages_signalling();
+
+
+/**
  * Tries to find an available page from the zero lists, free lists, or standby. If found,
  * returns a pointer to the page. Otherwise, returns NULL. If zero_page_preferred is TRUE,
  * we will search the zero lists first - otherwise, we search the free list first. Both are preferable to standby.
@@ -191,8 +204,7 @@ PAGE* find_available_page(BOOL zeroed_page_preferred);
  * Tries to find num_pages pages across the zeroed/free/standby lists. 
  * If zeroed_pages_preferred is TRUE, we will search the zero list first. Otherwise, we search the free list first. 
  * 
- * Returns the number of pages written into the page_storage, if we find zero pages, we will wait for the signal for available pages
- * and return 0
+ * Returns the number of pages written into the page_storage. We do not guarentee that we return any pages, and might return 0
  */
 ULONG64 find_batch_available_pages(BOOL zeroed_pages_preferred, PAGE** page_storage, ULONG64 num_pages);
 
@@ -241,6 +253,16 @@ void zero_lists_add(PAGE* page);
  * Adds the given page to its proper slot in the free list
  */
 void free_frames_add(PAGE* page);
+
+
+/**
+ * Connects the linked list nodes inside of the pages together to form a single section that
+ * can be added to a listhead very quickly
+ * 
+ * We also change the page's statuses to new_page_status since this is usually being done to add a 
+ * section to a list very quickly. This can avoid an extra loop later.
+ */
+void create_chain_of_pages(PAGE** pages_to_chain, ULONG64 num_pages, ULONG64 new_page_status);
 
 
 /**

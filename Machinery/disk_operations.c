@@ -129,33 +129,29 @@ ULONG64 write_batch_to_disk(DISK_BATCH* disk_batch) {
  * 
  * Returns SUCCESS if a slot was allocated, ERROR otherwise
  */
-static int acquire_disk_readslot(ULONG64* disk_read_idx_storage) {
-    long read_old_val;
+static int acquire_disk_readsection(ULONG64* disk_readsection_idx_storage) {
+    long old_val;
     ULONG64 curr_idx;
-    volatile long* disk_readslot;
+    volatile long* disk_readsection;
 
     ULONG64 num_attempts = 0;
 
-    while (num_attempts < DISK_READ_SLOTS) {   
+    while (num_attempts < DISK_READSECTIONS && disk->num_available_readsections > 0) {   
         /**
          * Using the interlocked operations here with the read indices makes it almost certain that threads will not share the same
          * read index, and if we are able to refresh the slots frequently enough, then we should be able to find a disk slot in
          * O(1) time rather than the worst case O(n) time if we performed a typical linear walk. The worst case scenario though is still the
          * linear walk that fails to find a disk slot - in which case a thread will refresh the read slots in the parent
          */
-        curr_idx = InterlockedIncrement64(&disk->disk_read_curr_idx) % DISK_READ_SLOTS;
+        curr_idx = InterlockedIncrement64(&disk->disk_read_curr_idx) % DISK_READSECTIONS;
 
-        disk_readslot = &disk->disk_read_slot_statues[curr_idx];
-
-        if (*disk_readslot == DISK_READ_OPEN) {
-            read_old_val = InterlockedCompareExchange(disk_readslot, DISK_READ_USED, DISK_READ_OPEN);
-            
-            // We successfully claimed the disk slot
-            if (read_old_val == DISK_READ_OPEN) {
-                *disk_read_idx_storage = curr_idx;
-                InterlockedDecrement64(&disk->num_available_read_slots);
-                return SUCCESS;
-            }
+        old_val = InterlockedCompareExchange(&disk->disk_readsection_statuses[curr_idx], DISK_READSECTION_USED, DISK_READSECTION_OPEN);
+        
+        // We successfully claimed the disk slot
+        if (old_val == DISK_READSECTION_OPEN) {
+            *disk_readsection_idx_storage = curr_idx;
+            InterlockedDecrement64(&disk->num_available_readsections);
+            return SUCCESS;
         }
 
         num_attempts++;
@@ -167,27 +163,28 @@ static int acquire_disk_readslot(ULONG64* disk_read_idx_storage) {
 
 
 /**
- * Releases the given disk readslot and sets its status to DISK_READ_NEEDS_FLUSH
+ * Releases the given disk readslot and sets its status to DISK_READSECTION_NEEDS_FLUSH
  */
-static void release_disk_readslot(ULONG64 disk_read_idx) {
-    if (disk->disk_read_slot_statues[disk_read_idx] != DISK_READ_USED) {
+static void release_disk_readsection(ULONG64 disk_readslot_idx) {
+    if (disk->disk_readsection_statuses[disk_readslot_idx] != DISK_READSECTION_USED) {
         DebugBreak();
     }
 
-    custom_spin_assert(InterlockedIncrement(&disk->disk_read_slot_statues[disk_read_idx]) == DISK_READ_NEEDS_FLUSH);
+    custom_spin_assert(InterlockedIncrement(&disk->disk_readsection_statuses[disk_readslot_idx]) == DISK_READSECTION_NEEDS_FLUSH);
 }
 
-
+#if 0
 /**
- * Releases all of the given readslots and sets their statuses to DISK_READ_NEEDS_FLUSH
+ * Releases all of the given readslots and sets their statuses to DISK_READSECTION_NEEDS_FLUSH
  */
 static void release_batch_disk_readslots(ULONG64* disk_read_indices, ULONG64 num_to_release) {
     for (ULONG64 i = 0; i < num_to_release; i++) {
-        custom_spin_assert(InterlockedIncrement(&disk->disk_read_slot_statues[disk_read_indices[i]]) == DISK_READ_NEEDS_FLUSH);
+        custom_spin_assert(InterlockedIncrement(&disk->disk_readsection_statuses[disk_read_indices[i]]) == DISK_READSECTION_NEEDS_FLUSH);
     }
 }
+#endif
 
-
+#if 0
 /**
  * Tries to find num_to_acquire disk readslots and writes them into the storage
  * 
@@ -195,8 +192,7 @@ static void release_batch_disk_readslots(ULONG64* disk_read_indices, ULONG64 num
  */
 #define READSLOT_INTERLOCKED_OPERATIONS 1
 static ULONG64 acquire_batch_disk_readslots(ULONG64* disk_read_indices_storage, ULONG64 num_to_acquire) {
-    long read_old_val;
-    volatile long* disk_readslot;
+    long old_val;
 
     ULONG64 num_attempts = 0;
     ULONG64 num_acquired = 0;
@@ -218,27 +214,12 @@ static ULONG64 acquire_batch_disk_readslots(ULONG64* disk_read_indices_storage, 
         curr_idx = InterlockedIncrement64(&disk->disk_read_curr_idx) % DISK_READ_SLOTS;
         #endif
 
-        #if 0
-        disk_readslot = &disk->disk_read_slot_statues[curr_idx];
-
-        if (*disk_readslot == DISK_READ_OPEN) {
-            read_old_val = InterlockedCompareExchange(disk_readslot, DISK_READ_USED, DISK_READ_OPEN);
-            
-            // We successfully claimed the disk slot
-            if (read_old_val == DISK_READ_OPEN) {
-                disk_read_indices_storage[num_acquired] = curr_idx;
-                InterlockedDecrement64(&disk->num_available_read_slots);
-                num_acquired++;
-            }
-        }
-        #endif
-
-        read_old_val = InterlockedCompareExchange(&disk->disk_read_slot_statues[curr_idx], DISK_READ_USED, DISK_READ_OPEN);
+        old_val = InterlockedCompareExchange(&disk->disk_readsection_statuses[curr_idx], DISK_READSECTION_USED, DISK_READSECTION_OPEN);
             
         // We successfully claimed the disk slot
-        if (read_old_val == DISK_READ_OPEN) {
+        if (old_val == DISK_READSECTION_OPEN) {
             disk_read_indices_storage[num_acquired] = curr_idx;
-            InterlockedDecrement64(&disk->num_available_read_slots);
+            InterlockedDecrement64(&disk->num_available_readsections);
             num_acquired++;
         }
 
@@ -253,7 +234,7 @@ static ULONG64 acquire_batch_disk_readslots(ULONG64* disk_read_indices_storage, 
     // There were no slots available, we will need to refresh the list and try again
     return num_acquired;
 }
-
+#endif
 
 /**
  * Unmaps all of these readslot virtual addresses from the CPU,
@@ -263,7 +244,7 @@ static ULONG64 acquire_batch_disk_readslots(ULONG64* disk_read_indices_storage, 
  * If there are no disk read slots available, alerts any waiting threads
  */
 PULONG_PTR refresh_read_addresses[DISK_READ_SLOTS];
-volatile long* refresh_read_status_slots[DISK_READ_SLOTS];
+volatile long* refresh_read_status_slots[DISK_READSECTIONS];
 long disk_refresh_ongoing = FALSE; // We use the long for interlocked operation parameters
 static void refresh_disk_readslots() {
     // Synchronize whether we or someone else is refreshing the diskslots
@@ -273,8 +254,9 @@ static void refresh_disk_readslots() {
         return;
     }
 
+    ULONG64 num_sections_refreshed = 0;
     ULONG64 num_slots_refreshed = 0;
-    volatile long* disk_readslot;
+    volatile long* disk_readsection;
     PULONG_PTR disk_read_addr;
 
     /**
@@ -285,17 +267,22 @@ static void refresh_disk_readslots() {
     ULONG64 curr_idx;
 
     // Find all of the slots to clear
-    for (ULONG64 i = 0; i < DISK_READ_SLOTS; i++) {
-        curr_idx = (start + i) % DISK_READ_SLOTS;
+    for (ULONG64 i = 0; i < DISK_READSECTIONS; i++) {
+        curr_idx = (start + i) % DISK_READSECTIONS;
 
-        disk_readslot = &disk->disk_read_slot_statues[curr_idx];
+        disk_readsection = &disk->disk_readsection_statuses[curr_idx];
 
-        if (*disk_readslot == DISK_READ_NEEDS_FLUSH) {
-            refresh_read_status_slots[num_slots_refreshed] = disk_readslot;
+        if (*disk_readsection == DISK_READSECTION_NEEDS_FLUSH) {
+            refresh_read_status_slots[num_sections_refreshed] = disk_readsection;
 
-            disk_read_addr = disk->disk_read_base_addr + (curr_idx * PAGE_SIZE / sizeof(PULONG_PTR));
-            refresh_read_addresses[num_slots_refreshed] = disk_read_addr;
-            num_slots_refreshed++;
+            PULONG_PTR readsection_addr_base = disk->disk_read_base_addr + (curr_idx * DISK_READSECTION_SIZE * PAGE_SIZE / sizeof(PULONG_PTR));
+
+            for (ULONG64 i = 0; i < DISK_READSECTION_SIZE; i++) {
+                refresh_read_addresses[num_slots_refreshed] = readsection_addr_base + (i * PAGE_SIZE / sizeof(PULONG_PTR));
+                num_slots_refreshed++;
+            }
+            
+            num_sections_refreshed++;
         }
     }
 
@@ -305,12 +292,12 @@ static void refresh_disk_readslots() {
         return;
     }
 
-    InterlockedAdd64(&disk->num_available_read_slots, num_slots_refreshed);
+    InterlockedAdd64(&disk->num_available_readsections, num_sections_refreshed);
 
     // Finally clear all of the slots
-    for (ULONG64 disk_status_refresh = 0; disk_status_refresh < num_slots_refreshed; disk_status_refresh++) {
-        // InterlockedIncrement64(&disk->num_available_read_slots);
-        InterlockedAnd(refresh_read_status_slots[disk_status_refresh], DISK_READ_OPEN);
+    for (ULONG64 disk_status_refresh = 0; disk_status_refresh < num_sections_refreshed; disk_status_refresh++) {
+        // InterlockedIncrement64(&disk->num_available_readsections);
+        InterlockedAnd(refresh_read_status_slots[disk_status_refresh], DISK_READSECTION_OPEN);
     }
 
     InterlockedAnd(&disk_refresh_ongoing, FALSE);
@@ -333,7 +320,7 @@ int read_page_from_disk(PAGE* open_page, ULONG64 disk_idx) {
 
     PULONG_PTR disk_slot_addr = disk_idx_to_addr(disk_idx);
 
-    ULONG64 disk_read_idx;
+    ULONG64 disk_readsection;
 
     DISK_RW_SLOT* read_slot;
 
@@ -344,7 +331,7 @@ int read_page_from_disk(PAGE* open_page, ULONG64 disk_idx) {
 
 
     // We if this fails, we need to try to begin the refresh process if it hasn't begun already
-    while (acquire_disk_readslot(&disk_read_idx) == ERROR) {
+    while (acquire_disk_readsection(&disk_readsection) == ERROR) {
         
         /**
          * Right now, we will try immediately again if the refresh is ongoing - since it may have refreshed pages behind us
@@ -356,8 +343,7 @@ int read_page_from_disk(PAGE* open_page, ULONG64 disk_idx) {
         }
     }
 
-    PULONG_PTR disk_read_addr = disk->disk_read_base_addr + (disk_read_idx * PAGE_SIZE / sizeof(PULONG_PTR));
-
+    PULONG_PTR disk_read_addr = disk->disk_read_base_addr + (disk_readsection * PAGE_SIZE / sizeof(PULONG_PTR));
 
     // Map the CPU
     if (MapUserPhysicalPages (disk_read_addr, 1, &pfn) == FALSE) {
@@ -371,10 +357,10 @@ int read_page_from_disk(PAGE* open_page, ULONG64 disk_idx) {
     // To simulate that real disks are slow, we spin a bit here
     disk_spin();
 
-    release_disk_readslot(disk_read_idx);
+    release_disk_readsection(disk_readsection);
     
     // If we are running low on disk read slots, attempt to refresh the disk slots
-    if (disk->num_available_read_slots < DISK_REFRESH_BOUNDARY && disk_refresh_ongoing == FALSE) {
+    if (disk->num_available_readsections < DISK_REFRESH_BOUNDARY && disk_refresh_ongoing == FALSE) {
         // If someone else is already doing it (race condition) - we will return almost immediately
         refresh_disk_readslots();
     }
@@ -397,7 +383,7 @@ int read_pages_from_disk(PAGE** open_pages, PTE** ptes_to_read, ULONG64 num_to_r
     }
 
     
-    ULONG64 disk_readslots[MAX_PAGES_READABLE];
+    ULONG64 disk_readsection;
     PVOID disk_read_addresses[MAX_PAGES_READABLE];
     ULONG64 pfns[MAX_PAGES_READABLE];
     ULONG64 num_readslots_acquired = 0;
@@ -407,27 +393,27 @@ int read_pages_from_disk(PAGE** open_pages, PTE** ptes_to_read, ULONG64 num_to_r
         pfns[i] = page_to_pfn(open_pages[i]);
     }
 
-    // It may take several attempts to get all of the readslots that we need
-    while (num_readslots_acquired < num_to_read) {
+    // We if this fails, we need to try to begin the refresh process if it hasn't begun already
+    while (acquire_disk_readsection(&disk_readsection) == ERROR) {
         
-        new_readslots_acquired = acquire_batch_disk_readslots(&disk_readslots[num_readslots_acquired], num_to_read - num_readslots_acquired);
-
-        // If we failed to acquire enough readslots, we might need to refresh the readslots if noone else is already
-        if (new_readslots_acquired != (num_to_read - num_readslots_acquired) && disk_refresh_ongoing == FALSE) {
+        /**
+         * Right now, we will try immediately again if the refresh is ongoing - since it may have refreshed pages behind us
+         * otherwise, if a refresh is not ongoing, we will do it ourselves
+         */
+        if (disk_refresh_ongoing == FALSE) {
+            // If another thread beat us to it, this will return almost immediately
             refresh_disk_readslots();
         }
-
-        num_readslots_acquired += new_readslots_acquired;
     }
 
     // Convert our readslot indices into addresses that we can use
+    PULONG_PTR disk_readsection_base = disk->disk_read_base_addr + (disk_readsection * DISK_READSECTION_SIZE * PAGE_SIZE / sizeof(PULONG_PTR));
     ULONG64 base_offset;
     for (ULONG64 i = 0; i < num_to_read; i++) {
-        base_offset = (disk_readslots[i] * PAGE_SIZE) / sizeof(ULONG_PTR);
-        disk_read_addresses[i] = disk->disk_read_base_addr + base_offset;
+        disk_read_addresses[i] = disk_readsection_base + (i * PAGE_SIZE / sizeof(PULONG_PTR));
     }
 
-    ULONG64 sequential_count_storage[MAX_PAGES_READABLE];
+    // ULONG64 sequential_count_storage[MAX_PAGES_READABLE];
     // pre_prepare_page_memcpys((PULONG_PTR*) disk_read_addresses, num_to_read, sequential_count_storage);
 
     // This is the expensive operation that we really benefit from batching
@@ -441,7 +427,6 @@ int read_pages_from_disk(PAGE** open_pages, PTE** ptes_to_read, ULONG64 num_to_r
     PULONG_PTR disk_storage_address;
     ULONG64 disk_idx;
 
-
     for (ULONG64 i = 0; i < num_to_read; i++) {
         PTE pte_copy = read_pte_contents(ptes_to_read[i]);
         custom_spin_assert(is_disk_format(pte_copy));
@@ -452,10 +437,13 @@ int read_pages_from_disk(PAGE** open_pages, PTE** ptes_to_read, ULONG64 num_to_r
         memcpy(disk_read_addresses[i], disk_storage_address, PAGE_SIZE);
     }
 
-    release_batch_disk_readslots(disk_readslots, num_to_read);
+    release_disk_readsection(disk_readsection);
+
+    // If we are simulating a penalty for the disk operations, we spin here
+    disk_spin();
 
     // If we are running low on disk read slots, attempt to refresh the disk slots
-    if (disk->num_available_read_slots < DISK_REFRESH_BOUNDARY && disk_refresh_ongoing == FALSE) {
+    if (disk->num_available_readsections < DISK_REFRESH_BOUNDARY && disk_refresh_ongoing == FALSE) {
         // If someone else is already doing it (race condition) - we will return almost immediately
         refresh_disk_readslots();
     }

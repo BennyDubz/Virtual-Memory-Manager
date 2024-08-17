@@ -14,19 +14,23 @@
 
 #define DISK_STORAGE_SLOTS (DISK_SIZE / PAGE_SIZE)
 
-#define DISK_READ_SLOTS     max(DISK_STORAGE_SLOTS >> 8, 256)
-#define DISK_REFRESH_BOUNDARY (DISK_READ_SLOTS / 2)
-
-#define DISK_READ_OPEN 0
-#define DISK_READ_USED 1
-#define DISK_READ_NEEDS_FLUSH 2 // We will clear all of these slots to 0 simultaneously
-
-// For the large disk write slot
-#define MAX_PAGES_WRITABLE      max(DISK_STORAGE_SLOTS >> 6, 512)
-
-// The maximum number of pages readable from a single thread
+// The maximum number of pages readable from a single thread at a time
 #define MAX_PAGES_READABLE      16
 
+#define DISK_READSECTION_SIZE  MAX_PAGES_READABLE
+#define DISK_READSECTIONS max(DISK_STORAGE_SLOTS >> 10, 64)
+
+// The total number of page-sized virtual addresses we need to reserve for the disk
+#define DISK_READ_SLOTS     (DISK_READSECTIONS * DISK_READSECTION_SIZE)
+
+#define DISK_REFRESH_BOUNDARY (DISK_READSECTIONS / 2)
+
+#define DISK_READSECTION_OPEN 0
+#define DISK_READSECTION_USED 1
+#define DISK_READSECTION_NEEDS_FLUSH 2 // We will clear all of these slots to 0 simultaneously
+
+// For the large disk write slot
+#define MAX_PAGES_WRITABLE      max(DISK_STORAGE_SLOTS >> 4, 512)
 
 #define DISK_USEDSLOT 0
 #define DISK_FREESLOT 1
@@ -76,9 +80,9 @@ typedef struct {
      * This allows us to only have to clear/unmap disk read slots infrequently,
      * saving constant calls to MapUserPhysicalPagesScatter
      */
-    volatile long disk_read_slot_statues[DISK_READ_SLOTS];
+    volatile long disk_readsection_statuses[DISK_READ_SLOTS];
     PULONG_PTR disk_read_base_addr;
-    volatile ULONG64 num_available_read_slots;
+    volatile ULONG64 num_available_readsections;
 
     // We use interlocked operations to help reduce the amount of linear searching that threads will have to do
     volatile ULONG64 disk_read_curr_idx; 

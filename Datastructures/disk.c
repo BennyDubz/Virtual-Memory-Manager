@@ -187,10 +187,10 @@ static int initialize_disk_read(DISK* disk, MEM_EXTENDED_PARAMETER* vmem_paramet
 
     disk->disk_read_base_addr = disk_read_base;
     for (ULONG64 slot_num = 0; slot_num < DISK_READ_SLOTS; slot_num++) {
-        disk->disk_read_slot_statues[slot_num] = DISK_READ_OPEN;
+        disk->disk_readsection_statuses[slot_num] = DISK_READSECTION_OPEN;
     }
 
-    disk->num_available_read_slots = DISK_READ_SLOTS;
+    disk->num_available_readsections = DISK_READSECTIONS;
     disk->disk_read_curr_idx = 0;
 
     return SUCCESS;

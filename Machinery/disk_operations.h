@@ -16,6 +16,7 @@ typedef struct {
     BOOL write_complete;
     PAGE* pages_being_written[MAX_PAGES_WRITABLE];
     ULONG_PTR disk_indices[MAX_PAGES_WRITABLE];
+    ULONG64 pfns[MAX_PAGES_WRITABLE];
 } DISK_BATCH;
 
 

@@ -54,13 +54,9 @@ static void end_of_fault_work();
  * PTE was modified by another thread in the meantime
  * 
  */
-int pagefault(PULONG_PTR virtual_address, ULONG64 access_type) {
-    InterlockedIncrement64(&fault_count);
-
-    // if (access_type == WRITE_ACCESS) {
-    //     InterlockedDecrement64(&remaining_writable_addresses);
-    // }
+int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_idx) {    
     
+    #if 0
     if (fault_count % KB(128) == 0) {
         // ULONG64 manual_count_disk_slots = 0;
 
@@ -71,19 +67,28 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type) {
         printf("Curr fault count 0x%llX\n", fault_count);
         printf("\tPhys page standby ratio: %f Zeroed: 0x%llX Free: 0x%llX Standby: 0x%llX Mod 0x%llX Num disk slots %llX\n", (double)  standby_list->list_length / physical_page_count, zero_lists->total_available, free_frames->total_available, 
                                             standby_list->list_length, modified_list->list_length, disk->total_available_slots);
-
-        
     }
+    #endif
 
+    #ifdef DEBUG_CHECKING
     custom_spin_assert(modified_list->list_length <= disk->total_available_slots);
     custom_spin_assert(disk->disk_slot_statuses[DISK_IDX_NOTUSED] == DISK_USEDSLOT);
-
-
+    #endif
 
     PTE* accessed_pte = va_to_pte(virtual_address);
 
     if (accessed_pte == NULL) {
-        fprintf(stderr, "Unable to find the accessed PTE\n");
+        fprintf(stderr, "Unable to find the accessed PTE in pagefault handler\n");
+        return REJECTION_FAIL;
+    }
+
+    if (access_type != READ_ACCESS && access_type != WRITE_ACCESS) {
+        fprintf(stderr, "Invalid access type given to pagefault handler\n");
+        return REJECTION_FAIL;
+    }
+
+    if (thread_idx > thread_information.total_thread_count) {
+        fprintf(stderr, "Invalid thread index given to pagefault handler\n");
         return REJECTION_FAIL;
     }
 
@@ -134,7 +139,12 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type) {
     
 
     /**
+     * Only unaccessed PTEs need to acquire the lock and check for race conditions here, due to the following policies:
      * 
+     * Transition PTEs can be edited by holding their corresponding pagelock
+     * 
+     * Disk PTEs are only edited at the end of faults by the threads who set their being_read_from_disk field in the PTE. This means that we have to access
+     * the PTE lock earlier on in the fault in order to set this field, but we do not need to re-acquire it when we are finishing the fault
      */
     if (is_used_pte(local_pte) == FALSE) {
         EnterCriticalSection(pte_lock);
@@ -142,14 +152,11 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type) {
         /**
          * More than one thread was trying to access this PTE at once, meaning that only one of them succeeded and mapped the page
          */
-        if (is_used_pte(local_pte) == FALSE) {
-            if (ptes_are_equal(local_pte, *accessed_pte) == FALSE) {
-                LeaveCriticalSection(pte_lock);
-                release_unneeded_page(allocated_pages[0]);
-                return RACE_CONDITION_FAIL;
-            }
+        if (ptes_are_equal(local_pte, *accessed_pte) == FALSE) {
+            LeaveCriticalSection(pte_lock);
+            release_unneeded_page(allocated_pages[0]);
+            return UNACCESSED_RACE_CONDITION_FAIL;
         }
-
     }
 
     // We may need to edit the old PTE, in which case, we want a copy so we can still find it
@@ -251,7 +258,7 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type) {
         release_pagelock(allocated_pages[i], 11);
     }
 
-    end_of_fault_work(accessed_pte);
+    end_of_fault_work(accessed_pte, thread_idx);
 
     return SUCCESSFUL_FAULT;
 }   
@@ -288,13 +295,27 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
 
     acquire_pagelock(curr_page, 33);
 
+    /**
+     * Here - if the PTE that we read is still in memory format, then we can guarantee that we are the only ones who can access
+     * it and that no one else can trim it. This allows us to edit the PTE without the PTE lock and 
+     */
+
+    PTE updated_pte_copy = read_pte_contents(accessed_pte);
+
+    if (ptes_are_equal(local_pte, updated_pte_copy) == FALSE) {
+        release_pagelock(curr_page, 36);
+        return VALID_PTE_RACE_CONTIION_FAIL;
+    }
+
+    #if 0
     EnterCriticalSection(pte_lock);
 
     if (ptes_are_equal(local_pte, *accessed_pte) == FALSE) {
         LeaveCriticalSection(pte_lock);
         release_pagelock(curr_page, 35);
-        return RACE_CONDITION_FAIL;
+        return VALID_PTE_RACE_CONTIION_FAIL;
     }
+    #endif
 
     // PAGE* curr_page = pfn_to_page(local_pte.memory_format.frame_number);
 
@@ -306,10 +327,8 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
         // using VirtualProtect
         if (MapUserPhysicalPages (pte_to_va(accessed_pte), 1, &pfn) == FALSE) {
 
-            fprintf (stderr, "handle_valid_pte_fault : could not map VA %p to pfn %llx\n", pte_to_va(accessed_pte), pfn);
+            fprintf (stderr, "handle_valid_pte_fault : could not map VA %p to pfn %llX\n", pte_to_va(accessed_pte), pfn);
             DebugBreak();
-
-            return ERROR;
         }
 
         if (curr_page->pagefile_idx != DISK_IDX_NOTUSED) {
@@ -323,13 +342,18 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
         custom_spin_assert(curr_page->pagefile_idx == DISK_IDX_NOTUSED);
     }
 
-    release_pagelock(curr_page, 34);
 
     custom_spin_assert(pfn_to_page(accessed_pte->memory_format.frame_number)->status == ACTIVE_STATUS);
 
+    custom_spin_assert(is_memory_format(read_pte_contents(accessed_pte)));
+
     write_pte_contents(accessed_pte, pte_contents);
 
+    release_pagelock(curr_page, 34);
+
+    #if 0
     LeaveCriticalSection(pte_lock);
+    #endif
 
     return SUCCESS;
 }
@@ -348,6 +372,10 @@ static int handle_unaccessed_pte_fault(PTE local_pte, PAGE** result_page_storage
     PAGE* allocated_page = find_available_page(TRUE);
 
     if (allocated_page == NULL) {
+
+        // The thread will sleep until pages are available
+        wait_for_pages_signalling();
+
         return NO_AVAILABLE_PAGES_FAIL;
     }
 
@@ -578,7 +606,7 @@ static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result
 
     ULONG64 num_pte_rights_to_acquire;
 
-    if (total_available_pages < physical_page_count / STANDBY_LIST_REFRESH_PROPORTION / 2) {
+    if (total_available_pages < physical_page_count / STANDBY_LIST_REFRESH_PROPORTION) {
         num_pte_rights_to_acquire = 1;
     } else {
         // Determine how many PTEs we might try to speculatively read from the disk, if we have available pages
@@ -605,13 +633,17 @@ static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result
     // We failed to get any rights on any PTEs, including our accessed PTE
     if (num_to_read == 0) {
         // We may want a better solution to this... spin for the accessed PTE to be resolved?
-        return RACE_CONDITION_FAIL;
+        return DISK_RACE_CONTIION_FAIL;
     }
 
     ULONG64 num_pages_acquired = find_batch_available_pages(FALSE, result_pages_storage, num_to_read);
 
     if (num_pages_acquired == 0) {
         release_sequential_disk_read_rights(ptes_to_connect_storage, num_to_read);
+        
+        // The thread will sleep until pages are available
+        wait_for_pages_signalling();
+
         return NO_AVAILABLE_PAGES_FAIL;
     } else if (num_pages_acquired < num_to_read) {
         // We failed to acquire enough pages - but we will continue
@@ -620,7 +652,6 @@ static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result
 
     if (read_pages_from_disk(result_pages_storage, ptes_to_connect_storage, num_pages_acquired) == ERROR) {
         DebugBreak();
-        return DISK_FAIL;
     }
 
     *num_ptes_to_connect_storage = num_pages_acquired;
@@ -669,22 +700,22 @@ static ULONG64 get_trailing_valid_pte_count(PTE* accessed_pte) {
 /**
  * Determines what kind of work or signaling the faulting thread should perform after they have resolved the pagefault
  */
-static void end_of_fault_work(PTE* accessed_pte) {
+static void end_of_fault_work(PTE* accessed_pte, ULONG64 thread_idx) {
     /**
      * Temporary ways to induce trimming until we have a better heuristic
      */    
-    if ((total_available_pages < (physical_page_count / 4) && (fault_count % 8) == 0) 
-            && modified_list->list_length < physical_page_count / 4) {
+    if ((total_available_pages < (physical_page_count / 2) && (fault_count % 8) == 0) 
+            && modified_list->list_length < physical_page_count / 2) {
         SetEvent(trimming_event);
     }
 
     // We try to trim behind us... currently using placeholder heuristics
-    // if (fault_count % 4 == 0 && total_available_pages < (physical_page_count / 4) && modified_list->list_length < physical_page_count / 4) {
-    //     faulter_trim_behind(accessed_pte);
-    // }
-    faulter_trim_behind(accessed_pte);
+    if (total_available_pages < (physical_page_count / 4) && modified_list->list_length < physical_page_count / 4) {
+        faulter_trim_behind(accessed_pte);
+    }
+    //faulter_trim_behind(accessed_pte);
 
     // The faulter might take pages from the standby list to replenish the free and zero lists
-    potential_faulter_list_refresh();
+    potential_list_refresh(thread_idx);
 }
 

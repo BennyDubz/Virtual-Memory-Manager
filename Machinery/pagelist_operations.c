@@ -253,7 +253,15 @@ static ULONG64 zero_list_get_pages_to_clear(PAGE** page_storage, ULONG64* pfn_st
  */
 // #define MAX_PAGES_PER_SECTION 64
 LPTHREAD_START_ROUTINE thread_populate_zero_lists(void* parameters) {
-    MEM_EXTENDED_PARAMETER* vmem_parameters = (MEM_EXTENDED_PARAMETER*) parameters;
+    WORKER_THREAD_PARAMETERS* thread_params = (WORKER_THREAD_PARAMETERS*) parameters;
+
+    MEM_EXTENDED_PARAMETER* vmem_parameters = (MEM_EXTENDED_PARAMETER*) thread_params->other_parameters;
+    ULONG64 worker_thread_idx = thread_params->thread_idx;
+
+    #if DEBUG_THREAD_STORAGE
+    thread_information.thread_local_storages[worker_thread_idx].thread_id = GetCurrentThreadId();
+    #endif
+
     PULONG_PTR thread_zeroing_address;
 
     thread_zeroing_address = VirtualAlloc2(NULL, NULL, PAGE_SIZE * NUM_THREAD_ZERO_SLOTS,
@@ -310,6 +318,13 @@ LPTHREAD_START_ROUTINE thread_populate_zero_lists(void* parameters) {
         // standby_zerolist_pop_batch(page_sections, ptes_to_update, pte_section_counts, page_section_counts, num_to_repurpose);
         
         zero_list_add_batch(page_list, num_to_zero);
+
+        // We are unlikely to need to work immediately, we should potentially do some extra work while we are awake
+        // In this case, we might actually signal ourselves to work again if we need to zero out more pages!
+        if (page_zeroing->total_slots_used < NUM_THREAD_ZERO_SLOTS / 4) {
+            potential_list_refresh(worker_thread_idx);
+        }
+
     }
 
     DebugBreak();
@@ -697,7 +712,7 @@ PAGE* allocate_zeroed_frame() {
         DB_LL_NODE* section_listhead = zero_lists->listheads[local_index];
 
         // If multiple threads are contending on the same sections, this will help alleviate contention
-        if (curr_attempts < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS / 2) {
+        if (curr_attempts < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS) {
             potential_page = try_acquire_list_tail_pagelock(section_listhead);
         } else {
             potential_page = acquire_list_tail_pagelock(section_listhead);
@@ -762,7 +777,7 @@ ULONG64 allocate_batch_zeroed_frames(PAGE** page_storage, ULONG64 num_pages) {
         // By here, the odds are better that we will get a frame, but not guaranteed
         DB_LL_NODE* cache_color_listhead = zero_lists->listheads[local_index];
 
-        if (num_consecutive_failures < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS / 2) {
+        if (num_consecutive_failures < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS) {
             curr_page = try_acquire_list_tail_pagelock(cache_color_listhead);
         } else {
             curr_page = acquire_list_tail_pagelock(cache_color_listhead);
@@ -946,6 +961,16 @@ ULONG64 allocate_batch_free_frames(PAGE** page_storage, ULONG64 batch_size) {
 
 
 /**
+ * Updates all of the threads list refresh statuses to the given parameter
+ */
+static void refresh_update_thread_storages(UCHAR list_refresh_status) {
+    for (ULONG64 i = 0; i < thread_information.total_thread_count; i++) {
+        thread_information.thread_local_storages[i].list_refresh_status = list_refresh_status;
+    }
+}
+
+
+/**
  * To be called by the faulting thread when the total of free frames + zero frames is low
  * 
  * Takes many frames off of the standby list and uses some to populate the free frames list, while also
@@ -953,16 +978,18 @@ ULONG64 allocate_batch_free_frames(PAGE** page_storage, ULONG64 batch_size) {
  * then it will be signaled
  */
 #if ONLY_ONE_REFRESHER
-long free_zero_refresh_ongoing = FALSE;
+long list_refresh_ongoing = FALSE;
 #endif
 
-static void faulter_refresh_free_and_zero_lists() {
+static void refresh_free_and_zero_lists() {
     
     #if ONLY_ONE_REFRESHER
-    if (InterlockedOr(&free_zero_refresh_ongoing, TRUE) == TRUE) {
+    if (InterlockedOr(&list_refresh_ongoing, TRUE) == TRUE) {
         return;
     }
     #endif
+
+    refresh_update_thread_storages(LIST_REFRESH_ONGOING);
 
     PAGE* pages_to_refresh[NUM_PAGES_FAULTER_REFRESH];
 
@@ -973,8 +1000,10 @@ static void faulter_refresh_free_and_zero_lists() {
         SetEvent(trimming_event);
 
         #if ONLY_ONE_REFRESHER
-        InterlockedAnd(&free_zero_refresh_ongoing, FALSE);
+        InterlockedAnd(&list_refresh_ongoing, FALSE);
         #endif
+
+        refresh_update_thread_storages(LIST_REFRESH_NOT_ONGOING);
 
         return;
     }
@@ -992,8 +1021,10 @@ static void faulter_refresh_free_and_zero_lists() {
         SetEvent(trimming_event);
 
         #if ONLY_ONE_REFRESHER
-        InterlockedAnd(&free_zero_refresh_ongoing, FALSE);
+        InterlockedAnd(&list_refresh_ongoing, FALSE);
         #endif
+
+        refresh_update_thread_storages(LIST_REFRESH_NOT_ONGOING);
 
         return;
     }
@@ -1015,9 +1046,131 @@ static void faulter_refresh_free_and_zero_lists() {
             ULONG64 remaining_pages = num_allocated - page_idx;
             free_frames_add_batch(&pages_to_refresh[page_idx], remaining_pages);
 
-            #if ONLY_ONE_REFRESHER
-            InterlockedAnd(&free_zero_refresh_ongoing, FALSE);
-            #endif
+            break;
+        }
+
+        curr_page = pages_to_refresh[page_idx];
+
+        curr_page->status = ZERO_STATUS;
+        curr_page->pte = NULL;
+
+        // Write the page to be zeroed into the struct
+        page_zeroing->pages_to_zero[page_zeroing_idx] = curr_page;
+        release_pagelock(curr_page, 17);
+
+        // Increment the value to signal that the zeroing thread can use this slot to zero
+        custom_spin_assert(InterlockedIncrement(&page_zeroing->status_map[page_zeroing_idx]) == PAGE_SLOT_READY);
+
+        InterlockedIncrement64(&page_zeroing->total_slots_used);
+    }
+
+    SetEvent(zero_pages_event);
+
+    #if ONLY_ONE_REFRESHER
+    InterlockedAnd(&list_refresh_ongoing, FALSE);
+    #endif
+
+    refresh_update_thread_storages(LIST_REFRESH_NOT_ONGOING);
+}
+
+
+/**
+ * To be called when a faulter needs to only refresh the free frames list, and not the zero list
+ * 
+ * This helps us reduce contention on the standby list and avoids the unnecessary work coming from zeroing out pages
+ */
+static void refresh_free_frames() {
+    
+    #if ONLY_ONE_REFRESHER
+    if (InterlockedOr(&list_refresh_ongoing, TRUE) == TRUE) {
+        return;
+    }
+    #endif
+
+    refresh_update_thread_storages(LIST_REFRESH_ONGOING);
+
+    PAGE* pages_to_refresh[NUM_PAGES_FAULTER_REFRESH];
+
+    ULONG64 num_allocated = standby_pop_batch(pages_to_refresh, NUM_PAGES_FAULTER_REFRESH);
+
+    // The standby list is empty!
+    if (num_allocated == 0) {
+        SetEvent(trimming_event);
+
+        #if ONLY_ONE_REFRESHER
+        InterlockedAnd(&list_refresh_ongoing, FALSE);
+        #endif
+
+        refresh_update_thread_storages(LIST_REFRESH_NOT_ONGOING);
+
+        return;
+    }
+
+    // Update the old transition PTEs to be disk format
+    update_pte_sections_to_disk_format(pages_to_refresh, num_allocated);
+
+    // Add all the pages to their respective free lists
+    free_frames_add_batch(pages_to_refresh, min(num_allocated, NUM_PAGES_FAULTER_REFRESH));
+
+    #if ONLY_ONE_REFRESHER
+    InterlockedAnd(&list_refresh_ongoing, FALSE);
+    #endif
+
+    refresh_update_thread_storages(LIST_REFRESH_NOT_ONGOING);
+}
+
+
+/**
+ * To be called when a faulter needs to only refresh the zeroed pages list, and not the free list
+ * 
+ * This helps us replenish the zero list as quickly as possible when necessary
+ */
+static void refresh_zero_lists() {
+    
+    #if ONLY_ONE_REFRESHER
+    if (InterlockedOr(&list_refresh_ongoing, TRUE) == TRUE) {
+        return;
+    }
+    #endif
+
+    refresh_update_thread_storages(LIST_REFRESH_ONGOING);
+
+    PAGE* pages_to_refresh[NUM_PAGES_FAULTER_REFRESH];
+
+    ULONG64 num_allocated = standby_pop_batch(pages_to_refresh, NUM_PAGES_FAULTER_REFRESH);
+
+    // The standby list is empty!
+    if (num_allocated == 0) {
+        SetEvent(trimming_event);
+
+        #if ONLY_ONE_REFRESHER
+        InterlockedAnd(&list_refresh_ongoing, FALSE);
+        #endif
+
+        refresh_update_thread_storages(LIST_REFRESH_NOT_ONGOING);
+
+        return;
+    }
+
+    // Update the old transition PTEs to be disk format
+    update_pte_sections_to_disk_format(pages_to_refresh, num_allocated);
+
+    long old_slot_val;
+
+    PAGE* curr_page;
+
+    // Add the other half to be zeroed out!
+    for (ULONG64 page_idx = 0; page_idx < num_allocated; page_idx++) {
+        ULONG64 page_zeroing_idx = get_zeroing_struct_idx();
+
+        // We try to claim the slot
+        old_slot_val = InterlockedCompareExchange(&page_zeroing->status_map[page_zeroing_idx], PAGE_SLOT_CLAIMED, PAGE_SLOT_OPEN);
+        
+        // The zeroing thread has failed to keep up - we should just add these to the free frames list
+        if (old_slot_val != PAGE_SLOT_OPEN) {
+            SetEvent(zero_pages_event);
+            ULONG64 remaining_pages = num_allocated - page_idx;
+            free_frames_add_batch(&pages_to_refresh[page_idx], remaining_pages);
 
             break;
         }
@@ -1033,66 +1186,18 @@ static void faulter_refresh_free_and_zero_lists() {
 
         // Increment the value to signal that the zeroing thread can use this slot to zero
         custom_spin_assert(InterlockedIncrement(&page_zeroing->status_map[page_zeroing_idx]) == PAGE_SLOT_READY);
+
         InterlockedIncrement64(&page_zeroing->total_slots_used);
     }
-
-
-    // if (page_zeroing->total_slots_used >= NUM_THREAD_ZERO_SLOTS / 2) {
-    //     SetEvent(zero_pages_event);
-    // }
 
     SetEvent(zero_pages_event);
 
     #if ONLY_ONE_REFRESHER
-    InterlockedAnd(&free_zero_refresh_ongoing, FALSE);
+    InterlockedAnd(&list_refresh_ongoing, FALSE);
     #endif
+
+    refresh_update_thread_storages(LIST_REFRESH_NOT_ONGOING);
 }
-
-
-
-#if ONLY_ONE_REFRESHER
-long free_frames_refresh_ongoing = FALSE;
-#endif
-/**
- * To be called when a faulter needs to only refresh the free frames list, and not the zero list
- * 
- * This helps us reduce contention on the free list
- */
-static void faulter_refresh_free_frames() {
-    
-    #if ONLY_ONE_REFRESHER
-    if (InterlockedOr(&free_frames_refresh_ongoing, TRUE) == TRUE) {
-        return;
-    }
-    #endif
-
-
-    PAGE* pages_to_refresh[NUM_PAGES_FAULTER_REFRESH];
-
-    ULONG64 num_allocated = standby_pop_batch(pages_to_refresh, NUM_PAGES_FAULTER_REFRESH);
-
-    // The standby list is empty!
-    if (num_allocated == 0) {
-        SetEvent(trimming_event);
-
-        #if ONLY_ONE_REFRESHER
-        InterlockedAnd(&free_frames_refresh_ongoing, FALSE);
-        #endif
-
-        return;
-    }
-
-    // Update the old transition PTEs to be disk format
-    update_pte_sections_to_disk_format(pages_to_refresh, num_allocated);
-
-    // Add all the pages to their respective free lists
-    free_frames_add_batch(pages_to_refresh, min(num_allocated, NUM_PAGES_FAULTER_REFRESH));
-
-    #if ONLY_ONE_REFRESHER
-    InterlockedAnd(&free_frames_refresh_ongoing, FALSE);
-    #endif
-}
-
 
 /**
  * Determines whether or not a faulter should refresh the zero and free lists with pages from the standby list using pre-defined macros 
@@ -1100,16 +1205,41 @@ static void faulter_refresh_free_frames() {
  * 
  * In the future, this would be made more dynamic (perhaps based moreso on the rate of page usage, where they're being used, etc - rather than simple macros)
  */
-void potential_faulter_list_refresh() {
+void potential_list_refresh(ULONG64 thread_idx) {
+
+    /**
+     * We do this short scheme at the beginning of each list refresh so that we can avoid reading and writing to hot cache lines whenever we
+     * are trying to access the global variables in this function
+     */
+    #if DEBUG_THREAD_STORAGE
+    THREAD_LOCAL_STORAGE* storage = &thread_information.thread_local_storages[thread_idx];
+    custom_spin_assert(thread_information.thread_local_storages[thread_idx].thread_id == GetCurrentThreadId());
+    #endif
+
+    if (thread_information.thread_local_storages[thread_idx].list_refresh_status == LIST_REFRESH_ONGOING) {
+        return;
+    }
+
     if (standby_list->list_length > physical_page_count / STANDBY_LIST_REFRESH_PROPORTION) {
+        #if 0
         if (free_frames->total_available + zero_lists->total_available < physical_page_count / TOTAL_ZERO_AND_FREE_LIST_REFRESH_PROPORTION) {
-            faulter_refresh_free_and_zero_lists();
+            refresh_free_and_zero_lists();
         } 
         #if 1
-        else if (free_frames->total_available < physical_page_count / FREE_LIST_REFRESH_PROPORTION) {
-            faulter_refresh_free_frames();
+        else if (free_frames->total_available < physical_page_count / INDIVIDUAL_LIST_REFRESH_PROPORTION) {
+            refresh_free_frames();
         }
         #endif
+        #endif
+        if (zero_lists->total_available < physical_page_count / ZERO_LIST_REFRESH_PROPORTION && 
+            free_frames->total_available < physical_page_count / FREE_LIST_REFRESH_PROPORTION) {
+            refresh_free_and_zero_lists();
+        }
+        if (zero_lists->total_available < physical_page_count / ZERO_LIST_REFRESH_PROPORTION) {
+            refresh_zero_lists();
+        } else if (free_frames->total_available < physical_page_count / FREE_LIST_REFRESH_PROPORTION) {
+            refresh_free_frames();
+        }
     }
 }
 
@@ -1168,14 +1298,20 @@ ULONG64 standby_pop_batch(PAGE** page_storage, ULONG64 batch_size) {
     
     if (num_allocated == 0) return 0;
 
+    PAGE* clostest_to_tail = page_storage[0];
+    PAGE* farthest_from_tail = page_storage[num_allocated - 1];
+
     /**
      * Now, we have the pagelocks of all of the pages that we need to use
      */
     EnterCriticalSection(&standby_list->lock);
 
+    db_remove_section(farthest_from_tail->frame_listnode, clostest_to_tail->frame_listnode);
+    #if 0
     for (int i = 0; i < num_allocated; i++) {
         db_pop_from_tail(standby_list->listhead);
     }
+    #endif
 
     // db_remove_section(page_storage[0]->frame_listnode, page_storage[num_allocated - 1]->frame_listnode);
     standby_list->list_length -= num_allocated;
@@ -1189,12 +1325,28 @@ ULONG64 standby_pop_batch(PAGE** page_storage, ULONG64 batch_size) {
 
 
 /**
+ * This should be called whenever threads fail to acquire any pages, and need to wait for pages to be available.
+ * 
+ * This signals the trimmer as well as the modified writer if appropriate so that we start replenishing pages.
+ */
+void wait_for_pages_signalling() {
+    ResetEvent(waiting_for_pages_event);
+
+    SetEvent(trimming_event);
+
+    if (modified_list->list_length > 0) {
+        SetEvent(modified_writer_event);
+    }
+
+    WaitForSingleObject(waiting_for_pages_event, INFINITE);
+}
+
+
+/**
  * Tries to find an available page from the zero lists, free lists, or standby. If found,
  * returns a pointer to the page. Otherwise, returns NULL. If zero_page_preferred is TRUE,
  * we will search the zero lists first - otherwise, we search the free list first. Both are preferable to standby.
  * 
- * If there are no available pages, the trimming thread is signaled and the modified writing thread is signaled if appropriate.
- * The calling thread will wait for a signal for available pages before returning NULL
  */
 PAGE* find_available_page(BOOL zeroed_page_preferred) {
 
@@ -1246,26 +1398,13 @@ PAGE* find_available_page(BOOL zeroed_page_preferred) {
     /**
      * Now we have to try to get a page from the standby list
      */
-    if ((allocated_page = standby_pop_page(standby_list)) == NULL) {
-        ResetEvent(waiting_for_pages_event);
-
-        SetEvent(trimming_event);
-
-        if (modified_list->list_length > 0) {
-            SetEvent(modified_to_standby_event);
-        }
-
-        WaitForSingleObject(waiting_for_pages_event, INFINITE);
-
-        return NULL;
-    }
-
+    allocated_page = standby_pop_page(standby_list);
 
     #if DEBUG_PAGELOCK
     custom_spin_assert(allocated_page->holding_threadid == GetCurrentThreadId());
     #endif
 
-    // The pagelock is acquired in standby_pop_page
+    // If we failed to acquire a page, this is NULL
     return allocated_page;
 }
 
@@ -1319,23 +1458,10 @@ ULONG64 find_batch_available_pages(BOOL zeroed_pages_preferred, PAGE** page_stor
         }
     }
 
+    // DebugBreak();
+
     // At this point, we need to take pages from the standby list
     total_allocated_pages += standby_pop_batch(&page_storage[total_allocated_pages], num_pages - total_allocated_pages);
-
-    // We failed to get pages from any of the lists
-    if (total_allocated_pages == 0) {
-        ResetEvent(waiting_for_pages_event);
-
-        SetEvent(trimming_event);
-
-        if (modified_list->list_length > 0) {
-            SetEvent(modified_to_standby_event);
-        }
-
-        WaitForSingleObject(waiting_for_pages_event, INFINITE);
-
-        return 0;
-    }
 
     return total_allocated_pages;
 }
@@ -1514,6 +1640,43 @@ void free_frames_add(PAGE* page) {
     InterlockedIncrement64(&free_frames->total_available);
 
     LeaveCriticalSection(&free_frames->list_locks[listhead_idx]);
+}
+
+
+/**
+ * Connects the linked list nodes inside of the pages together to form a single section that
+ * can be added to a listhead very quickly
+ * 
+ * We also change the page's statuses to new_page_status since this is usually being done to add a 
+ * section to a list very quickly. This can avoid an extra loop later.
+ */
+void create_chain_of_pages(PAGE** pages_to_chain, ULONG64 num_pages, ULONG64 new_page_status) {
+    // We do not need to do anything
+    if (num_pages == 1) {
+        pages_to_chain[0]->status = new_page_status;
+        return;
+    }
+
+    PAGE* curr_page;
+    PAGE* next_page;
+
+    DB_LL_NODE* curr_node;
+    DB_LL_NODE* next_node;
+
+    for (ULONG64 i = 0; i < num_pages - 1; i++) {
+        curr_page = pages_to_chain[i];
+        curr_page->status = new_page_status;
+        curr_node = curr_page->frame_listnode;
+
+        next_page = pages_to_chain[i + 1];
+        next_node = next_page->frame_listnode;
+
+        curr_node->flink = next_node;
+        next_node->blink = curr_node;
+    } 
+    
+    // We need to modify the final page's status
+    next_page->status = new_page_status;
 }
 
 

@@ -206,10 +206,8 @@ void* db_pop_from_head(DB_LL_NODE* listhead) {
     listhead->flink = head_node->flink;
     head_node->flink->blink = listhead;
 
-    head_node->flink = NULL;
-    head_node->blink = NULL;
-
     #if DEBUG_LISTS
+
     head_node->prev_listhead = head_node->listhead_ptr;
     head_node->listhead_ptr = NULL;
     #endif
@@ -238,10 +236,8 @@ void* db_pop_from_tail(DB_LL_NODE* listhead) {
     listhead->blink = tail_node->blink;
     tail_node->blink->flink = listhead;
 
-    tail_node->flink = NULL;
-    tail_node->blink = NULL;
-
     #if DEBUG_LISTS
+
     tail_node->prev_listhead = tail_node->listhead_ptr;
     tail_node->listhead_ptr = NULL;
     #endif
@@ -271,17 +267,15 @@ void* db_remove_from_middle(DB_LL_NODE* listhead, DB_LL_NODE* middle_node) {
     DB_LL_NODE* prev = middle_node->blink;
     DB_LL_NODE* next = middle_node->flink;
 
-    assert(prev != middle_node);
-    assert(next != middle_node);
-    assert(listhead != middle_node);
-
-    middle_node->flink = NULL;
-    middle_node->blink = NULL;
     
     prev->flink = next;
     next->blink = prev;
 
     #if DEBUG_LISTS
+    assert(prev != middle_node);
+    assert(next != middle_node);
+    assert(listhead != middle_node);
+
     middle_node->prev_listhead =  middle_node->listhead_ptr;
     middle_node->listhead_ptr = NULL;
     #endif
@@ -302,17 +296,82 @@ void db_remove_section(DB_LL_NODE* beginning, DB_LL_NODE* end) {
         DebugBreak();
     }
 
-    DB_LL_NODE* front_connection = beginning->blink;
-    DB_LL_NODE* back_connection = end->flink;
+    DB_LL_NODE* pre_section_connection = beginning->blink;
+    DB_LL_NODE* post_section_connection = end->flink;
 
-    front_connection->flink = back_connection;
-    back_connection->blink = front_connection;
+    pre_section_connection->flink = post_section_connection;
+    post_section_connection->blink = pre_section_connection;
 
     #if DEBUG_LISTS
     DB_LL_NODE* curr_node = beginning;
 
-    while (curr_node != end->flink) {
+    while (curr_node != post_section_connection) {
+        curr_node->prev_listhead = curr_node->listhead_ptr;
         curr_node->listhead_ptr = NULL;
+
+        curr_node = curr_node->flink;
+    }
+    #endif
+}
+
+
+/**
+ * Adds the section with the two nodes at its beginning and end to the tail of the list
+ * 
+ * The end node will be the new tail node of the list
+ */
+void db_insert_section_at_tail(DB_LL_NODE* listhead, DB_LL_NODE* beginning, DB_LL_NODE* end) {
+    if (listhead == NULL || beginning == NULL || end == NULL) {
+        fprintf(stderr, "NULL parameters given to db_insert_section_at_tail\n");
+        DebugBreak();
+    }
+
+    DB_LL_NODE* old_tail = listhead->blink;
+
+    old_tail->flink = beginning;
+    beginning->blink = old_tail;
+
+    end->flink = listhead;
+    listhead->blink = end;
+
+    #if DEBUG_LISTS
+    DB_LL_NODE* curr_node = beginning;
+
+    while (curr_node != listhead) {
+        assert(curr_node->listhead_ptr == NULL);
+        curr_node->listhead_ptr = listhead;
+
+        curr_node = curr_node->flink;
+    }
+    #endif
+}
+
+
+/**
+ * Adds the section with the two nodes at its beginning and end to the tail of the list
+ * 
+ * The beginning node will be the new head node of the list
+ */
+void db_insert_section_at_head(DB_LL_NODE* listhead, DB_LL_NODE* beginning, DB_LL_NODE* end) {
+    if (listhead == NULL || beginning == NULL || end == NULL) {
+        fprintf(stderr, "NULL parameters given to db_insert_section_at_head\n");
+        DebugBreak();
+    }
+
+    DB_LL_NODE* old_head = listhead->flink;
+
+    old_head->blink = end;
+    end->flink = old_head;
+
+    beginning->blink = listhead;
+    listhead->flink = beginning;
+
+    #if DEBUG_LISTS
+    DB_LL_NODE* curr_node = beginning;
+
+    while (curr_node != old_head) {
+        assert(curr_node->listhead_ptr == NULL);
+        curr_node->listhead_ptr = listhead;
 
         curr_node = curr_node->flink;
     }

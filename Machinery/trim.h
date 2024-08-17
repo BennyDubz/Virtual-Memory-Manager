@@ -7,22 +7,34 @@
 
 #include "../Datastructures/datastructures.h"
 
+// The maximum number of PTEs that we can trim per PTE locksection
+#define TRIM_PER_SECTION 64
+
+// The minimum and maximum amount of PTEs that can be trimmed by the faulting threads
 #define FAULTER_TRIM_BEHIND_MIN 8
 #define FAULTER_TRIM_BEHIND_MAX 64
 
 // We need to OR the final bit of a pfn in order to have read-only permissions
 #define PAGE_MAPUSERPHYSCAL_READONLY_MASK 0x8000000000000000
 
+#define MOD_WRITER_MAX_NUM_SECTIONS 16
+#define MOD_WRITER_SECTION_SIZE     (MAX_PAGES_WRITABLE / MOD_WRITER_MAX_NUM_SECTIONS)
+
+/**
+ * If the standby list is smaller than the (total physical memory / proportion) then it will hog the modified list lock
+ */
+#define MOD_WRITER_PREFERRED_STANDBY_MINIMUM_PROPORTION  3
+
 /**
  * Thread dedicated to aging all of the valid PTEs in the pagetable
  */
-LPTHREAD_START_ROUTINE thread_aging();
+LPTHREAD_START_ROUTINE thread_aging(void* parameters);
 
 
 /**
  * Thread dedicated to trimming PTEs from the pagetable and putting them on the modified list
  */
-LPTHREAD_START_ROUTINE thread_trimming();
+LPTHREAD_START_ROUTINE thread_trimming(void* parameters);
 
 
 /**
@@ -33,9 +45,9 @@ void faulter_trim_behind();
 
 
 /**
- * Thread dedicated to writing pages from the modified list to disk, putting finally adding the pages to standby
+ * Thread dedicated to writing pages from the modified list to disk, adding the pages to standby
  */
-LPTHREAD_START_ROUTINE thread_modified_to_standby();
+LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters);
 
 
 /**

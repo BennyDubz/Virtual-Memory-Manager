@@ -16,6 +16,20 @@
 #define MAX_CONSECUTIVE_ACCESSES    64
 #define TOTAL_ACCESS_AMOUNT         (MB(10))
 
+// How frequently in milliseconds we print out all of the information about the simulation and our current progress
+#define PRINT_FREQUECY_MS          2000 
+
+/**
+ * 1 thread - 10mb - 21.1 seconds
+ * 2 threads - 10mb - 12.67 seconds
+ * 4 threads - 10mb - 8.95 seconds
+ * 6 threads - 10 mb - 7.5 seconds
+ * 8 threads - 10 mb - 7.4 seconds
+ * 10 threads - 10mb - 6.75 seconds
+ * 12 threads - 10mb - 6.6 seconds
+ */
+
+
 /**
  * Reads are more common in the real world - if (random_number % WRITE_PROBABILITY_MODULO == 0) then we write to the address
  * This allows us to properly demonstrate how the fault handler distinguishes reads and writes, and how we
@@ -23,8 +37,8 @@
  */
 #define WRITE_PROBABILITY_MODULO  10
 
-HANDLE simulation_threads[NUM_USERMODE_THREADS];
 HANDLE thread_start_event;
+HANDLE simulation_thread_handles[NUM_USERMODE_THREADS];
 volatile ULONG64 total_fault_failures = 0;
 volatile ULONG64 fault_results[NUM_FAULT_RETURN_VALS];
 
@@ -32,7 +46,11 @@ volatile ULONG64 fault_results[NUM_FAULT_RETURN_VALS];
 typedef struct {
     PULONG_PTR vmem_base;
     ULONG_PTR virtual_address_size;
-    ULONG64* time_storage;
+    volatile ULONG64 current_access_count;
+    ULONG64 thread_index;
+
+    // So we don't waste time bouncing cache lines on the usermode threads
+    ULONG64 buffer[4];
 } SIM_PARAMS;
 
 
@@ -51,7 +69,7 @@ void usermode_virtual_memory_simulation () {
     PULONG_PTR vmem_base;
     ULONG_PTR virtual_address_size;
 
-    if (init_all(&vmem_base, &virtual_address_size) == ERROR) {
+    if (init_all(&vmem_base, &virtual_address_size, NUM_USERMODE_THREADS) == ERROR) {
         fprintf(stderr, "Unable to initialize usermode memory management simulation\n");
         return;
     }
@@ -60,8 +78,6 @@ void usermode_virtual_memory_simulation () {
     ULONG64 virtual_address_size_in_unsigned_chunks = virtual_address_size / sizeof(ULONG_PTR);
 
     SIM_PARAMS thread_params[NUM_USERMODE_THREADS];
-
-    ULONG64 thread_times[NUM_USERMODE_THREADS];
 
     thread_start_event = CreateEvent(NULL, TRUE, FALSE, NULL);
 
@@ -85,7 +101,7 @@ void usermode_virtual_memory_simulation () {
     printf("No simulated disk slowdown: lenient disk is on\n");
     #endif
 
-    printf("0x%llx threads will perform a total of 0x%llX accesses\n",(ULONG64) NUM_USERMODE_THREADS, (ULONG64) TOTAL_ACCESS_AMOUNT);
+    printf("0x%llX threads will perform a total of 0x%llX accesses\n",(ULONG64) NUM_USERMODE_THREADS, (ULONG64) TOTAL_ACCESS_AMOUNT);
 
     // Initialize fault failure tracking array
     for (int i = 0; i < NUM_FAULT_RETURN_VALS; i++) {
@@ -94,10 +110,12 @@ void usermode_virtual_memory_simulation () {
 
     // Start off all threads
     for (int user_thread_num = 0; user_thread_num < NUM_USERMODE_THREADS; user_thread_num++) {
-        thread_params[user_thread_num].time_storage = &thread_times[user_thread_num];
+        thread_params[user_thread_num].current_access_count = 0;
         thread_params[user_thread_num].virtual_address_size = virtual_address_size;
         thread_params[user_thread_num].vmem_base = vmem_base;
-        simulation_threads[user_thread_num] = CreateThread(NULL, 0, 
+        thread_params[user_thread_num].thread_index = user_thread_num;
+
+        simulation_thread_handles[user_thread_num] = CreateThread(NULL, 0, 
                 (LPTHREAD_START_ROUTINE) thread_access_random_addresses, (LPVOID) &thread_params[user_thread_num], 0, NULL);
     }
 
@@ -110,8 +128,28 @@ void usermode_virtual_memory_simulation () {
     SetEvent(thread_start_event);
 
     // Wait for thread completion
+    ULONG64 current_access_count = 0;
+    double proportion_of_total;
+    ULONG64 wait_code;
     for (int user_thread_num = 0; user_thread_num < NUM_USERMODE_THREADS; user_thread_num++) {
-        WaitForSingleObject(simulation_threads[user_thread_num], INFINITE);
+        wait_code = WaitForSingleObject(simulation_thread_handles[user_thread_num], PRINT_FREQUECY_MS);
+
+        // So we don't spam out printfs at the end of the fault
+        if (wait_code == WAIT_TIMEOUT) {
+            for (ULONG64 i = 0; i < NUM_USERMODE_THREADS; i++) {
+                current_access_count += thread_params[i].current_access_count;
+            }
+
+            proportion_of_total = (double) current_access_count / (double) TOTAL_ACCESS_AMOUNT;
+
+            printf("Total access count 0x%llx is %.4f%% of the total amount\n", current_access_count, proportion_of_total * 100);
+            printf("\tPhys page standby ratio: %f Zeroed: 0x%llX Free: 0x%llX Standby: 0x%llX Mod 0x%llX Num disk slots %llX\n", (double)  standby_list->list_length / physical_page_count, zero_lists->total_available, free_frames->total_available, 
+                                            standby_list->list_length, modified_list->list_length, disk->total_available_slots);
+            
+            user_thread_num --;
+        }
+
+        current_access_count = 0;
     }   
     
 
@@ -123,17 +161,26 @@ void usermode_virtual_memory_simulation () {
 
     timer = clock() - timer;
     double time_taken = (double) (timer) / CLOCKS_PER_SEC;
-    printf("usermode_virtual_memory_simulation : finished accessing 0x%llX random virtual addresses over 0x%llx threads\n", TOTAL_ACCESS_AMOUNT, NUM_USERMODE_THREADS);
+    printf("usermode_virtual_memory_simulation : finished accessing 0x%llX random virtual addresses over 0x%llX threads\n", TOTAL_ACCESS_AMOUNT, NUM_USERMODE_THREADS);
     printf("usermode_virtual_memory_simulation : total of 0x%llX fault failures\n", total_fault_failures);
     printf("usermode_virtual_memory_simulation : total time was %f seconds\n", time_taken);
+    
+    ULONG64 unaccessed_pte_count = 0;
+    for (ULONG64 i = 0; i < pagetable->num_virtual_pages; i++) {
+        if (is_used_pte(pagetable->pte_list[i]) == FALSE) unaccessed_pte_count++;
+    }
+    
+    printf("usermode_virtual_memory_simulation : num PTEs that were never accessed: 0x%llx\n", unaccessed_pte_count);
+
     printf("usermode_virtual_memory_simulation : fault breakdown:\n");
 
     printf("\tSuccessful faults: 0x%llX\n", fault_results[SUCCESSFUL_FAULT]);
-    printf("\tFailures due to rejection (invalid address): 0x%llX\n", fault_results[REJECTION_FAIL]);
+    printf("\tFailures due to rejection (invalid parameters): 0x%llX\n", fault_results[REJECTION_FAIL]);
     printf("\tFailures due to lack of available pages: 0x%llX\n", fault_results[NO_AVAILABLE_PAGES_FAIL]);
     printf("\tFailures due to failed rescues of transition PTEs: 0x%llX\n", fault_results[RESCUE_FAIL]);
-    printf("\tFailures due to disk waiting: 0x%llX\n", fault_results[DISK_FAIL]);
-    printf("\tFailures due to races between user threads: 0x%llX\n", fault_results[RACE_CONDITION_FAIL]);
+    printf("\tFailures due to races on disk PTEs: 0x%llX\n", fault_results[DISK_RACE_CONTIION_FAIL]);
+    printf("\tFailures due to races on unaccessed PTEs: 0x%llX\n", fault_results[UNACCESSED_RACE_CONDITION_FAIL]);
+    printf("\tFailures due to races on valid PTEs: 0x%llx\n", fault_results[VALID_PTE_RACE_CONTIION_FAIL]);
 
     //
     // Now that we're done with our memory we can be a good
@@ -154,11 +201,19 @@ int thread_access_random_addresses(void* params) {
     ULONG64 random_number;
     PULONG_PTR vmem_base;
     ULONG_PTR virtual_address_size;
+    ULONG64 thread_idx;
+    volatile ULONG64* access_count;
 
     SIM_PARAMS* parameters = (SIM_PARAMS*) params;
 
     virtual_address_size = parameters->virtual_address_size;
     vmem_base = parameters->vmem_base;
+    thread_idx = parameters->thread_index;
+    access_count = &parameters->current_access_count;
+
+    #if DEBUG_THREAD_STORAGE
+    thread_information.thread_local_storages[thread_idx].thread_id = GetCurrentThreadId();
+    #endif
 
     // This ensures that we access distinct 64 bit chunks that do not overlap
     ULONG64 virtual_address_size_in_unsigned_chunks = virtual_address_size / sizeof(ULONG_PTR);
@@ -176,7 +231,8 @@ int thread_access_random_addresses(void* params) {
 
     WaitForSingleObject(thread_start_event, INFINITE);
 
-    for (i = 0; i < TOTAL_ACCESS_AMOUNT / NUM_USERMODE_THREADS; i += 1) {
+    for (i = 0; i < TOTAL_ACCESS_AMOUNT / NUM_USERMODE_THREADS; i++) {
+        *access_count = i;
 
         if (consecutive_accesses == 0) {
             arbitrary_va = NULL;
@@ -233,7 +289,7 @@ int thread_access_random_addresses(void* params) {
         }
 
         if (page_faulted) {
-            fault_result = pagefault(arbitrary_va, access_type);
+            fault_result = pagefault(arbitrary_va, access_type, thread_idx);
 
             InterlockedIncrement64(&fault_results[fault_result]);
 

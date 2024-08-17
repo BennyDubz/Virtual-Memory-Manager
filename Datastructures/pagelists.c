@@ -48,7 +48,7 @@ PAGE* initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_f
         return NULL;
     }
 
-    printf("Num physical frames: 0x%llx\n", num_physical_frames);
+    printf("Num physical frames: 0x%llX\n", num_physical_frames);
     
     // This makes it so we can easily shift to find even the lowest physical frame
     page_storage_base -= lowest_pfn;

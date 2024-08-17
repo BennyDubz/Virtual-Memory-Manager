@@ -14,7 +14,7 @@ void initialize_lock(CRITICAL_SECTION* critsec) {
     InitializeCriticalSection(critsec);
 
     #ifdef LOCK_SPINNING
-    SetCriticalSectionSpinCount(critsec, MB(16));
+    SetCriticalSectionSpinCount(critsec, MB(16) - 1);
     #endif
 }
 

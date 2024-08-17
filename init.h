@@ -13,6 +13,9 @@
  * Stores the base address of virtual memory and the total amount of usable virtual memory vmem_base_storage
  * and virtual_memory_size_storage respectively.
  * 
+ * Takes the number of usermode threads that we will use as a parameter. This allows us to initialize all of the thread local storage
+ * that the threads can take advantage of
+ * 
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
-int init_all();
+int init_all(PULONG_PTR* vmem_base_storage, ULONG64* virtual_memory_size_storage, ULONG64 num_usermode_threads);

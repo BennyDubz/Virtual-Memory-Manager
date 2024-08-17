@@ -104,3 +104,19 @@ void* db_remove_from_middle(DB_LL_NODE* listhead, DB_LL_NODE* middle_node);
  * the beginning and end node are in the list
  */
 void db_remove_section(DB_LL_NODE* beginning, DB_LL_NODE* end);
+
+
+/**
+ * Adds the section with the two nodes at its beginning and end to the tail of the list
+ * 
+ * The end node will be the new tail node of the list
+ */
+void db_insert_section_at_tail(DB_LL_NODE* listhead, DB_LL_NODE* beginning, DB_LL_NODE* end);
+
+
+/**
+ * Adds the section with the two nodes at its beginning and end to the tail of the list
+ * 
+ * The beginning node will be the new head node of the list
+ */
+void db_insert_section_at_head(DB_LL_NODE* listhead, DB_LL_NODE* beginning, DB_LL_NODE* end);
