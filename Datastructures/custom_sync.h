@@ -13,3 +13,6 @@
  * We use this to initialize critical sections with high spincounts if we want
  */
 void initialize_lock(CRITICAL_SECTION* critsec);
+
+
+void initialize_shared_lock();

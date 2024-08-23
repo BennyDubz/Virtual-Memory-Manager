@@ -504,6 +504,21 @@ static int init_multithreading(ULONG64 num_usermode_threads) {
         fprintf(stderr, "Failed to allocate memory for thread creation in init_multithreading\n");
         return ERROR;
     }
+
+
+    /**
+     * All thread (simulation and worker) local storage setup
+     */
+    THREAD_LOCAL_STORAGE* thread_storage = (THREAD_LOCAL_STORAGE*) malloc(sizeof(THREAD_LOCAL_STORAGE) * (num_usermode_threads + num_worker_threads));
+
+    if (thread_storage == NULL) {
+        fprintf(stderr, "Failed to allocate memory for thread local storage\n");
+        return ERROR;
+    }
+
+    thread_information.total_thread_count = num_usermode_threads + num_worker_threads;
+    thread_information.thread_local_storages = thread_storage;
+
     
     /** 
      * Aging setup
@@ -561,24 +576,12 @@ static int init_multithreading(ULONG64 num_usermode_threads) {
     zeroer_params->other_parameters = &vmem_parameters;
 
     threads[3] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) thread_populate_zero_lists, zeroer_params, 0, NULL);
-    
-    /**
-     * All thread (simulation and worker) local storage setup
-     */
-    THREAD_LOCAL_STORAGE* thread_storage = (THREAD_LOCAL_STORAGE*) malloc(sizeof(THREAD_LOCAL_STORAGE) * (num_usermode_threads + num_worker_threads));
 
-    if (thread_storage == NULL) {
-        fprintf(stderr, "Failed to allocate memory for thread local storage\n");
-        return ERROR;
-    }
 
     for (ULONG64 thread_idx = 0; thread_idx < num_usermode_threads + num_worker_threads; thread_idx++) {
         thread_storage[thread_idx].list_refresh_status = LIST_REFRESH_NOT_ONGOING;
         // The thread handles will be initialized when we create the usermode threads in the parent usermode_simulation thread
     }
-
-    thread_information.total_thread_count = num_usermode_threads + num_worker_threads;
-    thread_information.thread_local_storages = thread_storage;
 
 
     return SUCCESS;

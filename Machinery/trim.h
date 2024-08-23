@@ -11,7 +11,7 @@
 #define TRIM_PER_SECTION 64
 
 // The minimum and maximum amount of PTEs that can be trimmed by the faulting threads
-#define FAULTER_TRIM_BEHIND_MIN 4
+#define FAULTER_TRIM_BEHIND_MIN 8
 #define FAULTER_TRIM_BEHIND_MAX 64
 
 // We need to OR the final bit of a pfn in order to have read-only permissions
@@ -25,10 +25,17 @@
  */
 #define MOD_WRITER_PREFERRED_STANDBY_MINIMUM_PROPORTION  3
 
+
 /**
  * Thread dedicated to aging all of the valid PTEs in the pagetable
  */
 LPTHREAD_START_ROUTINE thread_aging(void* parameters);
+
+
+/**
+ * Updates all of the threads trim signal statuses to the given status
+ */
+void trim_update_thread_storages(UCHAR trim_signal_status);
 
 
 /**

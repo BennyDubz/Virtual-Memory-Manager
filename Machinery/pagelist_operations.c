@@ -1595,6 +1595,7 @@ int standby_rescue_page(PAGE* page) {
     return SUCCESS;
 }
 
+
 /**
  * Releases all of the pages by returning them to their original lists
  * 
@@ -1641,6 +1642,8 @@ void release_batch_unneeded_pages(PAGE** pages, ULONG64 num_pages) {
         custom_spin_assert(FALSE);
     }
 
+    BOOL signal_waiters = (total_available_pages == 0);
+
     /**
      * We handle the standby pages first as there is a chance that these pages can be rescued still, preventing
      * unnecessary disk reads
@@ -1652,7 +1655,15 @@ void release_batch_unneeded_pages(PAGE** pages, ULONG64 num_pages) {
 
         db_insert_section_at_tail(standby_list->listhead, standby_pages[0]->frame_listnode, standby_pages[num_standby_pages - 1]->frame_listnode);
 
+        standby_list->list_length += num_standby_pages;
+        InterlockedAdd64(&total_available_pages, num_standby_pages);
+
         LeaveCriticalSection(&standby_list->lock);
+
+        for (ULONG64 i = 0; i < num_standby_pages; i++) {
+            release_pagelock(standby_pages[i], 40);
+        }
+
     }
 
     if (num_zero_pages > 0) {
@@ -1663,6 +1674,10 @@ void release_batch_unneeded_pages(PAGE** pages, ULONG64 num_pages) {
         free_frames_add_batch(free_pages, num_free_pages);
     }
 
+
+    if (signal_waiters) {
+        SetEvent(waiting_for_pages_event);
+    }
 
 }
 

@@ -33,7 +33,7 @@ ULONG64 fault_count = 0;
  */
 static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 access_type);
 
-static int handle_unaccessed_pte_fault(PTE local_pte, PAGE** result_page_storage);
+static int handle_unaccessed_pte_fault(PTE* accessed_pte, PAGE** result_page_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage);
 
 static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result_page_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage);
 
@@ -94,6 +94,9 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
 
     // Make a copy of the PTE in order to perform the fault
     PTE local_pte = read_pte_contents(accessed_pte);
+    PAGE* unneeded_pages[MAX_PAGES_READABLE];
+    ULONG64 num_unneeded_pages = 0;
+
     PAGE* allocated_pages[MAX_PAGES_READABLE];
     PTE* ptes_to_connect[MAX_PAGES_READABLE];
     ULONG64 num_ptes_to_connect;
@@ -111,12 +114,9 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
 
     } else if (is_used_pte(local_pte) == FALSE) {
 
-        if ((handler_result = handle_unaccessed_pte_fault(local_pte, allocated_pages)) != SUCCESS) {
+        if ((handler_result = handle_unaccessed_pte_fault(accessed_pte, allocated_pages, ptes_to_connect, &num_ptes_to_connect)) != SUCCESS) {
             return handler_result;
         }
-
-        ptes_to_connect[0] = accessed_pte;
-        num_ptes_to_connect = 1;
 
     } else if (is_transition_format(local_pte)) {
 
@@ -149,10 +149,45 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
      * 
      * Disk PTEs are only edited at the end of faults by the threads who set their being_read_from_disk field in the PTE. This means that we have to access
      * the PTE lock earlier on in the fault in order to set this field, but we do not need to re-acquire it when we are finishing the fault
+     * 
+     * Unaccessed PTEs, however, get their pages acquired BEFORE we acquire the PTE lock. This reduces the time that we hold the PTE lock
+     * but comes with the drawback that we might acquire pages that we do not need in the end and need to return them.
      */
     if (is_used_pte(local_pte) == FALSE) {
         EnterCriticalSection(pte_lock);
-    
+        PTE* ptes_not_changed[MAX_PAGES_READABLE];
+        ULONG64 num_ptes_not_changed = 0;
+
+        for (ULONG64 i = 0; i < num_ptes_to_connect; i++) {
+            // If the PTE is still unaccessed, we can still connect it
+            if (is_used_pte(read_pte_contents(ptes_to_connect[i])) == FALSE) {
+                ptes_not_changed[num_ptes_not_changed] = ptes_to_connect[i];
+                num_ptes_not_changed++;
+            }
+        }
+
+        // All of our PTEs have changed, there is nothing for us to do
+        if (num_ptes_not_changed == 0) {
+            LeaveCriticalSection(pte_lock);
+            release_batch_unneeded_pages(allocated_pages, num_ptes_to_connect);
+            return UNACCESSED_RACE_CONDITION_FAIL;
+        }
+
+        for (ULONG64 i = 0; i < num_ptes_not_changed; i++) {
+            ptes_to_connect[i] = ptes_not_changed[i];
+        }
+
+        // We need to ensure that we return the pages that we do not need anymore back to their lists
+        if (num_ptes_not_changed < num_ptes_to_connect) {
+            for (ULONG64 unneeded_page_idx = num_ptes_not_changed; unneeded_page_idx < num_ptes_to_connect; unneeded_page_idx++) {
+                unneeded_pages[num_unneeded_pages] = allocated_pages[unneeded_page_idx];
+                num_unneeded_pages++;
+            }
+        }
+
+        num_ptes_to_connect = num_ptes_not_changed;
+
+        #if 0
         /**
          * More than one thread was trying to access this PTE at once, meaning that only one of them succeeded and mapped the page
          */
@@ -161,6 +196,7 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
             release_unneeded_page(allocated_pages[0]);
             return UNACCESSED_RACE_CONDITION_FAIL;
         }
+        #endif
     }
 
     // We may need to edit the old PTE, in which case, we want a copy so we can still find it
@@ -261,6 +297,11 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
     for (ULONG64 i = 0; i < num_ptes_to_connect; i++) {
         release_pagelock(allocated_pages[i], 11);
     }
+    
+    // For unaccessed PTEs that we might have speculated on incorrectly, we might need to return pages that we never used
+    if (num_unneeded_pages > 0) {
+        release_batch_unneeded_pages(unneeded_pages, num_unneeded_pages);
+    }
 
     end_of_fault_work(accessed_pte, thread_idx);
 
@@ -280,7 +321,6 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
 
     CRITICAL_SECTION* pte_lock = &pte_to_locksection(accessed_pte)->lock;
     PULONG_PTR pte_va = pte_to_va(accessed_pte);
-    DWORD old_protection_storage_notused;
     
     // Prepare the contents ahead of time depending on whether or not we are changing the permissions
     PTE pte_contents;
@@ -368,8 +408,71 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
  * 
  * Writes the p, or NULL if it fails
  */
-static int handle_unaccessed_pte_fault(PTE local_pte, PAGE** result_page_storage) {
+static int handle_unaccessed_pte_fault(PTE* accessed_pte, PAGE** result_page_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage) {
 
+    ptes_to_connect_storage[0] = accessed_pte;
+    ULONG64 num_pages_to_acquire = 1;
+    PTE_LOCKSECTION* accessed_pte_locksection = pte_to_locksection(accessed_pte);
+
+    // See if there are enough pages to justify speculative mapping
+    if (total_available_pages > physical_page_count / SPECULATIVE_PAGE_MINIMUM_PROPORTION) {
+        ULONG64 trailing_count = get_trailing_valid_pte_count(accessed_pte);
+
+        ULONG64 accessed_pte_idx = pte_to_pagetable_idx(accessed_pte);
+
+        // If this is not true, then we should not speculate as there is not enough evidence of sequential accesses or we are at the end
+        // of the pagetable
+        if (trailing_count > 0 && accessed_pte_idx < pagetable->num_virtual_pages - 1) {
+            ULONG64 end_index = min(accessed_pte_idx + trailing_count, pagetable->num_virtual_pages - 1);
+            PTE_LOCKSECTION* curr_ptes_locksection;
+            PTE* curr_pte;
+            PTE pte_copy;
+
+            for (ULONG64 speculative_pte_idx = accessed_pte_idx + 1; speculative_pte_idx < end_index; speculative_pte_idx++) {
+                curr_pte = &pagetable->pte_list[speculative_pte_idx];
+                pte_copy = read_pte_contents(curr_pte);
+
+                if (is_used_pte(pte_copy)) {
+                    continue;
+                }
+
+                // We do not want to have to edit more than one PTE locksection and have to acquire more locks later
+                if (pte_to_locksection(curr_pte) != accessed_pte_locksection) {
+                    break;
+                }
+
+                /**
+                 * Now, we can speculate on this PTE. We cannot guarantee that another faulter will not resolve it, but we will try
+                 */
+                ptes_to_connect_storage[num_pages_to_acquire] = curr_pte;
+                num_pages_to_acquire++;
+            }
+        }
+    }
+
+    if (num_pages_to_acquire > MAX_PAGES_READABLE) {
+        custom_spin_assert(FALSE);
+    }
+
+    ULONG64 num_pages_acquired = find_batch_available_pages(TRUE, result_page_storage, num_pages_to_acquire);
+
+    if (num_pages_acquired == 0) {
+        wait_for_pages_signalling();
+
+        /**
+         * As we do not hold any locks, we are okay to bail after this. But after waiting for available pages
+         * it is likely enough that things have changed that it is better to redo the fault
+         */
+        return NO_AVAILABLE_PAGES_FAIL;
+    }
+
+    // If we get fewer pages than there are PTEs that we speculated on, they will be ignored
+    *num_ptes_to_connect_storage = num_pages_acquired;
+
+    return SUCCESS;
+
+
+    #if 0
     /**
      * In this case, all we need to do is get a valid page and return it - nothing else
      */
@@ -383,8 +486,11 @@ static int handle_unaccessed_pte_fault(PTE local_pte, PAGE** result_page_storage
         return NO_AVAILABLE_PAGES_FAIL;
     }
 
+    *ptes_to_connect_storage = accessed_pte;
     *result_page_storage = allocated_page;
     return SUCCESS;
+    #endif
+    
 }
 
 
@@ -396,6 +502,7 @@ static int handle_unaccessed_pte_fault(PTE local_pte, PAGE** result_page_storage
  * 
  * Returns SUCCESS if there are no issues, or RESCUE_FAIL otherwise
  */
+#define ONLY_SAME_STATUS 1
 static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result_page_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage) {
     ULONG64 pfn = local_pte.transition_format.frame_number;
 
@@ -409,9 +516,6 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
         release_pagelock(page_to_rescue, 2);
         return RESCUE_FAIL;
     }
-
-    
-    ULONG64 trailing_count = get_trailing_valid_pte_count(accessed_pte);
 
     ULONG64 num_to_speculate;
 
@@ -443,6 +547,10 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
         num_standby_rescues++;
     }
 
+    #if ONLY_SAME_STATUS
+    ULONG64 accessed_page_status = page_to_rescue->status;
+    #endif
+
     /**
      * If there are valid PTEs behind us and we are not at the end of our pagetable,
      * then we can speculate on the PTEs ahead of us - and rescue other transition format PTEs
@@ -470,6 +578,12 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
                 continue;
             }
 
+            #if ONLY_SAME_STATUS
+            if (possible_page->status != accessed_page_status) {
+                release_pagelock(possible_page, 38);
+                continue;
+            }
+            #else
             /**
              * We know the PTE cannot be in transition format anymore if the page is in neither of these statuses
              */
@@ -477,6 +591,8 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
                 release_pagelock(possible_page, 38);
                 continue;
             }
+            #endif
+            
 
             /**
              * Finally, this addresses a race condition where the PTE was re-allocated to someone else, and then
@@ -811,10 +927,13 @@ static void end_of_fault_work(PTE* accessed_pte, ULONG64 thread_idx) {
     /**
      * Temporary ways to induce trimming until we have a better heuristic
      */    
-    if ((total_available_pages < (physical_page_count / 2) && (fault_count % 8) == 0) 
-            && modified_list->list_length < physical_page_count / 2) {
-        SetEvent(trimming_event);
+    if (thread_information.thread_local_storages[thread_idx].trim_signaled == TRIMMER_NOT_SIGNALLED) {
+        if ((total_available_pages < (physical_page_count / 2)) && modified_list->list_length < physical_page_count / 2) {
+            trim_update_thread_storages(TRIMMER_SIGNALED);
+            SetEvent(trimming_event);
+        }
     }
+    
 
     // We try to trim behind us... currently using placeholder heuristics
     if (total_available_pages < (physical_page_count / 4) && modified_list->list_length < physical_page_count / 4) {

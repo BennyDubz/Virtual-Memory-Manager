@@ -35,6 +35,10 @@
 
 #define LIST_REFRESH_NOT_ONGOING 0
 #define LIST_REFRESH_ONGOING 1
+
+#define TRIMMER_NOT_SIGNALLED 0
+#define TRIMMER_SIGNALED 1
+
 #ifndef THREAD_LOCAL_STORAGE_T
 #define THREAD_LOCAL_STORAGE_T
 
@@ -45,6 +49,9 @@ typedef struct {
     #endif
     UCHAR list_refresh_status;
     UCHAR buffer2[63];
+
+    UCHAR trim_signaled;
+    UCHAR buffer3[63];
 } THREAD_LOCAL_STORAGE;
 
 typedef struct {

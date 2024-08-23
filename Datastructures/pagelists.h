@@ -11,6 +11,10 @@
 #define DEBUG_PAGELOCK 0
 #define LIGHT_DEBUG_PAGELOCK 0
 
+
+// When toggled, we enable a shared lock for the modified list
+#define MODIFIED_SHARED_LOCK 1
+
 #include <windows.h>
 #include "../hardware.h"
 #include "./db_linked_list.h"
@@ -58,11 +62,18 @@ typedef struct {
      */
     ULONG64 modified:1;
     PTE* pte;
+
+    // We could use a single bit here if we decided to be more careful with our interlocked operations (not to crush other bits),
+    // but I decided to use this for simplicity so that I could spend time on the actual use of the pagelocks
     long page_lock;
+
+    
     #if DEBUG_PAGELOCK
     CRITICAL_SECTION dev_page_lock;
     ULONG64 holding_threadid;
 
+    // The debugger is just painfully slow on this program since we are try/catching exceptions for the simulation,
+    // so it was extremely helpful to build a history of the page into the struct to use only when debugging
     #elif LIGHT_DEBUG_PAGELOCK
     ULONG64 holding_threadid;
     PTE acquiring_pte_copy;
@@ -210,7 +221,13 @@ FREE_FRAMES_LISTS* initialize_free_frames();
 typedef struct {
     DB_LL_NODE* listhead;
     volatile ULONG64 list_length;
+
+    #if MODIFIED_SHARED_LOCK
+    SRWLOCK shared_lock;
+    #else
+    SRWLOCK shared_lock;
     CRITICAL_SECTION lock;
+    #endif
 
 } MODIFIED_LIST;
 

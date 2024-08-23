@@ -16,10 +16,12 @@
 typedef struct NODE {
     struct NODE* flink;
     struct NODE* blink;
+
     #if DEBUG_LISTS
     struct NODE* listhead_ptr;
     struct NODE* prev_listhead;
     #endif
+    
     void* item;
 } DB_LL_NODE;
 

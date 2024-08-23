@@ -129,13 +129,25 @@ ULONG64 write_batch_to_disk(DISK_BATCH* disk_batch) {
  * 
  * Returns SUCCESS if a slot was allocated, ERROR otherwise
  */
+#define ONE_ATTEMPT 1
 static int acquire_disk_readsection(ULONG64* disk_readsection_idx_storage) {
     long old_val;
     ULONG64 curr_idx;
     volatile long* disk_readsection;
 
     ULONG64 num_attempts = 0;
+    #if ONE_ATTEMPT
+    curr_idx = InterlockedIncrement64(&disk->disk_read_curr_idx) % DISK_READSECTIONS;
 
+    old_val = InterlockedCompareExchange(&disk->disk_readsection_statuses[curr_idx], DISK_READSECTION_USED, DISK_READSECTION_OPEN);
+    
+    // We successfully claimed the disk slot
+    if (old_val == DISK_READSECTION_OPEN) {
+        *disk_readsection_idx_storage = curr_idx;
+        InterlockedDecrement64(&disk->num_available_readsections);
+        return SUCCESS;
+    }
+    #else
     while (num_attempts < DISK_READSECTIONS && disk->num_available_readsections > 0) {   
         /**
          * Using the interlocked operations here with the read indices makes it almost certain that threads will not share the same
@@ -156,6 +168,7 @@ static int acquire_disk_readsection(ULONG64* disk_readsection_idx_storage) {
 
         num_attempts++;
     }
+    #endif
 
     // There were no slots available, we will need to refresh the list and try again
     return ERROR;

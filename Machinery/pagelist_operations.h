@@ -49,7 +49,7 @@
 /** 
  * These determine the number of pages we take off the standby list to add to the zero/free lists when we are refreshing the lists
  */
-#define NUM_PAGES_FAULTER_REFRESH   NUM_CACHE_SLOTS * 8
+#define NUM_PAGES_FAULTER_REFRESH   NUM_CACHE_SLOTS * 2
 
 // When refreshing both the free and zero lists, this proportion goes to the free lists
 #define FREE_FRAMES_PORTION   NUM_PAGES_FAULTER_REFRESH / 2
@@ -69,7 +69,7 @@
  * we might opt to instead search the zero-list first anyway if there are not a lot of pages on the free list.
  * This helps us potentially reduce contention on the free list
  */
-#define REDUCE_FREE_LIST_PRESSURE_AMOUNT    NUM_CACHE_SLOTS * 4
+#define REDUCE_FREE_LIST_PRESSURE_AMOUNT    NUM_CACHE_SLOTS
 
 #include "../Datastructures/datastructures.h"
 #include "../hardware.h"
@@ -242,6 +242,18 @@ int modified_rescue_page(PAGE* page);
  * Returns SUCCESS if the rescue page was found and removed, ERROR otherwise
  */
 int standby_rescue_page(PAGE* page);
+
+
+/**
+ * Releases all of the pages by returning them to their original lists
+ * 
+ * This is only done when we acquire pages to resolve an unaccessed PTE's fault and may have
+ * speculatively brought in several pages to map several PTEs ahead of them as well. However,
+ * another thread had already mapped those PTEs so we no longer need those pages.
+ * 
+ * We return these pages back to the zero/free/standby lists as appropriate
+ */
+void release_batch_unneeded_pages(PAGE** pages, ULONG64 num_pages);
 
 
 /**

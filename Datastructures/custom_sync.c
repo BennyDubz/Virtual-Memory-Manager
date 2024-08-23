@@ -17,4 +17,3 @@ void initialize_lock(CRITICAL_SECTION* critsec) {
     SetCriticalSectionSpinCount(critsec, MB(16) - 1);
     #endif
 }
-

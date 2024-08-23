@@ -62,6 +62,15 @@ LPTHREAD_START_ROUTINE thread_aging(void* parameters) {
 
 
 /**
+ * Updates all of the threads trim signal statuses to the given status
+ */
+void trim_update_thread_storages(UCHAR trim_signal_status) {
+    for (ULONG64 i = 0; i < thread_information.total_thread_count; i++) {
+        thread_information.thread_local_storages[i].trim_signaled = trim_signal_status;
+    }
+}
+
+/**
  * Thread dedicated to trimming PTEs from the pagetable and putting them on the modified list
  */
 LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
@@ -115,6 +124,8 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
     while(TRUE) {
         WaitForSingleObject(trimming_event, INFINITE);
 
+        trim_update_thread_storages(TRIMMER_NOT_SIGNALLED);
+
         signal_modified = FALSE;
 
         // Go through each lock section and increment all valid PTEs
@@ -124,7 +135,9 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
             curr_pte_locksection = &pagetable->pte_locksections[lock_section];
 
             // Ignore invalid PTE sections  
-            if (curr_pte_locksection->valid_pte_count == 0) continue;
+            // if (curr_pte_locksection->valid_pte_count == 0) continue;
+
+            if (curr_pte_locksection->valid_pte_count < TRIM_PER_SECTION / 4) continue;
 
             BOOL acquire_pte_lock = TRUE;
 
@@ -175,9 +188,9 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
                  * 
                  */
                 if (try_acquire_pagelock(curr_page, 6) == FALSE) {
-                    LeaveCriticalSection(&curr_pte_locksection->lock);
-                    acquire_pte_lock = TRUE;
-                    pte_idx--;
+                    // LeaveCriticalSection(&curr_pte_locksection->lock);
+                    // acquire_pte_lock = TRUE;
+                    // pte_idx--;
                     continue;
                 }
 
@@ -311,14 +324,14 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
                 db_insert_section_at_head(standby_list->listhead, beginning_of_section, end_of_section);
                 standby_list->list_length += trim_to_standby;
 
+                InterlockedAdd64(&total_available_pages, trim_to_standby);
+
                 LeaveCriticalSection(&standby_list->lock);
 
                 for (ULONG64 trim_idx = 0; trim_idx < trim_to_standby; trim_idx++) {
                     curr_page = page_section_trim_to_standby[trim_idx];
                     release_pagelock(curr_page, 23);
                 }
-
-                InterlockedAdd64(&total_available_pages, trim_to_standby);
 
                 if (signal_waiting_for_pages_event == TRUE) {
                     SetEvent(waiting_for_pages_event);
@@ -479,18 +492,27 @@ void faulter_trim_behind(PTE* accessed_pte) {
         }
     }
 
+    DB_LL_NODE* beginning_of_section;
+    DB_LL_NODE* end_of_section;
 
     // Briefly enter the modified list lock just to add the pages that we have already prepared
     if (trim_to_modified > 0) {
 
+        create_chain_of_pages(pages_trimmed_to_modified, trim_to_modified, MODIFIED_STATUS);
+        beginning_of_section = pages_trimmed_to_modified[0]->frame_listnode;
+        end_of_section = pages_trimmed_to_modified[trim_to_modified - 1]->frame_listnode;
+
         EnterCriticalSection(&modified_list->lock);
+
+        db_insert_section_at_head(modified_list->listhead, beginning_of_section, end_of_section);
+        modified_list->list_length += trim_to_modified;
+
+        LeaveCriticalSection(&modified_list->lock);
+
         for (ULONG64 i = 0; i < trim_to_modified; i++) {
             curr_page = pages_trimmed_to_modified[i];
-            custom_spin_assert(curr_page->status == ACTIVE_STATUS);
-            modified_add_page(curr_page, modified_list);
-            release_pagelock(curr_page, 19);
-        }    
-        LeaveCriticalSection(&modified_list->lock);
+            release_pagelock(curr_page, 41);
+        } 
 
         // We don't want to bother setting this event unless the mod-writer will do subtantial work
         if (modified_list->list_length > MAX_PAGES_WRITABLE / 2) {
@@ -501,20 +523,32 @@ void faulter_trim_behind(PTE* accessed_pte) {
     
     // Briefly enter the standby list to add our prepared pages - if there are any
     if (trim_to_standby > 0) {
-        BOOL signal_waiting_for_pages;
+        BOOL signal_waiting_for_pages = (total_available_pages == 0);
+
+        create_chain_of_pages(pages_trimmed_to_standby, trim_to_standby, STANDBY_STATUS);
+        beginning_of_section = pages_trimmed_to_standby[0]->frame_listnode;
+        end_of_section = pages_trimmed_to_standby[trim_to_standby - 1]->frame_listnode;
 
         EnterCriticalSection(&standby_list->lock);
+
+        db_insert_section_at_head(standby_list->listhead, beginning_of_section, end_of_section);
+        standby_list->list_length += trim_to_standby;
+
+        #if 0
         for (ULONG64 i = 0; i < trim_to_standby; i++) {
             curr_page = pages_trimmed_to_standby[i];
-            custom_spin_assert(curr_page->status == ACTIVE_STATUS);
             standby_add_page(curr_page, standby_list);
             release_pagelock(curr_page, 24);
         }
-
-        signal_waiting_for_pages = (total_available_pages == 0);
+        #endif
 
         InterlockedAdd64(&total_available_pages, trim_to_standby);
         LeaveCriticalSection(&standby_list->lock);
+
+        for (ULONG64 i = 0; i < trim_to_standby; i++) {
+            curr_page = pages_trimmed_to_standby[i];
+            release_pagelock(curr_page, 24);
+        } 
 
         // We only want to set this event if we were out of pages before - otherwise, we can avoid the overhead
         if (signal_waiting_for_pages) {
@@ -632,7 +666,7 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
             /**
              * Try to get MOD_WRITER_SECTION_SIZE pages
              */
-            while (section_attempts < (MOD_WRITER_SECTION_SIZE * MOD_WRITER_MAX_NUM_SECTIONS) / 4) {
+            while (section_attempts < num_to_get_per_section) {
                 if (acquire_mod_lock) EnterCriticalSection(&modified_list->lock);
 
                 acquire_mod_lock = FALSE;
@@ -797,10 +831,13 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
                 DB_LL_NODE* beginning_of_section = pages_confirmed_to_standby[0]->frame_listnode;
                 DB_LL_NODE* end_of_section = pages_confirmed_to_standby[num_pages_confirmed_to_standby - 1]->frame_listnode;
 
+                BOOL signal_waiting_for_pages = (total_available_pages == 0);
+
                 EnterCriticalSection(&standby_list->lock);
 
                 db_insert_section_at_head(standby_list->listhead, beginning_of_section, end_of_section);
                 standby_list->list_length += num_pages_confirmed_to_standby;
+                InterlockedAdd64(&total_available_pages, num_pages_confirmed_to_standby);
 
                 LeaveCriticalSection(&standby_list->lock);
 
@@ -818,11 +855,9 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
                     release_pagelock(curr_page, 21);
                 }
 
-                if (total_available_pages == 0) {
+                if (signal_waiting_for_pages == 0) {
                     SetEvent(waiting_for_pages_event);
                 }
-
-                InterlockedAdd64(&total_available_pages, num_pages_confirmed_to_standby);
             }
         }
 
@@ -1047,24 +1082,10 @@ static ULONG64 determine_address_approprate_permissions(PTE* pte, ULONG64 access
      * Unaccessed PTEs should always get readwrite permissions, as they are likely to 
      * write to an address that they have never used before now
      */
-    if (access_type == WRITE_ACCESS || is_used_pte(read_pte_contents(pte)) == FALSE) {
-        #if 0
-        if (VirtualProtect(pte_va, PAGE_SIZE, PAGE_READWRITE, &old_protection_storage_notused) == ERROR) {
-            fprintf(stderr, "Failed to change permissions in set_address_approprate_permissions %d 0\n", GetLastError());
-            DebugBreak();
-        }
-        #endif
-        
+    if (access_type == WRITE_ACCESS || is_used_pte(read_pte_contents(pte)) == FALSE) {        
         return PAGE_READWRITE;
     }
-    
-    #if 0
-    // We have already reserved this memory, so this should never fail. We are merely changing the permissions
-    if (VirtualProtect(pte_va, PAGE_SIZE, PAGE_READONLY, &old_protection_storage_notused) == ERROR) {
-        fprintf(stderr, "Failed to change permissions in set_address_approprate_permissions %d 1\n", GetLastError());
-        DebugBreak();
-    }
-    #endif
+
 
     return PAGE_READONLY;
 }

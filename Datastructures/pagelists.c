@@ -273,8 +273,11 @@ MODIFIED_LIST* initialize_modified_list() {
     modified_list->listhead = mod_listhead;
     modified_list->list_length = 0;
 
+    #if MODIFIED_SHARED_LOCK
+    InitializeSRWLock(&modified_list->shared_lock);
+    #else
     initialize_lock(&modified_list->lock);
-
+    #endif
     return modified_list;
 }
 
