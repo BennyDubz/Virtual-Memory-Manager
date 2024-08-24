@@ -14,7 +14,7 @@
 
 void custom_spin_assert(BOOL expression);
 
-
+#if 0
 /**
  * Returns TRUE if the page is not in the free, modfied, or standby lists, FALSE otherwise
  */
@@ -74,6 +74,7 @@ int page_is_isolated(PAGE* page) {
 
     return ISOLATED;
 }
+#endif
 
 
 

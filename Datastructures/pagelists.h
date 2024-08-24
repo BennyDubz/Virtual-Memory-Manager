@@ -9,11 +9,15 @@
 
 // If this is 1, then we will use normal critical sections instead of just the bit
 #define DEBUG_PAGELOCK 0
-#define LIGHT_DEBUG_PAGELOCK 0
+#define LIGHT_DEBUG_PAGELOCK 1
+
+
+// For development while switching between generic linked list nodes and keeping the flink/blink inside the page
+#define PAGE_LINKED_LISTS 1
 
 
 // When toggled, we enable a shared lock for the modified list
-#define MODIFIED_SHARED_LOCK 1
+#define MODIFIED_SHARED_LOCK 0
 
 #include <windows.h>
 #include "../hardware.h"
@@ -26,12 +30,12 @@
  * #################################################
  */
 
-#define ZERO_STATUS 0
-#define FREE_STATUS 1
-#define MODIFIED_STATUS 2
-#define STANDBY_STATUS 3
-#define ACTIVE_STATUS 4
-
+#define LISTHEAD_STATUS 0
+#define ZERO_STATUS 1
+#define FREE_STATUS 2
+#define MODIFIED_STATUS 3
+#define STANDBY_STATUS 4
+#define ACTIVE_STATUS 5
 
 #define PAGE_UNLOCKED 0
 #define PAGE_LOCKED 1
@@ -49,6 +53,7 @@
 #ifndef PAGE_T
 #define PAGE_T
 
+#if 0
 typedef struct {
     ULONG64 status:3;
     ULONG64 pagefile_idx:40; 
@@ -66,8 +71,46 @@ typedef struct {
     // We could use a single bit here if we decided to be more careful with our interlocked operations (not to crush other bits),
     // but I decided to use this for simplicity so that I could spend time on the actual use of the pagelocks
     long page_lock;
+} PHYS_PAGE_FORMAT;
 
-    
+typedef struct {
+    UCHAR status;
+
+    /**
+     * We want to be able to insert at the head and pop from the tail simultaneously just using the pagelocks,
+     * 
+     */
+    long flink_lock;
+    long blink_lock;
+
+} LISTHEAD_PAGE_FORMAT;
+#endif
+
+typedef struct PAGE_STRUCT {
+    ULONG64 status:3;
+    ULONG64 pagefile_idx:40; 
+    ULONG64 writing_to_disk:1;
+    /**
+     * We need this bit to avoid a specific race condition:
+     * 
+     * If we trim a page, begin popping pages from modified to eventually write to disk,
+     * then it is rescued and trimmed again, it can end up in a disk batch twice. With this bit,
+     * we are able to ensure that we do not re-add it to the disk_batch
+     */
+    ULONG64 modified:1;
+    PTE* pte;
+
+    // We could use a single bit here if we decided to be more careful with our interlocked operations (not to crush other bits),
+    // but I decided to use this for simplicity so that I could spend time on the actual use of the pagelocks
+    long page_lock;
+
+    #if PAGE_LINKED_LISTS
+    struct PAGE_STRUCT* flink;
+    struct PAGE_STRUCT* blink;
+    #else
+    DB_LL_NODE* frame_listnode;
+    #endif
+
     #if DEBUG_PAGELOCK
     CRITICAL_SECTION dev_page_lock;
     ULONG64 holding_threadid;
@@ -85,7 +128,6 @@ typedef struct {
     ULONG64 four_ago;
     ULONG64 five_ago;
     #endif
-    DB_LL_NODE* frame_listnode;
 } PAGE;
 
 
@@ -119,7 +161,43 @@ typedef struct {
  */
 PAGE* initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_frames);
 
-    
+
+#if PAGE_LINKED_LISTS
+/**
+ * Inserts the given page to the head of the list
+ */
+void insert_page(PAGE* listhead, PAGE* page);
+
+
+/**
+ * Pops a page from the tail of the list
+ * 
+ * Returns a pointer to the popped page, or NULL if the list is empty
+ */
+PAGE* pop_page(PAGE* listhead);
+
+
+/**
+ * Unlinks the given page from its list
+ */
+void unlink_page(PAGE* page);
+
+
+/**
+ * Removes the section of pages from the list they are in,
+ * where the beginning node is closest to the head and the end node is closest to the tail
+ */
+void remove_page_section(PAGE* beginning, PAGE* end);
+
+
+/**
+ * Inserts the chain of pages between the beginning and end at the listhead,
+ * where the beginning node will be closest to the head 
+ */
+void insert_page_section(PAGE* listhead, PAGE* beginning, PAGE* end);
+#endif
+
+
 /**
  * Returns TRUE if the page is in the free status, FALSE otherwise
  */
@@ -136,7 +214,6 @@ BOOL page_is_modified(PAGE page);
  * Returns TRUE if the page is in the standby status, FALSE otherwise
  */
 BOOL page_is_standby(PAGE page);
-
 
 /**
  * #######################################
@@ -159,7 +236,11 @@ BOOL page_is_standby(PAGE page);
  *      to each cache slot
  */
 typedef struct {
+    #if PAGE_LINKED_LISTS
+    PAGE listheads[NUM_CACHE_SLOTS];
+    #else
     DB_LL_NODE* listheads[NUM_CACHE_SLOTS];
+    #endif
 
     volatile ULONG64 list_lengths[NUM_CACHE_SLOTS]; 
     volatile ULONG64 total_available;
@@ -191,7 +272,11 @@ ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR 
  * An array of free lists whose length corresponds to the size of the cache
  */
 typedef struct {
+    #if PAGE_LINKED_LISTS
+    PAGE listheads[NUM_CACHE_SLOTS];
+    #else
     DB_LL_NODE* listheads[NUM_CACHE_SLOTS];
+    #endif
 
     volatile ULONG64 list_lengths[NUM_CACHE_SLOTS]; 
     volatile ULONG64 total_available;
@@ -219,7 +304,15 @@ FREE_FRAMES_LISTS* initialize_free_frames();
 #ifndef MODIFIED_LIST_T
 #define MODIFIED_LIST_T
 typedef struct {
+    #if PAGE_LINKED_LISTS
+    PAGE listhead;
+    #else
     DB_LL_NODE* listhead;
+    #endif
+
+    //BW: remember to adjust this to the 64 - sizeof(page)
+    UCHAR buffer[64];
+
     volatile ULONG64 list_length;
 
     #if MODIFIED_SHARED_LOCK
@@ -268,7 +361,15 @@ PAGE* modified_pop_page(MODIFIED_LIST* modified_list);
 #define STANDBY_LIST_T
 
 typedef struct {
+    #if PAGE_LINKED_LISTS
+    PAGE listhead;
+    #else
     DB_LL_NODE* listhead;
+    #endif
+
+    //BW: remember to adjust this to the 64 - sizeof(page)
+    UCHAR buffer[64];
+
     volatile ULONG64 list_length;
     CRITICAL_SECTION lock;
 
