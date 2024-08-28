@@ -10,9 +10,10 @@
 #include "./Machinery/pagefault.h"
 #include "./hardware.h"
 #include "./Machinery/debug_checks.h"
+#include "./Datastructures/pagelists.h"
 
 
-#define NUM_USERMODE_THREADS        ((ULONG64) (12))
+#define NUM_USERMODE_THREADS        ((ULONG64) (8))
 #define MAX_CONSECUTIVE_ACCESSES    64
 #define TOTAL_ACCESS_AMOUNT         (MB(10))
 
@@ -146,6 +147,40 @@ void usermode_virtual_memory_simulation () {
             printf("\tPhys page standby ratio: %f Zeroed: 0x%llX Free: 0x%llX Standby: 0x%llX Mod 0x%llX Num disk slots %llX\n", (double)  standby_list->list_length / physical_page_count, zero_lists->total_available, free_frames->total_available, 
                                             standby_list->list_length, modified_list->list_length, disk->total_available_slots);
             
+            #if 0
+            ULONG64 num_valid = 0;
+            ULONG64 num_transition = 0;
+            ULONG64 num_disk = 0;
+            ULONG64 num_unaccessed = 0;
+            PTE pte_copy;
+            for (ULONG64 i = 0; i < pagetable->num_virtual_pages; i++) {
+                pte_copy = read_pte_contents(&pagetable->pte_list[i]);
+
+                if (is_memory_format(pte_copy)) {
+                    num_valid++;
+                } else if (is_transition_format(pte_copy)) {
+                    num_transition++;
+                } else if (is_disk_format(pte_copy)) {
+                    num_disk++;
+                } else {
+                    num_unaccessed++;
+                }
+            }
+
+            ULONG64 actual_on_standby = 0;
+
+            EnterCriticalSection(&standby_list->lock);
+            PAGE* curr_page = standby_list->listhead.flink;
+
+            while (curr_page != &standby_list->listhead) {
+                curr_page = curr_page->flink;
+                actual_on_standby++;
+            }
+
+            LeaveCriticalSection(&standby_list->lock);
+            printf("Num valid ptes %llx Num transition %llx Num disk %llx Num unaccessed %llx Num standby %llx\n", num_valid, num_transition, num_disk, num_unaccessed, actual_on_standby);
+            #endif
+
             user_thread_num --;
         }
 

@@ -589,13 +589,21 @@ static PAGE* try_acquire_list_tail_pagelock(DB_LL_NODE* pagelist_listhead) {
 
 
         pagelock_acquired = try_acquire_pagelock(potential_page, 4);
-
-        // Acquiring the pagelock right when it is no longer on the list isn't fair - we can afford to try again
+        
+        #if PAGE_LINKED_LISTS
         if (pagelock_acquired && potential_page != pagelist_listhead->blink) {
             release_pagelock(potential_page, 16);
             pagelock_acquired = FALSE;
             continue;
         }
+        #else
+        // Acquiring the pagelock right when it is no longer on the list isn't fair - we can afford to try again
+        if (pagelock_acquired && potential_page != pagelist_listhead->blink->item) {
+            release_pagelock(potential_page, 16);
+            pagelock_acquired = FALSE;
+            continue;
+        }
+        #endif
 
         break;
     }
@@ -1529,7 +1537,7 @@ ULONG64 find_batch_available_pages(BOOL zeroed_pages_preferred, PAGE** page_stor
     
     // Since disk reads overwrite page contents, we do not need zeroed out pages.
     // and we would rather them be saved for accesses that do need zeroed pages
-    if (zeroed_pages_preferred == FALSE || free_frames->total_available < REDUCE_FREE_LIST_PRESSURE_AMOUNT) {
+    if (zeroed_pages_preferred == FALSE && free_frames->total_available > REDUCE_FREE_LIST_PRESSURE_AMOUNT) {
         zero_first = FALSE;
     } else {
         zero_first = TRUE;
@@ -1963,6 +1971,47 @@ void create_chain_of_pages(PAGE** pages_to_chain, ULONG64 num_pages, ULONG64 new
     
     // We need to modify the final page's status
     next_page->status = new_page_status;
+}
+
+
+/**
+ * Tries to acquire the pagelocks for the flink and blink pages of the given page
+ * 
+ * Returns TRUE iff both neighboring pagelocks are acquired, FALSE otherwise.
+ * 
+ * In the case that we acquire one of the neighbor's locks but not the other's, then we will release
+ * the first one before returning FALSE so that we do not have any neighboring locks held
+ */
+BOOL try_acquire_neighboring_pagelocks(PAGE* page, ULONG64 origin_code) {
+    if (try_acquire_pagelock(page->flink, 42) == FALSE) {
+        return FALSE;
+    }
+
+    if (try_acquire_pagelock(page->blink, 43) == FALSE) {
+        release_pagelock(page->flink, 44);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+
+/**
+ * Acquires the pagelocks for the flink and blink pages of the given page, and will spin as long
+ * as necessary in order to do so
+ */
+void acquire_neighboring_pagelocks(PAGE* page, ULONG64 origin_code) {
+    acquire_pagelock(page->flink, 45);
+    acquire_pagelock(page->blink, 46);
+}
+
+
+/**
+ * Releases the pagelocks for the flink and the blink of the given page
+ */
+void release_neighboring_pagelocks(PAGE* page, ULONG64 origin_code) {
+    release_pagelock(page->flink, 47);
+    release_pagelock(page->blink, 48);
 }
 
 

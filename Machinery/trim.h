@@ -8,7 +8,7 @@
 #include "../Datastructures/datastructures.h"
 
 // The maximum number of PTEs that we can trim per PTE locksection
-#define TRIM_PER_SECTION 64
+#define TRIM_PER_SECTION 96
 
 // The minimum and maximum amount of PTEs that can be trimmed by the faulting threads
 #define FAULTER_TRIM_BEHIND_MIN 8

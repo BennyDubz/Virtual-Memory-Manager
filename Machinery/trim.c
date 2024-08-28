@@ -135,9 +135,9 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
             curr_pte_locksection = &pagetable->pte_locksections[lock_section];
 
             // Ignore invalid PTE sections  
-            // if (curr_pte_locksection->valid_pte_count == 0) continue;
+            if (curr_pte_locksection->valid_pte_count == 0) continue;
 
-            if (curr_pte_locksection->valid_pte_count < TRIM_PER_SECTION / 4) continue;
+            // if (curr_pte_locksection->valid_pte_count < TRIM_PER_SECTION / 4) continue;
 
             BOOL acquire_pte_lock = TRUE;
 
@@ -259,7 +259,7 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
             // This will be an expensive call to MapUserPhysicalPages, so we want to batch at least a few addresses
             disconnect_va_batch_from_cpu(trim_addresses, section_num_ptes_trimmed);
 
-            curr_pte_locksection->valid_pte_count -= section_num_ptes_trimmed;
+            InterlockedAdd64(&curr_pte_locksection->valid_pte_count, - section_num_ptes_trimmed);
 
             LeaveCriticalSection(&curr_pte_locksection->lock);
 
@@ -505,7 +505,7 @@ void faulter_trim_behind(PTE* accessed_pte) {
 
     disconnect_va_batch_from_cpu(trimmed_addresses, num_ptes_trimmed);
 
-    curr_pte_locksection->valid_pte_count -= num_ptes_trimmed;
+    InterlockedAdd64(&curr_pte_locksection->valid_pte_count, - num_ptes_trimmed);
 
     LeaveCriticalSection(&curr_pte_locksection->lock);
 
@@ -680,7 +680,7 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
         if (standby_list->list_length < physical_page_count / MOD_WRITER_PREFERRED_STANDBY_MINIMUM_PROPORTION) {
             num_to_get_per_section = num_to_write;
         } else {
-            num_to_get_per_section = MOD_WRITER_SECTION_SIZE * 2;
+            num_to_get_per_section = MOD_WRITER_SECTION_SIZE;
         }
 
         while (curr_attempts < num_to_write) {
@@ -798,7 +798,7 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
          * the huge volume of disk-writes that need to occur. Similarly, in the real world, this would be helpful if we allocated a new large chunk of memory,
          * needed to mod-write it to disk due to a lack of available pages, but didn't want the users to starve in the meantime.
          */
-        ULONG64 num_sections_to_write = max(disk_batch->num_pages / MOD_WRITER_SECTION_SIZE, 1);
+        ULONG64 num_sections_to_write = min((disk_batch->num_pages / MOD_WRITER_SECTION_SIZE) + 1, MOD_WRITER_MAX_NUM_SECTIONS);
         PULONG_PTR source_addr = disk->disk_large_write_slot;
         BOOL release_slot;
         PULONG_PTR disk_slot_addr;
@@ -1199,7 +1199,7 @@ int connect_pte_to_page(PTE* pte, PAGE* open_page, ULONG64 access_type) {
 
     ULONG64 pfn = page_to_pfn(open_page);
     
-    pte_locksection->valid_pte_count++;
+    InterlockedIncrement64(&pte_locksection->valid_pte_count);
 
     ULONG64 permissions = determine_address_approprate_permissions(pte, access_type);
     
@@ -1251,8 +1251,6 @@ int connect_pte_to_page(PTE* pte, PAGE* open_page, ULONG64 access_type) {
  * Returns SUCCESS if there are no issues, ERROR otherwise 
  */
 int connect_batch_ptes_to_pages(PTE** ptes_to_connect, PTE* original_accessed_pte, PAGE** pages, ULONG64 access_type, ULONG64 num_ptes) {
-    // All the PTEs are assumed to be in the same PTE locksection
-    PTE_LOCKSECTION* pte_locksection = pte_to_locksection(original_accessed_pte);
 
     ULONG64 permissions[MAX_PAGES_READABLE];
     ULONG64 pfns[MAX_PAGES_READABLE];
@@ -1285,9 +1283,14 @@ int connect_batch_ptes_to_pages(PTE** ptes_to_connect, PTE* original_accessed_pt
         return ERROR;
     }
 
+    PTE_LOCKSECTION* pte_locksection;
+    // = pte_to_locksection(original_accessed_pte);
 
     for (ULONG64 i = 0; i < num_ptes; i++) {
+    
         curr_pte = ptes_to_connect[i];
+
+        pte_locksection = pte_to_locksection(curr_pte);
 
         if (permissions[i] == PAGE_READONLY) {
             pte_contents.memory_format.protections = PTE_PROTREAD;
@@ -1296,8 +1299,9 @@ int connect_batch_ptes_to_pages(PTE** ptes_to_connect, PTE* original_accessed_pt
         }
 
         pte_contents.memory_format.frame_number = pfns[i];
-        pte_locksection->valid_pte_count++;
-        
+
+        InterlockedIncrement64(&pte_locksection->valid_pte_count);
+
         write_pte_contents(curr_pte, pte_contents);
     }
 
@@ -1320,7 +1324,7 @@ int disconnect_pte_from_cpu(PTE* pte) {
 
     PTE_LOCKSECTION* pte_locksection = pte_to_locksection(pte);
 
-    pte_locksection->valid_pte_count --;
+    InterlockedDecrement64(&pte_locksection->valid_pte_count);
 
     // if (pte_valid_count_check(pte) == FALSE) {
     //     DebugBreak();
