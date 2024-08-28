@@ -87,31 +87,15 @@ PAGE* initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_f
         new_page->five_ago = 0xFFFFFF;
         #endif
 
-        #if PAGE_LINKED_LISTS
         new_page->flink = NULL;
         new_page->blink = NULL;
-        #else
-        /**
-         * By creating the listnodes here up front as well, we ensure we do not have to malloc them 
-         * later on down the road. If we were unable to allocate memory to a node to add
-         * it to a standby list, for example, then we would have serious issues.
-         */
-        DB_LL_NODE* page_listnode = db_create_node(new_page);
-
-        if (page_listnode == NULL) {
-            fprintf(stderr, "Unable to allocate memory for frame listnode in initialize_pages\n");
-            return NULL;
-        }
         
-        new_page->frame_listnode = page_listnode;
-        #endif
     }
 
     return page_storage_base;
 }
 
 
-#if PAGE_LINKED_LISTS
 /**
  * Inserts the given page to the head of the list
  */
@@ -186,7 +170,6 @@ void insert_page_section(PAGE* listhead, PAGE* beginning, PAGE* end) {
     end->flink = old_head;
     old_head->blink = end;
 }
-#endif
 
 
 /**
@@ -231,7 +214,6 @@ ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR 
         return NULL;
     }
 
-    #if PAGE_LINKED_LISTS
     for (int new_list = 0; new_list < NUM_CACHE_SLOTS; new_list++) {
         
         zeroed_lists->listheads[new_list].status = LISTHEAD_STATUS;
@@ -264,54 +246,7 @@ ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR 
 
         zeroed_lists->list_lengths[listhead_idx]++;
     }
-    #else
-
-    // Create all the individual listheads
-    for (int new_list = 0; new_list < NUM_CACHE_SLOTS; new_list++) {
-        DB_LL_NODE* new_listhead = db_create_list();
-
-        if (new_listhead == NULL) {
-            fprintf(stderr, "Failed to allocate memory for listhead in initialize_zeroed_lists\n");
-            return NULL;
-        }
-
-        zeroed_lists->listheads[new_list] = new_listhead;
-        zeroed_lists->list_lengths[new_list] = 0;
-
-        initialize_lock(&zeroed_lists->list_locks[new_list]);
-
-        EnterCriticalSection(&zeroed_lists->list_locks[new_list]);
-        LeaveCriticalSection(&zeroed_lists->list_locks[new_list]);
-    }
-
-    // Add all the physical frames to their respective zero lists
-    for (int pfn_idx = 0; pfn_idx < num_physical_frames; pfn_idx++) {
-        ULONG64 frame_number = physical_frame_numbers[pfn_idx];
-
-        // Modulo operation based on the pfn to put it alongside other cache-colliding pages
-        int listhead_idx = frame_number % NUM_CACHE_SLOTS;
-
-        DB_LL_NODE* relevant_listhead = zeroed_lists->listheads[listhead_idx];
-        
-        PAGE* zero_frame = page_storage_base + frame_number;
-
-        if (zero_frame == NULL) {
-            fprintf(stderr, "Unable to find the page associated with the pfn in initialize_zeroed_lists\n");
-            return NULL;
-        }
-
-        // Add the already allocated frame listnode to the free list
-        if (db_insert_node_at_head(relevant_listhead, zero_frame->frame_listnode) == ERROR) {
-            fprintf(stderr, "Failed to insert zero_frame in its list\n");
-            return NULL;
-        }
-
-        zero_frame->status = ZERO_STATUS;
-
-        zeroed_lists->list_lengths[listhead_idx]++;
-    }
-    #endif
-
+  
     zeroed_lists->total_available = num_physical_frames;
 
     return zeroed_lists;
@@ -338,7 +273,6 @@ FREE_FRAMES_LISTS* initialize_free_frames() {
         return NULL;
     }
 
-    #if PAGE_LINKED_LISTS
     for (int new_list = 0; new_list < NUM_CACHE_SLOTS; new_list++) {
         free_frames->listheads[new_list].status = LISTHEAD_STATUS;
         free_frames->listheads[new_list].flink = &free_frames->listheads[new_list];
@@ -347,24 +281,6 @@ FREE_FRAMES_LISTS* initialize_free_frames() {
 
         initialize_lock(&free_frames->list_locks[new_list]);
     }
-
-    #else
-
-    // Create all the individual listheads
-    for (int new_list = 0; new_list < NUM_CACHE_SLOTS; new_list++) {
-        DB_LL_NODE* new_listhead = db_create_list();
-
-        if (new_listhead == NULL) {
-            fprintf(stderr, "Failed to allocate memory for listhead in initialize_zeroed_lists\n");
-            return NULL;
-        }
-
-        free_frames->listheads[new_list] = new_listhead;
-        free_frames->list_lengths[new_list] = 0;
-
-        initialize_lock(&free_frames->list_locks[new_list]);
-    }
-    #endif
 
     free_frames->total_available = 0;
 
@@ -392,20 +308,10 @@ MODIFIED_LIST* initialize_modified_list() {
         return NULL;
     }
 
-    #if PAGE_LINKED_LISTS
     modified_list->listhead.status = LISTHEAD_STATUS;
     modified_list->listhead.flink = &modified_list->listhead;
-    modified_list->listhead.blink = &modified_list->listhead;
-    #else
-    DB_LL_NODE* mod_listhead = db_create_list();
+    modified_list->listhead.blink = &modified_list->listhead;    
 
-    if (mod_listhead == NULL) {
-        fprintf(stderr, "Unable to create listhead in initialize_modified_list\n");
-        return NULL;
-    }
-
-    modified_list->listhead = mod_listhead;
-    #endif
     modified_list->list_length = 0;
 
     #if MODIFIED_SHARED_LOCK
@@ -428,12 +334,8 @@ int modified_add_page(PAGE* page, MODIFIED_LIST* modified_list) {
         return ERROR;
     }
 
-    #if PAGE_LINKED_LISTS
     insert_page(&modified_list->listhead, page);
-    #else
-    db_insert_node_at_head(modified_list->listhead, page->frame_listnode);
-    #endif
-
+    
     page->status = MODIFIED_STATUS;
     modified_list->list_length += 1;
 
@@ -452,11 +354,8 @@ PAGE* modified_pop_page(MODIFIED_LIST* modified_list) {
         return NULL;
     }
 
-    #if PAGE_LINKED_LISTS
     PAGE* popped = pop_page(&modified_list->listhead);
-    #else
-    PAGE* popped = db_pop_from_tail(modified_list->listhead);
-    #endif
+    
     if (popped != NULL) {
         modified_list->list_length -= 1;
     }
@@ -485,21 +384,10 @@ STANDBY_LIST* initialize_standby_list() {
         return NULL;
     }
 
-    #if PAGE_LINKED_LISTS
     standby_list->listhead.status = LISTHEAD_STATUS;
     standby_list->listhead.flink = &standby_list->listhead;
     standby_list->listhead.blink = &standby_list->listhead;
-    #else
-
-    DB_LL_NODE* standby_listhead = db_create_list();
-
-    if (standby_listhead == NULL) {
-        fprintf(stderr, "Unable to create listhead in initialize_standby_list\n");
-        return NULL;
-    }
-
-    standby_list->listhead = standby_listhead;
-    #endif
+    
     standby_list->list_length = 0;
 
     initialize_lock(&standby_list->lock);
@@ -521,11 +409,7 @@ int standby_add_page(PAGE* page, STANDBY_LIST* standby_list) {
     
     page->status = STANDBY_STATUS;
 
-    #if PAGE_LINKED_LISTS
     insert_page(&standby_list->listhead, page);
-    #else
-    db_insert_node_at_head(standby_list->listhead, page->frame_listnode);
-    #endif
 
     standby_list->list_length += 1;
 

@@ -138,11 +138,7 @@ static void free_frames_add_batch(PAGE** page_list, ULONG64 num_pages) {
             EnterCriticalSection(curr_locksection);
         }
 
-        #if PAGE_LINKED_LISTS
         insert_page(&free_frames->listheads[curr_cache_color], curr_page);
-        #else
-        db_insert_node_at_head(free_frames->listheads[curr_cache_color], curr_page->frame_listnode);
-        #endif
 
         free_frames->list_lengths[curr_cache_color]++;
         InterlockedIncrement64(&free_frames->total_available);
@@ -203,11 +199,8 @@ static void zero_list_add_batch(PAGE** page_list, ULONG64 num_pages) {
             EnterCriticalSection(curr_locksection);
         }
 
-        #if PAGE_LINKED_LISTS
         insert_page(&zero_lists->listheads[curr_cache_color], curr_page);
-        #else
-        db_insert_node_at_head(zero_lists->listheads[curr_cache_color], curr_page->frame_listnode);
-        #endif
+       
 
         zero_lists->list_lengths[curr_cache_color]++;
         InterlockedIncrement64(&zero_lists->total_available);
@@ -567,43 +560,23 @@ void zero_out_pages(PAGE** pages, ULONG64 num_pages) {
  * 
  * Returns the page if its lock was acquired, NULL otherwise
  */
-#if PAGE_LINKED_LISTS
 static PAGE* try_acquire_list_tail_pagelock(PAGE* pagelist_listhead) {
-#else
-static PAGE* try_acquire_list_tail_pagelock(DB_LL_NODE* pagelist_listhead) {
-#endif 
     BOOL pagelock_acquired = FALSE;
     PAGE* potential_page = NULL;
 
     while (pagelock_acquired == FALSE) {
-        #if PAGE_LINKED_LISTS
         potential_page = pagelist_listhead->blink;
 
         if (potential_page->status == LISTHEAD_STATUS) return NULL;
-        #else
-        potential_page = (PAGE*) pagelist_listhead->blink->item;
-
-        // Check if this list section is empty
-        if (potential_page == NULL) return NULL;
-        #endif
 
 
         pagelock_acquired = try_acquire_pagelock(potential_page, 4);
         
-        #if PAGE_LINKED_LISTS
         if (pagelock_acquired && potential_page != pagelist_listhead->blink) {
             release_pagelock(potential_page, 16);
             pagelock_acquired = FALSE;
             continue;
         }
-        #else
-        // Acquiring the pagelock right when it is no longer on the list isn't fair - we can afford to try again
-        if (pagelock_acquired && potential_page != pagelist_listhead->blink->item) {
-            release_pagelock(potential_page, 16);
-            pagelock_acquired = FALSE;
-            continue;
-        }
-        #endif
 
         break;
     }
@@ -622,15 +595,11 @@ static PAGE* try_acquire_list_tail_pagelock(DB_LL_NODE* pagelist_listhead) {
  * 
  * Returns the page whose lock was acquired, or NULL if the list was empty and it was unable
  */
-#if PAGE_LINKED_LISTS
 static PAGE* acquire_list_tail_pagelock(PAGE* pagelist_listhead) {
-#else
-static PAGE* acquire_list_tail_pagelock(DB_LL_NODE* pagelist_listhead) {
-#endif
+
     BOOL pagelock_acquired = FALSE;
     PAGE* potential_page = NULL;
 
-    #if PAGE_LINKED_LISTS
     while (pagelock_acquired == FALSE) {
         potential_page = (PAGE*) pagelist_listhead->blink;
 
@@ -645,23 +614,6 @@ static PAGE* acquire_list_tail_pagelock(DB_LL_NODE* pagelist_listhead) {
             continue;
         }
     }
-    #else
-
-    while (pagelock_acquired == FALSE) {
-        potential_page = (PAGE*) pagelist_listhead->blink->item;
-
-        // Check if this list section is empty
-        if (potential_page == NULL) break;
-
-        pagelock_acquired = try_acquire_pagelock(potential_page, 4);
-
-        if (pagelock_acquired && potential_page != (PAGE*) pagelist_listhead->blink->item) {
-            release_pagelock(potential_page, 15);
-            pagelock_acquired = FALSE;
-            continue;
-        }
-    }
-    #endif
 
     return potential_page;
 }
@@ -671,11 +623,8 @@ static PAGE* acquire_list_tail_pagelock(DB_LL_NODE* pagelist_listhead) {
  * Tries to acquire num_pages pagelocks starting at the tail of the given listhead, stores the acquired pages in page_storage,
  * and returns the number of pages whose locks were acquired
  */
-#if PAGE_LINKED_LISTS
 static ULONG64 acquire_batch_list_tail_pagelocks(PAGE* pagelist_listhead, PAGE** page_storage, ULONG64 num_pages) {
-#else
-static ULONG64 acquire_batch_list_tail_pagelocks(DB_LL_NODE* pagelist_listhead, PAGE** page_storage, ULONG64 num_pages) {
-#endif
+
     PAGE* curr_page;
     
     /**
@@ -695,7 +644,6 @@ static ULONG64 acquire_batch_list_tail_pagelocks(DB_LL_NODE* pagelist_listhead, 
     ULONG64 num_allocated = 1;
     curr_page = first_page;
     
-    #if PAGE_LINKED_LISTS
     PAGE* potential_page = (PAGE*) curr_page->blink;
 
     while (num_allocated < num_pages && potential_page->status != LISTHEAD_STATUS) {
@@ -713,26 +661,6 @@ static ULONG64 acquire_batch_list_tail_pagelocks(DB_LL_NODE* pagelist_listhead, 
 
         potential_page = (PAGE*) curr_page->blink;
     }
-    #else
-    DB_LL_NODE* curr_node = curr_page->frame_listnode;
-    PAGE* potential_page = (PAGE*) curr_node->blink->item;
-
-    while (num_allocated < num_pages && potential_page != NULL) {
-        
-        pagelock_acquired = try_acquire_pagelock(potential_page, 5);
-
-        // Once we have the lock, we need to ensure that it is still inside the standby list
-        if (pagelock_acquired && potential_page == (PAGE*) curr_node->blink->item) {
-            curr_node = potential_page->frame_listnode;
-            page_storage[num_allocated] = potential_page;
-            num_allocated++;
-        } else if (pagelock_acquired) {
-            release_pagelock(potential_page, 16);
-        }
-
-        potential_page = (PAGE*) curr_node->blink->item;
-    }
-    #endif
 
     #if DEBUG_PAGELOCK
     for (int i = 0; i < num_allocated; i++) {
@@ -782,12 +710,7 @@ PAGE* allocate_zeroed_frame() {
         }
 
         // By here, the **odds are better** that we will get a frame, but not guaranteed
-        #if PAGE_LINKED_LISTS
         PAGE* section_listhead = &zero_lists->listheads[local_index];
-        #else
-        DB_LL_NODE* section_listhead = zero_lists->listheads[local_index];
-        #endif
-
 
         // If multiple threads are contending on the same sections, this will help alleviate contention
         if (curr_attempts < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS) {
@@ -806,12 +729,8 @@ PAGE* allocate_zeroed_frame() {
         EnterCriticalSection(&zero_lists->list_locks[local_index]);
 
         // Remove the page from the list
-        #if PAGE_LINKED_LISTS
         pop_page(section_listhead);
-        #else
-        db_pop_from_tail(section_listhead);
-        #endif
-
+       
         zero_lists->list_lengths[local_index]--;
         InterlockedDecrement64(&zero_lists->total_available);
         InterlockedDecrement64(&total_available_pages);
@@ -857,12 +776,7 @@ ULONG64 allocate_batch_zeroed_frames(PAGE** page_storage, ULONG64 num_pages) {
             continue;
         }
 
-        #if PAGE_LINKED_LISTS
         PAGE* cache_color_listhead = &zero_lists->listheads[local_index];
-        #else
-        // By here, the odds are better that we will get a frame, but not guaranteed
-        DB_LL_NODE* cache_color_listhead = zero_lists->listheads[local_index];
-        #endif
 
         if (num_consecutive_failures < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS) {
             curr_page = try_acquire_list_tail_pagelock(cache_color_listhead);
@@ -882,11 +796,8 @@ ULONG64 allocate_batch_zeroed_frames(PAGE** page_storage, ULONG64 num_pages) {
 
         EnterCriticalSection(&zero_lists->list_locks[local_index]);
 
-        #if PAGE_LINKED_LISTS
         pop_page(cache_color_listhead);
-        #else
-        db_pop_from_tail(cache_color_listhead);
-        #endif
+        
         zero_lists->list_lengths[local_index]--;
 
         InterlockedDecrement64(&zero_lists->total_available);
@@ -933,12 +844,8 @@ PAGE* allocate_free_frame() {
             continue;
         }
 
-        #if PAGE_LINKED_LISTS
         PAGE* section_listhead = &free_frames->listheads[local_index];
-        #else
-        DB_LL_NODE* section_listhead = free_frames->listheads[local_index];
-        #endif
-
+        
         // If multiple threads are contending on the same sections, this will help alleviate contention
         if (curr_attempts < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS / 2) {
             potential_page = try_acquire_list_tail_pagelock(section_listhead);
@@ -960,11 +867,8 @@ PAGE* allocate_free_frame() {
         EnterCriticalSection(&free_frames->list_locks[local_index]);
 
         // Remove the page from the list
-        #if PAGE_LINKED_LISTS
         pop_page(section_listhead);
-        #else
-        db_pop_from_tail(section_listhead);
-        #endif
+       
         free_frames->list_lengths[local_index]--;
 
         InterlockedDecrement64(&free_frames->total_available);
@@ -1016,12 +920,7 @@ ULONG64 allocate_batch_free_frames(PAGE** page_storage, ULONG64 batch_size) {
         }
 
         // By here, the odds are better that we will get a frame, but not guaranteed
-        #if PAGE_LINKED_LISTS
         PAGE* cache_color_listhead = &free_frames->listheads[local_index];
-        #else
-        // By here, the odds are better that we will get a frame, but not guaranteed
-        DB_LL_NODE* cache_color_listhead = free_frames->listheads[local_index];
-        #endif
 
         if (num_consecutive_failures < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS / 2) {
             curr_page = try_acquire_list_tail_pagelock(cache_color_listhead);
@@ -1042,11 +941,7 @@ ULONG64 allocate_batch_free_frames(PAGE** page_storage, ULONG64 batch_size) {
         // By here, the **odds are better** that we will get a  frame, but not guaranteed
         EnterCriticalSection(&free_frames->list_locks[local_index]);
 
-        #if PAGE_LINKED_LISTS
         pop_page(cache_color_listhead);
-        #else
-        db_pop_from_tail(cache_color_listhead);
-        #endif
 
         free_frames->list_lengths[local_index]--;
 
@@ -1362,12 +1257,8 @@ PAGE* standby_pop_page() {
 
     BOOL pagelock_acquired = FALSE;
 
-    #if PAGE_LINKED_LISTS
     PAGE* potential_page = acquire_list_tail_pagelock(&standby_list->listhead);
-    #else
-    PAGE* potential_page = acquire_list_tail_pagelock(standby_list->listhead);
-    #endif
-
+    
     if (potential_page == NULL) return NULL;
 
     EnterCriticalSection(&standby_list->lock);
@@ -1377,11 +1268,8 @@ PAGE* standby_pop_page() {
     #endif
 
     // We remove the page from the list now
-    #if PAGE_LINKED_LISTS
     pop_page(&standby_list->listhead);
-    #else
-    custom_spin_assert(db_pop_from_tail(standby_list->listhead) == potential_page);
-    #endif
+   
     standby_list->list_length--;
 
     LeaveCriticalSection(&standby_list->lock);
@@ -1407,11 +1295,8 @@ ULONG64 standby_pop_batch(PAGE** page_storage, ULONG64 batch_size) {
     // Pre-emptively check for the list length being empty before doing any more work
     if (standby_list->list_length == 0) return 0;
 
-    #if PAGE_LINKED_LISTS
     ULONG64 num_allocated = acquire_batch_list_tail_pagelocks(&standby_list->listhead, page_storage, batch_size);
-    #else
-    ULONG64 num_allocated = acquire_batch_list_tail_pagelocks(standby_list->listhead, page_storage, batch_size);
-    #endif
+    
     if (num_allocated == 0) return 0;
 
     PAGE* clostest_to_tail = page_storage[0];
@@ -1422,11 +1307,7 @@ ULONG64 standby_pop_batch(PAGE** page_storage, ULONG64 batch_size) {
      */
     EnterCriticalSection(&standby_list->lock);
 
-    #if PAGE_LINKED_LISTS
     remove_page_section(farthest_from_tail, clostest_to_tail);
-    #else
-    db_remove_section(farthest_from_tail->frame_listnode, clostest_to_tail->frame_listnode);
-    #endif
     
     standby_list->list_length -= num_allocated;
 
@@ -1601,11 +1482,8 @@ void rescue_batch_pages(PAGE** modified_rescues, ULONG64 num_modified_rescues, P
                 continue;
             }
 
-            #if PAGE_LINKED_LISTS
             unlink_page(modified_rescues[i]);
-            #else
-            db_remove_from_middle(modified_list->listhead, modified_rescues[i]->frame_listnode);
-            #endif
+            
             num_removed++;
         }
 
@@ -1618,11 +1496,7 @@ void rescue_batch_pages(PAGE** modified_rescues, ULONG64 num_modified_rescues, P
         EnterCriticalSection(&standby_list->lock);
 
         for (ULONG64 i = 0; i < num_standby_rescues; i++) {
-            #if PAGE_LINKED_LISTS
             unlink_page(standby_rescues[i]);
-            #else
-            db_remove_from_middle(standby_list->listhead, standby_rescues[i]->frame_listnode);
-            #endif
         }
 
         standby_list->list_length -= num_standby_rescues;
@@ -1681,15 +1555,7 @@ int modified_rescue_page(PAGE* page) {
 
     EnterCriticalSection(&modified_list->lock);
 
-    #if PAGE_LINKED_LISTS
     unlink_page(page);
-    #else
-    if (db_remove_from_middle(modified_list->listhead, page->frame_listnode) == ERROR) {
-        LeaveCriticalSection(&modified_list->lock);
-        DebugBreak();
-        return ERROR;
-    }
-    #endif
 
     modified_list->list_length--;
 
@@ -1707,15 +1573,7 @@ int modified_rescue_page(PAGE* page) {
 int standby_rescue_page(PAGE* page) {
     EnterCriticalSection(&standby_list->lock);
 
-    #if PAGE_LINKED_LISTS
     unlink_page(page);
-    #else
-    if (db_remove_from_middle(standby_list->listhead, page->frame_listnode) == ERROR) {
-        LeaveCriticalSection(&standby_list->lock);
-        DebugBreak();
-        return ERROR;
-    }
-    #endif
 
     standby_list->list_length--;
     InterlockedDecrement64(&total_available_pages);
@@ -1783,11 +1641,7 @@ void release_batch_unneeded_pages(PAGE** pages, ULONG64 num_pages) {
 
         EnterCriticalSection(&standby_list->lock);
 
-        #if PAGE_LINKED_LISTS
         insert_page_section(&standby_list->listhead, standby_pages[0], standby_pages[num_standby_pages - 1]);
-        #else
-        db_insert_section_at_tail(standby_list->listhead, standby_pages[0]->frame_listnode, standby_pages[num_standby_pages - 1]->frame_listnode);
-        #endif
 
         standby_list->list_length += num_standby_pages;
         InterlockedAdd64(&total_available_pages, num_standby_pages);
@@ -1853,11 +1707,8 @@ void zero_lists_add(PAGE* page) {
     // Modulo operation based on the pfn to put it alongside other cache-colliding pages
     int listhead_idx = page_to_pfn(page) % NUM_CACHE_SLOTS;
 
-    #if PAGE_LINKED_LISTS
     PAGE* relevant_listhead = &zero_lists->listheads[listhead_idx];
-    #else
-    DB_LL_NODE* relevant_listhead = zero_lists->listheads[listhead_idx];
-    #endif
+   
     #ifdef DEBUG_CHECKING
     int dbg_result;
     if ((dbg_result = page_is_isolated(page)) != ISOLATED) {
@@ -1869,11 +1720,7 @@ void zero_lists_add(PAGE* page) {
 
     page->status = ZERO_STATUS;
 
-    #if PAGE_LINKED_LISTS
     insert_page(relevant_listhead, page);
-    #else
-    db_insert_node_at_head(relevant_listhead, page->frame_listnode);
-    #endif
 
     zero_lists->list_lengths[listhead_idx]++;
     
@@ -1892,11 +1739,7 @@ void free_frames_add(PAGE* page) {
     // Modulo operation based on the pfn to put it alongside other cache-colliding pages
     int listhead_idx = page_to_pfn(page) % NUM_CACHE_SLOTS;
 
-    #if PAGE_LINKED_LISTS
     PAGE* relevant_listhead = &free_frames->listheads[listhead_idx];
-    #else
-    DB_LL_NODE* relevant_listhead = free_frames->listheads[listhead_idx];
-    #endif
 
     #ifdef DEBUG_CHECKING
     int dbg_result;
@@ -1909,11 +1752,7 @@ void free_frames_add(PAGE* page) {
 
     page->status = FREE_STATUS;
 
-    #if PAGE_LINKED_LISTS
     insert_page(relevant_listhead, page);
-    #else
-    db_insert_node_at_head(relevant_listhead, page->frame_listnode);
-    #endif
 
     free_frames->list_lengths[listhead_idx]++;
     
@@ -1942,7 +1781,6 @@ void create_chain_of_pages(PAGE** pages_to_chain, ULONG64 num_pages, ULONG64 new
     PAGE* curr_page;
     PAGE* next_page;
 
-    #if PAGE_LINKED_LISTS
     for (ULONG64 i = 0; i < num_pages - 1; i++) {
         curr_page = pages_to_chain[i];
         curr_page->status = new_page_status;
@@ -1952,23 +1790,7 @@ void create_chain_of_pages(PAGE** pages_to_chain, ULONG64 num_pages, ULONG64 new
         curr_page->flink = next_page;
         next_page->blink = curr_page;
     } 
-    #else
-    DB_LL_NODE* curr_node;
-    DB_LL_NODE* next_node;
-
-    for (ULONG64 i = 0; i < num_pages - 1; i++) {
-        curr_page = pages_to_chain[i];
-        curr_page->status = new_page_status;
-        curr_node = curr_page->frame_listnode;
-
-        next_page = pages_to_chain[i + 1];
-        next_node = next_page->frame_listnode;
-
-        curr_node->flink = next_node;
-        next_node->blink = curr_node;
-    } 
-    #endif
-    
+        
     // We need to modify the final page's status
     next_page->status = new_page_status;
 }

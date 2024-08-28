@@ -277,31 +277,18 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
                 }
             }
             
-            #if PAGE_LINKED_LISTS
             PAGE* beginning_of_section;
             PAGE* end_of_section;
-            #else
-            DB_LL_NODE* beginning_of_section;
-            DB_LL_NODE* end_of_section;
-            #endif
 
             if (trim_to_modified > 0) {
                 create_chain_of_pages(page_section_trim_to_modified, trim_to_modified, MODIFIED_STATUS);
                 
-                #if PAGE_LINKED_LISTS
                 beginning_of_section = page_section_trim_to_modified[0];
                 end_of_section = page_section_trim_to_modified[trim_to_modified - 1];
-                #else
-                beginning_of_section = page_section_trim_to_modified[0]->frame_listnode;
-                end_of_section = page_section_trim_to_modified[trim_to_modified - 1]->frame_listnode;
-                #endif
+                
                 EnterCriticalSection(&modified_list->lock); 
 
-                #if PAGE_LINKED_LISTS
                 insert_page_section(&modified_list->listhead, beginning_of_section, end_of_section);
-                #else
-                db_insert_section_at_head(modified_list->listhead, beginning_of_section, end_of_section);
-                #endif
 
                 modified_list->list_length += trim_to_modified;
 
@@ -327,23 +314,15 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
 
                 create_chain_of_pages(page_section_trim_to_standby, trim_to_standby, STANDBY_STATUS);
 
-                #if PAGE_LINKED_LISTS
                 beginning_of_section = page_section_trim_to_standby[0];
                 end_of_section = page_section_trim_to_standby[trim_to_standby - 1];
-                #else
-                beginning_of_section = page_section_trim_to_standby[0]->frame_listnode;
-                end_of_section = page_section_trim_to_standby[trim_to_standby - 1]->frame_listnode;
-                #endif
+               
                 // We only want to set the event if we desperately need pages, and we check before we modify the global
                 signal_waiting_for_pages_event = (total_available_pages == 0);
 
                 EnterCriticalSection(&standby_list->lock);
                 
-                #if PAGE_LINKED_LISTS
                 insert_page_section(&standby_list->listhead, beginning_of_section, end_of_section);
-                #else
-                db_insert_section_at_head(standby_list->listhead, beginning_of_section, end_of_section);
-                #endif
 
                 standby_list->list_length += trim_to_standby;
 
@@ -515,34 +494,21 @@ void faulter_trim_behind(PTE* accessed_pte) {
         }
     }
 
-    #if PAGE_LINKED_LISTS
     PAGE* beginning_of_section;
     PAGE* end_of_section;
-    #else
-    DB_LL_NODE* beginning_of_section;
-    DB_LL_NODE* end_of_section;
-    #endif
 
     // Briefly enter the modified list lock just to add the pages that we have already prepared
     if (trim_to_modified > 0) {
 
         create_chain_of_pages(pages_trimmed_to_modified, trim_to_modified, MODIFIED_STATUS);
 
-        #if PAGE_LINKED_LISTS
         beginning_of_section = pages_trimmed_to_modified[0];
         end_of_section = pages_trimmed_to_modified[trim_to_modified - 1];
-        #else
-        beginning_of_section = pages_trimmed_to_modified[0]->frame_listnode;
-        end_of_section = pages_trimmed_to_modified[trim_to_modified - 1]->frame_listnode;
-        #endif
-
+        
         EnterCriticalSection(&modified_list->lock);
 
-        #if PAGE_LINKED_LISTS
         insert_page_section(&modified_list->listhead, beginning_of_section, end_of_section);
-        #else
-        db_insert_section_at_head(modified_list->listhead, beginning_of_section, end_of_section);
-        #endif
+        
         modified_list->list_length += trim_to_modified;
 
         LeaveCriticalSection(&modified_list->lock);
@@ -565,21 +531,12 @@ void faulter_trim_behind(PTE* accessed_pte) {
 
         create_chain_of_pages(pages_trimmed_to_standby, trim_to_standby, STANDBY_STATUS);
         
-        #if PAGE_LINKED_LISTS
         beginning_of_section = pages_trimmed_to_standby[0];
         end_of_section = pages_trimmed_to_standby[trim_to_standby - 1];
-        #else
-        beginning_of_section = pages_trimmed_to_standby[0]->frame_listnode;
-        end_of_section = pages_trimmed_to_standby[trim_to_standby - 1]->frame_listnode;
-        #endif
 
         EnterCriticalSection(&standby_list->lock);
 
-        #if PAGE_LINKED_LISTS
-        insert_page_section(&standby_list->listhead, beginning_of_section, end_of_section);
-        #else
-        db_insert_section_at_head(standby_list->listhead, beginning_of_section, end_of_section);
-        #endif        
+        insert_page_section(&standby_list->listhead, beginning_of_section, end_of_section);      
 
         standby_list->list_length += trim_to_standby;
 
@@ -705,7 +662,7 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
             // EnterCriticalSection(&modified_list->lock);
 
             /**
-             * Try to get MOD_WRITER_SECTION_SIZE pages
+             * Try to get either MOD_WRITER_SECTION_SIZE pages or more if we are desperate for pages
              */
             while (section_attempts < num_to_get_per_section) {
                 if (acquire_mod_lock) EnterCriticalSection(&modified_list->lock);
@@ -713,13 +670,10 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
                 acquire_mod_lock = FALSE;
 
                 // We pop from the tail, so we have to acquire the tail pagelock first
-                #if PAGE_LINKED_LISTS
                 potential_page = modified_list->listhead.blink;
-                #else
-                potential_page = (PAGE*) modified_list->listhead->blink->item;
-                #endif
+                
                 // The list is empty
-                if (potential_page == NULL) break;
+                if (potential_page == &modified_list->listhead) break;
 
                 // The rare case where the page we want to pop has its pagelock held. We surrender the modified listlock
                 if (try_acquire_pagelock(potential_page, 8) == FALSE) {
@@ -872,23 +826,15 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
                 // We are able to create an entire chain of pages to the standby list very quickly
                 create_chain_of_pages(pages_confirmed_to_standby, num_pages_confirmed_to_standby, STANDBY_STATUS);
 
-                #if PAGE_LINKED_LISTS
                 PAGE* beginning_of_section = pages_confirmed_to_standby[0];
                 PAGE* end_of_section = pages_confirmed_to_standby[num_pages_confirmed_to_standby - 1];
-                #else
-                DB_LL_NODE* beginning_of_section = pages_confirmed_to_standby[0]->frame_listnode;
-                DB_LL_NODE* end_of_section = pages_confirmed_to_standby[num_pages_confirmed_to_standby - 1]->frame_listnode;
-                #endif
-
+               
                 BOOL signal_waiting_for_pages = (total_available_pages == 0);
 
                 EnterCriticalSection(&standby_list->lock);
 
-                #if PAGE_LINKED_LISTS
                 insert_page_section(&standby_list->listhead, beginning_of_section, end_of_section);
-                #else
-                db_insert_section_at_head(standby_list->listhead, beginning_of_section, end_of_section);
-                #endif
+               
                 standby_list->list_length += num_pages_confirmed_to_standby;
                 InterlockedAdd64(&total_available_pages, num_pages_confirmed_to_standby);
 

@@ -104,13 +104,9 @@ typedef struct PAGE_STRUCT {
     // but I decided to use this for simplicity so that I could spend time on the actual use of the pagelocks
     long page_lock;
 
-    #if PAGE_LINKED_LISTS
     struct PAGE_STRUCT* flink;
     struct PAGE_STRUCT* blink;
-    #else
-    DB_LL_NODE* frame_listnode;
-    #endif
-
+   
     #if DEBUG_PAGELOCK
     CRITICAL_SECTION dev_page_lock;
     ULONG64 holding_threadid;
@@ -162,7 +158,6 @@ typedef struct {
 PAGE* initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_frames);
 
 
-#if PAGE_LINKED_LISTS
 /**
  * Inserts the given page to the head of the list
  */
@@ -195,7 +190,7 @@ void remove_page_section(PAGE* beginning, PAGE* end);
  * where the beginning node will be closest to the head 
  */
 void insert_page_section(PAGE* listhead, PAGE* beginning, PAGE* end);
-#endif
+
 
 
 /**
@@ -236,11 +231,8 @@ BOOL page_is_standby(PAGE page);
  *      to each cache slot
  */
 typedef struct {
-    #if PAGE_LINKED_LISTS
     PAGE listheads[NUM_CACHE_SLOTS];
-    #else
-    DB_LL_NODE* listheads[NUM_CACHE_SLOTS];
-    #endif
+    
 
     volatile ULONG64 list_lengths[NUM_CACHE_SLOTS]; 
     volatile ULONG64 total_available;
@@ -272,11 +264,7 @@ ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR 
  * An array of free lists whose length corresponds to the size of the cache
  */
 typedef struct {
-    #if PAGE_LINKED_LISTS
-    PAGE listheads[NUM_CACHE_SLOTS];
-    #else
-    DB_LL_NODE* listheads[NUM_CACHE_SLOTS];
-    #endif
+    PAGE listheads[NUM_CACHE_SLOTS];   
 
     volatile ULONG64 list_lengths[NUM_CACHE_SLOTS]; 
     volatile ULONG64 total_available;
@@ -304,11 +292,7 @@ FREE_FRAMES_LISTS* initialize_free_frames();
 #ifndef MODIFIED_LIST_T
 #define MODIFIED_LIST_T
 typedef struct {
-    #if PAGE_LINKED_LISTS
     PAGE listhead;
-    #else
-    DB_LL_NODE* listhead;
-    #endif
 
     //BW: remember to adjust this to the 64 - sizeof(page)
     UCHAR buffer[64];
@@ -361,11 +345,7 @@ PAGE* modified_pop_page(MODIFIED_LIST* modified_list);
 #define STANDBY_LIST_T
 
 typedef struct {
-    #if PAGE_LINKED_LISTS
     PAGE listhead;
-    #else
-    DB_LL_NODE* listhead;
-    #endif
 
     //BW: remember to adjust this to the 64 - sizeof(page)
     UCHAR buffer[64];

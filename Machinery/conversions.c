@@ -41,8 +41,8 @@ PTE* va_to_pte(PULONG_PTR virtual_address) {
  */
 ULONG64 pte_to_pagetable_idx(PTE* pte) {
     if (pte == NULL) {
-        fprintf(stderr, "NULL PTE given to pte_to_va");
-        return NULL;
+        fprintf(stderr, "NULL PTE given to pte_to_pagetable_idx");
+        DebugBreak();
     }
 
     ULONG64 base_address_pte_list = (ULONG64) pagetable->pte_list;
