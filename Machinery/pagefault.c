@@ -43,6 +43,8 @@ static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result
 
 static ULONG64 get_trailing_valid_pte_count(PTE* accessed_pte);
 
+static ULONG64 get_trailing_valid_and_being_read_pte_count(PTE* accessed_pte);
+
 static void end_of_fault_work();
 
 
@@ -512,7 +514,9 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
     acquire_pagelock(page_to_rescue, 1);
 
     // We lost the race to rescue this PTE - whether it was stolen from under us or someone else saved it
-    if (page_to_rescue->pte != accessed_pte || page_to_rescue->status == ACTIVE_STATUS) {
+    if (page_to_rescue->pte != accessed_pte || 
+        (page_to_rescue->status != STANDBY_STATUS && page_to_rescue->status != MODIFIED_STATUS)) {
+
         release_pagelock(page_to_rescue, 2);
         return RESCUE_FAIL;
     }
@@ -648,6 +652,7 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
     #endif
 }
 
+
 #if 0
 /**
  * Sets the being_read_from_disk bit in the accessed PTE to 1 if possible, otherwise releases the lock and spins until the read is complete
@@ -702,6 +707,62 @@ static BOOL acquire_disk_pte_read_rights(PTE* accessed_pte, PTE local_pte) {
 }
 #endif
 
+
+/**
+ * Opportunistically (without the PTE lock) looks for disk PTEs that are not being read currently, and writes them into the
+ * found pte storage. If the PTE locksection changes at all within the found PTEs, the index (of the found PTEs list) at which it changes will be written
+ * into locksection_switch_storage, if it doesn't switch, we write INFINITE into locksection_switch_storage
+ * 
+ * We assume that the num_to_check is less than or equal to MAX_PAGES_READABLE, and that we will never cross into more than two
+ * PTE locksections
+ * 
+ * Returns the number of unread/not-being-read disk PTEs written into found_pte_storage
+ */
+static ULONG64 find_unread_sequential_disk_ptes(PTE* accessed_pte, PTE** found_pte_storage, ULONG64* locksection_switch_storage, ULONG64 num_to_check) {
+    ULONG64 curr_pte_index = pte_to_pagetable_idx(accessed_pte);
+    ULONG64 final_locksection_idx = pte_to_locksection(accessed_pte)->final_pte_index;
+
+    ULONG64 num_ptes_checked = 0;
+    ULONG64 num_unread_disk_ptes_found = 0;
+    BOOL found_locksection_switch = FALSE;
+    PTE* curr_pte;
+    PTE pte_copy;
+
+    while (num_ptes_checked < num_to_check) {
+        
+        // speculatively read in the PTE, see if it is unread-disk-format, and check if our PTE index is greater than our boundary
+        curr_pte = &pagetable->pte_list[curr_pte_index];
+        pte_copy = read_pte_contents(curr_pte);
+
+        if (is_disk_format(pte_copy) && pte_copy.disk_format.being_read_from_disk == PTE_NOT_BEING_READ_FROM_DISK) {
+            
+            if (found_locksection_switch == FALSE && curr_pte_index > final_locksection_idx) {
+                *locksection_switch_storage = num_unread_disk_ptes_found;
+                found_locksection_switch = TRUE;
+            }
+
+            found_pte_storage[num_unread_disk_ptes_found] = curr_pte;
+            num_unread_disk_ptes_found++;
+        } 
+
+        curr_pte_index++;
+        
+        // The end of our single level pagetable
+        if (curr_pte_index == pagetable->num_virtual_pages) {
+            break;
+        }
+
+        num_ptes_checked++;
+    }
+
+    if (found_locksection_switch == FALSE) {
+        *locksection_switch_storage = INFINITE;
+    }
+
+    return num_unread_disk_ptes_found;
+}
+
+
 /**
  * Acquires the right to read sequential PTEs starting at the accessed PTE and stores the pointers in the acquired_rights_pte_storage.
  * This "right" is obtained by setting the being_read_from_disk bit in the accessed PTE. We will only stay within a single PTE locksection,
@@ -716,7 +777,58 @@ static ULONG64 acquire_sequential_disk_read_rights(PTE* accessed_pte, PTE** acqu
         fprintf(stderr, "Invalid number of PTEs to acquire disk read rights to\n");
         DebugBreak();
     }
+
+    PTE* potential_ptes[MAX_PAGES_READABLE];
+    ULONG64 pte_locksection_switch_idx;
+
+    /**
+     * This scheme allows us to speculatively collect the PTEs that we will likely be reading in from the disk,
+     * this means that we spend less time holding the PTE lock later on as we actually determine which PTEs we are reading in,
+     * and do not have to spend additional effort determining which PTE locksection we need to be in
+     */
+    ULONG64 num_potential_ptes = find_unread_sequential_disk_ptes(accessed_pte, potential_ptes, &pte_locksection_switch_idx, num_ptes);
+
+    if (num_potential_ptes == 0) {
+        return 0;
+    }
+
+    PTE_LOCKSECTION* curr_pte_locksection = pte_to_locksection(potential_ptes[0]);
+    const BOOL locksection_will_switch = (pte_locksection_switch_idx != INFINITE);
+    PTE* curr_pte;
+    PTE pte_copy;
+    PTE pte_contents;
+    ULONG64 num_pte_rights_acquired = 0;
+    pte_contents.complete_format = 0;
+    pte_contents.disk_format.being_read_from_disk = PTE_BEING_READ_FROM_DISK;
     
+    EnterCriticalSection(&curr_pte_locksection->lock);
+    for (ULONG64 i = 0; i < num_potential_ptes; i++) {
+        // Determine if we need to switch critical sections
+        if (locksection_will_switch && pte_locksection_switch_idx == i) {
+            LeaveCriticalSection(&curr_pte_locksection->lock);
+
+            // The next pte locksection is stored adjacent to this one, so we can increment the pointer
+            curr_pte_locksection++;
+            EnterCriticalSection(&curr_pte_locksection->lock);
+        }
+
+        curr_pte = potential_ptes[i];
+        pte_copy = read_pte_contents(curr_pte);
+
+        if (is_disk_format(pte_copy) && pte_copy.disk_format.being_read_from_disk == PTE_NOT_BEING_READ_FROM_DISK) {
+            pte_contents.disk_format.pagefile_idx = pte_copy.disk_format.pagefile_idx;
+
+            write_pte_contents(curr_pte, pte_contents);
+            acquired_rights_pte_storage[num_pte_rights_acquired] = curr_pte;
+            num_pte_rights_acquired++;
+        }
+
+    }
+    LeaveCriticalSection(&curr_pte_locksection->lock);
+
+    return num_pte_rights_acquired;
+
+    #if 0
     PTE_LOCKSECTION* prev_pte_locksection = pte_to_locksection(accessed_pte);
     PTE_LOCKSECTION* curr_pte_locksection = prev_pte_locksection;
 
@@ -741,8 +853,12 @@ static ULONG64 acquire_sequential_disk_read_rights(PTE* accessed_pte, PTE** acqu
         
         if (curr_pte_locksection != prev_pte_locksection) {
             LeaveCriticalSection(&prev_pte_locksection->lock);
+            return num_rights_acquired;
+            #if 0
+            LeaveCriticalSection(&prev_pte_locksection->lock);
             EnterCriticalSection(&curr_pte_locksection->lock);
             break;
+            #endif
         }
 
         /**
@@ -778,6 +894,7 @@ static ULONG64 acquire_sequential_disk_read_rights(PTE* accessed_pte, PTE** acqu
     LeaveCriticalSection(&curr_pte_locksection->lock);
 
     return num_rights_acquired;
+    #endif
 }
 
 
@@ -834,9 +951,10 @@ static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result
     } else {
         // Determine how many PTEs we might try to speculatively read from the disk, if we have available pages
         ULONG64 trailing_valid_pte_count = get_trailing_valid_pte_count(accessed_pte);
+        ULONG64 trailing_valid_and_being_read_count = get_trailing_valid_and_being_read_pte_count(accessed_pte);
 
         if (trailing_valid_pte_count < MAX_PAGES_READABLE) {
-            num_pte_rights_to_acquire = max(trailing_valid_pte_count, 1);
+            num_pte_rights_to_acquire = max(trailing_valid_and_being_read_count, 1);
         } else {
             num_pte_rights_to_acquire = MAX_PAGES_READABLE;
         }
@@ -917,6 +1035,48 @@ static ULONG64 get_trailing_valid_pte_count(PTE* accessed_pte) {
     }
 
     return valid_count;
+}
+
+
+/**
+ * Without acquiring any locks, gets a count of the number of valid PTEs and disk PTEs currently being read in trailing
+ * the accessed PTE, up to MAX_PAGES_READABLE
+ * 
+ * We do this for disk-read speculation, as we can take advantage of a CPU in the fault handler whose PTE is being read in from disk already,
+ * who might itself be being read in speculatively from another thread
+ */
+static ULONG64 get_trailing_valid_and_being_read_pte_count(PTE* accessed_pte) {
+    ULONG64 total_count = 0;
+
+    ULONG64 pte_idx = pte_to_pagetable_idx(accessed_pte);
+    PTE pte_copy;
+    PTE* curr_pte;
+
+    // We are at the bottom of the pagetable - there cannot be any valid PTEs behind this one
+    if (pte_idx == 0) {
+        return 0;
+    }
+
+    // We want to start on the PTE before the accessed one
+    pte_idx--;
+
+    while (total_count < MAX_PAGES_READABLE && pte_idx > 0) {
+        curr_pte = &pagetable->pte_list[pte_idx];
+        pte_copy = read_pte_contents(curr_pte);
+
+        if (is_memory_format(pte_copy)) {
+            total_count++;
+        } else if (is_disk_format(pte_copy) && pte_copy.disk_format.being_read_from_disk == PTE_BEING_READ_FROM_DISK) {
+            total_count++;
+        } else {
+            break;
+        }
+
+        pte_idx--;
+    }
+
+    return total_count;
+
 }
 
 

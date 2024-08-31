@@ -64,11 +64,11 @@
 /**
  * LARGE SIMULATION
  */
-#define VIRTUAL_ADDRESS_SIZE        GB(1)
+#define VIRTUAL_ADDRESS_SIZE        GB(2)
 
 #define VIRTUAL_ADDRESS_SIZE_IN_UNSIGNED_CHUNKS        (VIRTUAL_ADDRESS_SIZE / sizeof (ULONG_PTR))
 
-#define CACHE_SIZE      MB(1)
+#define CACHE_SIZE      MB(2)
 
 /**
  * See above comment for the reasoning behind this number

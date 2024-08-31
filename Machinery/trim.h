@@ -11,7 +11,7 @@
 #define TRIM_PER_SECTION 96
 
 // The minimum and maximum amount of PTEs that can be trimmed by the faulting threads
-#define FAULTER_TRIM_BEHIND_MIN 8
+#define FAULTER_TRIM_BEHIND_MIN 16
 #define FAULTER_TRIM_BEHIND_MAX 64
 
 // We need to OR the final bit of a pfn in order to have read-only permissions

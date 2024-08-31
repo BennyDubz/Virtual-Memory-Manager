@@ -45,7 +45,7 @@ DISK* initialize_disk(MEM_EXTENDED_PARAMETER* vmem_parameters) {
     /**
      * Initialize disk slot locks
      */
-    ULONG64 num_locks = max(DISK_STORAGE_SLOTS >> 6, 1);
+    ULONG64 num_locks = DISK_STORAGE_NUM_SECTIONS;
     ULONG64 slots_per_lock = DISK_STORAGE_SLOTS / num_locks;
 
     ULONG64 remaining_disk_slots = DISK_STORAGE_SLOTS % num_locks;

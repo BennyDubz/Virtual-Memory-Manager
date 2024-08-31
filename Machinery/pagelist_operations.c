@@ -108,10 +108,88 @@ static void free_frames_add_batch(PAGE** page_list, ULONG64 num_pages) {
      */
     qsort(page_list, num_pages, sizeof(PAGE*), page_cache_color_compare);
 
+    create_chain_of_pages(page_list, num_pages, FREE_STATUS);
+
+    /**
+     * After this, no one will be able to use this page accidentally until we have added it to the list as transition
+     * PTEs will see that the PTE and the page status do not match anymore, and will not try to rescue it
+     */
+    for (ULONG64 release_idx = 0; release_idx < num_pages; release_idx++) {
+        page_list[release_idx]->pte = NULL;
+        release_pagelock(page_list[release_idx], 13);
+    }
+
     ULONG64 curr_cache_color = page_to_pfn(page_list[0]) % NUM_CACHE_SLOTS;
-    ULONG64 next_cache_color;
+    ULONG64 page_cache_color;
+
+    ULONG64 first_in_section_idx = 0;
+    ULONG64 last_page_in_section_idx = 0;
+
+    CRITICAL_SECTION* curr_locksection = &free_frames->list_locks[curr_cache_color];
+    PAGE* curr_listhead = &free_frames->listheads[curr_cache_color];
+
+    ULONG64 page_idx = 0;
+    ULONG64 page_section_size;
+
+    for (ULONG64 page_idx = 0; page_idx < num_pages; page_idx++) {
+        page_cache_color = page_to_pfn(page_list[page_idx]) % NUM_CACHE_SLOTS;
+
+        if (curr_cache_color != page_cache_color) {
+            page_section_size = page_idx - first_in_section_idx;
+
+            #if 0
+            create_chain_of_pages(&page_list[first_in_section_idx], page_section_size, FREE_STATUS);
+
+            /**
+             * After this, no one will be able to use this page accidentally until we have added it to the list as transition
+             * PTEs will see that the PTE and the page status do not match anymore, and will not try to rescue it
+             */
+            for (ULONG64 release_idx = first_in_section_idx; release_idx < page_idx; release_idx++) {
+                page_list[release_idx]->pte = NULL;
+                release_pagelock(page_list[release_idx], 13);
+            }
+            #endif
+
+            EnterCriticalSection(curr_locksection);
+
+            insert_page_section(curr_listhead, page_list[first_in_section_idx], page_list[page_idx - 1]);
+            InterlockedAdd64(&free_frames->list_lengths[curr_cache_color], page_section_size);
+            InterlockedAdd64(&free_frames->total_available, page_section_size);
+            InterlockedAdd64(&total_available_pages, page_section_size);
+
+            LeaveCriticalSection(curr_locksection);
 
 
+            // Adjust the indices, cache color, and locksection to the next section of pages
+            first_in_section_idx = page_idx;
+            curr_cache_color = page_cache_color;
+            curr_locksection = &free_frames->list_locks[curr_cache_color];
+            curr_listhead = &free_frames->listheads[curr_cache_color];
+        }
+    }
+    
+    #if 0
+    // We will have the section at the end of the list to handle
+    page_section_size = num_pages - first_in_section_idx;
+    create_chain_of_pages(&page_list[first_in_section_idx], num_pages - first_in_section_idx, FREE_STATUS);
+
+    for (ULONG64 release_idx = first_in_section_idx; release_idx < num_pages; release_idx++) {
+        page_list[release_idx]->pte = NULL;
+        release_pagelock(page_list[release_idx], 13);
+    }
+    #endif
+    page_section_size = num_pages - first_in_section_idx;
+
+    EnterCriticalSection(curr_locksection);
+
+    insert_page_section(curr_listhead, page_list[first_in_section_idx], page_list[num_pages - 1]);
+    InterlockedAdd64(&free_frames->list_lengths[curr_cache_color], page_section_size);
+    InterlockedAdd64(&free_frames->total_available, page_section_size);
+    InterlockedAdd64(&total_available_pages, page_section_size);
+
+    LeaveCriticalSection(curr_locksection);
+
+    #if 0
     /**
      * We enter the first pages corresponding cache color locksection - we will hold onto this lock
      * until we reach a page who is in a different cache color. Because the list is sorted by cache color,
@@ -152,6 +230,7 @@ static void free_frames_add_batch(PAGE** page_list, ULONG64 num_pages) {
     }
     
     LeaveCriticalSection(curr_locksection);
+    #endif
 
     SetEvent(waiting_for_pages_event);
 }
@@ -169,6 +248,84 @@ static void zero_list_add_batch(PAGE** page_list, ULONG64 num_pages) {
      */
     qsort(page_list, num_pages, sizeof(PAGE*), page_cache_color_compare);
 
+    create_chain_of_pages(page_list, num_pages, ZERO_STATUS);
+
+    /**
+     * After this, no one will be able to use this page accidentally until we have added it to the list as transition
+     * PTEs will see that the PTE and the page status do not match anymore, and will not try to rescue it
+     */
+    for (ULONG64 release_idx = 0; release_idx < num_pages; release_idx++) {
+        page_list[release_idx]->pte = NULL;
+        release_pagelock(page_list[release_idx], 13);
+    }
+
+    ULONG64 curr_cache_color = page_to_pfn(page_list[0]) % NUM_CACHE_SLOTS;
+    ULONG64 page_cache_color;
+
+    ULONG64 first_in_section_idx = 0;
+
+    CRITICAL_SECTION* curr_locksection = &zero_lists->list_locks[curr_cache_color];
+    PAGE* curr_listhead = &zero_lists->listheads[curr_cache_color];
+
+    ULONG64 page_idx = 0;
+    ULONG64 page_section_size;
+    
+    for (ULONG64 page_idx = 0; page_idx < num_pages; page_idx++) {
+        page_cache_color = page_to_pfn(page_list[page_idx]) % NUM_CACHE_SLOTS;
+
+        if (curr_cache_color != page_cache_color) {
+            page_section_size = page_idx - first_in_section_idx;
+
+            #if 0
+            create_chain_of_pages(&page_list[first_in_section_idx], page_section_size, FREE_STATUS);
+
+            for (ULONG64 release_idx = first_in_section_idx; release_idx < page_idx; release_idx++) {
+                page_list[release_idx]->pte = NULL;
+                release_pagelock(page_list[release_idx], 13);
+            }
+            #endif
+
+            EnterCriticalSection(curr_locksection);
+
+            insert_page_section(curr_listhead, page_list[first_in_section_idx], page_list[page_idx - 1]);
+            InterlockedAdd64(&zero_lists->list_lengths[curr_cache_color], page_section_size);
+            InterlockedAdd64(&zero_lists->total_available, page_section_size);
+            InterlockedAdd64(&total_available_pages, page_section_size);
+            
+            LeaveCriticalSection(curr_locksection);
+
+
+            // Adjust the indices, cache color, and locksection to the next section of pages
+            first_in_section_idx = page_idx;
+            curr_cache_color = page_cache_color;
+            curr_locksection = &zero_lists->list_locks[curr_cache_color];
+            curr_listhead = &zero_lists->listheads[curr_cache_color];
+        }
+    }
+
+    #if 0
+    // We will have the section at the end of the list to handle
+    page_section_size = num_pages - first_in_section_idx;
+    create_chain_of_pages(&page_list[first_in_section_idx], num_pages - first_in_section_idx, FREE_STATUS);
+
+    for (ULONG64 release_idx = first_in_section_idx; release_idx < num_pages; release_idx++) {
+        page_list[release_idx]->pte = NULL;
+        release_pagelock(page_list[release_idx], 13);
+    }
+    #endif
+
+    page_section_size = num_pages - first_in_section_idx;
+
+    EnterCriticalSection(curr_locksection);
+
+    insert_page_section(curr_listhead, page_list[first_in_section_idx], page_list[num_pages - 1]);
+    InterlockedAdd64(&zero_lists->list_lengths[curr_cache_color], page_section_size);
+    InterlockedAdd64(&zero_lists->total_available, page_section_size);
+    InterlockedAdd64(&total_available_pages, page_section_size);
+    
+    LeaveCriticalSection(curr_locksection);
+
+    #if 0
     ULONG64 curr_cache_color = page_to_pfn(page_list[0]) % NUM_CACHE_SLOTS;
     ULONG64 next_cache_color;
 
@@ -214,6 +371,7 @@ static void zero_list_add_batch(PAGE** page_list, ULONG64 num_pages) {
     }
     
     LeaveCriticalSection(curr_locksection);
+    #endif
 
     SetEvent(waiting_for_pages_event);
 }
@@ -1461,14 +1619,29 @@ ULONG64 find_batch_available_pages(BOOL zeroed_pages_preferred, PAGE** page_stor
     return total_allocated_pages;
 }
 
+/**
+ * Takes the pages and unlinks them from the standby list
+ */
+static void rescue_batch_standby_pages(PAGE** standby_rescues, ULONG64 num_standby_rescues) {
+    if (num_standby_rescues > 0) {
+        EnterCriticalSection(&standby_list->lock);
+
+        for (ULONG64 i = 0; i < num_standby_rescues; i++) {
+            unlink_page(standby_rescues[i]);
+        }
+
+        standby_list->list_length -= num_standby_rescues;
+
+        LeaveCriticalSection(&standby_list->lock);
+
+        InterlockedAdd64(&total_available_pages, - num_standby_rescues);
+    }
+}
 
 /**
- * Rescues all of the pages from both the modified and standby lists
- * 
- * Assumes that all pages' pagelocks are acquired, and that the pre-sorted pages are in the appropriate lists
- * with their correct statuses
+ * Takes the pages and unlinks them from the modified list
  */
-void rescue_batch_pages(PAGE** modified_rescues, ULONG64 num_modified_rescues, PAGE** standby_rescues, ULONG64 num_standby_rescues) {
+static void rescue_batch_modified_pages(PAGE** modified_rescues, ULONG64 num_modified_rescues) {
     PAGE* curr_page;
     if (num_modified_rescues > 0) {
         ULONG64 num_removed = 0;
@@ -1491,20 +1664,24 @@ void rescue_batch_pages(PAGE** modified_rescues, ULONG64 num_modified_rescues, P
 
         LeaveCriticalSection(&modified_list->lock);
     }
+}
 
-    if (num_standby_rescues > 0) {
-        EnterCriticalSection(&standby_list->lock);
 
-        for (ULONG64 i = 0; i < num_standby_rescues; i++) {
-            unlink_page(standby_rescues[i]);
-        }
+/**
+ * Rescues all of the pages from both the modified and standby lists
+ * 
+ * Assumes that all pages' pagelocks are acquired, and that the pre-sorted pages are in the appropriate lists
+ * with their correct statuses
+ */
+void rescue_batch_pages(PAGE** modified_rescues, ULONG64 num_modified_rescues, PAGE** standby_rescues, ULONG64 num_standby_rescues) {
+    
+    /**
+     * These functions return immediately if there are no modified/standby rescues, but seperating them out
+     * helps with analyzing lock contention in the perf traces
+     */
+    rescue_batch_modified_pages(modified_rescues, num_modified_rescues);
 
-        standby_list->list_length -= num_standby_rescues;
-
-        LeaveCriticalSection(&standby_list->lock);
-
-        InterlockedAdd64(&total_available_pages, - num_standby_rescues);
-    }
+    rescue_batch_standby_pages(standby_rescues, num_standby_rescues);
 }
 
 
@@ -1852,7 +2029,7 @@ void acquire_pagelock(PAGE* page, ULONG64 origin_code) {
 
     unsigned old_lock_status;
     while(TRUE) {
-        old_lock_status = InterlockedCompareExchange(&page->page_lock, PAGE_LOCKED, PAGE_UNLOCKED);
+        old_lock_status = InterlockedCompareExchange16(&page->page_lock, PAGE_LOCKED, PAGE_UNLOCKED);
 
         #if LIGHT_DEBUG_PAGELOCK
         if (old_lock_status == PAGE_UNLOCKED) {
@@ -1900,7 +2077,7 @@ void release_pagelock(PAGE* page, ULONG64 origin_code) {
     page->origin_code = origin_code;
     #endif
 
-    if (InterlockedCompareExchange(&page->page_lock, PAGE_UNLOCKED, PAGE_LOCKED) != PAGE_LOCKED) {
+    if (InterlockedCompareExchange16(&page->page_lock, PAGE_UNLOCKED, PAGE_LOCKED) != PAGE_LOCKED) {
         DebugBreak();
     };
 }
@@ -1925,7 +2102,7 @@ BOOL try_acquire_pagelock(PAGE* page, ULONG64 origin_code) {
 
 
     #if LIGHT_DEBUG_PAGELOCK
-    if (InterlockedCompareExchange(&page->page_lock, PAGE_LOCKED, PAGE_UNLOCKED) == PAGE_UNLOCKED) {
+    if (InterlockedCompareExchange16(&page->page_lock, PAGE_LOCKED, PAGE_UNLOCKED) == PAGE_UNLOCKED) {
         page->holding_threadid = GetCurrentThreadId();
         page->five_ago = page->four_ago;
         page->four_ago = page->three_ago;
@@ -1938,7 +2115,7 @@ BOOL try_acquire_pagelock(PAGE* page, ULONG64 origin_code) {
         return FALSE;
     }
     #endif
-
-    return InterlockedCompareExchange(&page->page_lock, PAGE_LOCKED, PAGE_UNLOCKED) == PAGE_UNLOCKED;
+    
+    return InterlockedCompareExchange16(&page->page_lock, PAGE_LOCKED, PAGE_UNLOCKED) == PAGE_UNLOCKED;
 
 }

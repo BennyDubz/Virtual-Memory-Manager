@@ -14,16 +14,26 @@
 
 #define DISK_STORAGE_SLOTS (DISK_SIZE / PAGE_SIZE)
 
+/**
+ * We divide the disk into sections with their own locks to increase lock granularity
+ * 
+ * Note that we might have one more lock section to account for the additional two disk slots that we have that make
+ * the total no longer divisible by two
+ */
+#define DISK_STORAGE_NUM_SECTIONS   max(DISK_STORAGE_SLOTS >> 4, 1);
+
 // The maximum number of pages readable from a single thread at a time
 #define MAX_PAGES_READABLE      16
 
 #define DISK_READSECTION_SIZE  MAX_PAGES_READABLE
-#define DISK_READSECTIONS max(DISK_STORAGE_SLOTS >> 10, 64)
+#define DISK_READSECTIONS       max(DISK_STORAGE_SLOTS >> 8, 64)
 
 // The total number of page-sized virtual addresses we need to reserve for the disk
 #define DISK_READ_SLOTS     (DISK_READSECTIONS * DISK_READSECTION_SIZE)
 
-#define DISK_REFRESH_BOUNDARY (DISK_READSECTIONS / 2)
+//
+#define DISK_REFRESH_BOUNDARY (DISK_READSECTIONS / 4)
+
 
 /**
  * Rather than have a single page-sized virtual address for the disk reads, 
@@ -58,7 +68,7 @@
 
 typedef struct {
     /**
-     *  Since we cannot actually access the disk, we need to use some of the virtual memory of the process
+     *  Since we are not actually accessing the disk, we need to use some of the virtual memory of the process
      *  that is running the simulation. We will actually commit the memory so that the disk should always
      *  be able to be initialized at the beginning of the simulation
      * 
@@ -71,13 +81,15 @@ typedef struct {
     ULONG64 num_locks;
     ULONG64 slots_per_lock;
     ULONG64* open_slot_counts;
+
+    DECLSPEC_ALIGN(64)
     volatile ULONG64 total_available_slots;
 
     /**
-     * This supports the batched writing of many pages to the disk from the mod-writer
+     * This supports the batched writing/reading of many pages to the disk from the mod-writer/faulter
      */
     PULONG_PTR disk_large_write_slot;
-
+    PULONG_PTR disk_read_base_addr;
 
     /**
      * We maintain the disk read slots in their own array that we can use
@@ -86,13 +98,16 @@ typedef struct {
      * This allows us to only have to clear/unmap disk read slots infrequently,
      * saving constant calls to MapUserPhysicalPagesScatter
      */
+    DECLSPEC_ALIGN(64)
     volatile long disk_readsection_statuses[DISK_READ_SLOTS];
-    PULONG_PTR disk_read_base_addr;
+
+    DECLSPEC_ALIGN(64)
     volatile ULONG64 num_available_readsections;
 
     // We use interlocked operations to help reduce the amount of linear searching that threads will have to do
+    DECLSPEC_ALIGN(64)
     volatile ULONG64 disk_read_curr_idx; 
-
+    
 
 } DISK;
 

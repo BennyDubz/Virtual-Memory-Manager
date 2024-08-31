@@ -50,7 +50,7 @@ PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base)
     }
 
     // We want 512 PTEs per locksection
-    ULONG64 num_locks = max(num_virtual_pages / 512, 1);
+    ULONG64 num_locks = max(num_virtual_pages / PTES_PER_LOCKSECTION, 1);
     
     PTE_LOCKSECTION* pte_locksections = (PTE_LOCKSECTION*) malloc(sizeof(PTE_LOCKSECTION) * num_locks);
 
@@ -64,6 +64,7 @@ PAGETABLE* initialize_pagetable(ULONG64 num_virtual_pages, PULONG_PTR vmem_base)
         initialize_lock(&curr_section->lock);
         curr_section->valid_pte_count = 0;
         curr_section->locksection_idx = locksection_idx;
+        curr_section->final_pte_index = PTES_PER_LOCKSECTION * (locksection_idx + 1) - 1;
     } 
 
     pagetable->num_locks = num_locks;

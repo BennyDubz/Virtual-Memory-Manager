@@ -49,7 +49,7 @@
 /** 
  * These determine the number of pages we take off the standby list to add to the zero/free lists when we are refreshing the lists
  */
-#define NUM_PAGES_FAULTER_REFRESH   NUM_CACHE_SLOTS * 2
+#define NUM_PAGES_FAULTER_REFRESH   NUM_CACHE_SLOTS
 
 // When refreshing both the free and zero lists, this proportion goes to the free lists
 #define FREE_FRAMES_PORTION   NUM_PAGES_FAULTER_REFRESH / 2
@@ -70,6 +70,7 @@
  * This helps us potentially reduce contention on the free list
  */
 #define REDUCE_FREE_LIST_PRESSURE_AMOUNT    NUM_CACHE_SLOTS
+
 
 #include "../Datastructures/datastructures.h"
 #include "../hardware.h"

@@ -53,7 +53,7 @@
 #ifndef PAGE_T
 #define PAGE_T
 
-#if 0
+#if 1
 typedef struct {
     ULONG64 status:3;
     ULONG64 pagefile_idx:40; 
@@ -74,17 +74,23 @@ typedef struct {
 } PHYS_PAGE_FORMAT;
 
 typedef struct {
-    UCHAR status;
+    ULONG64 status:3;
+    ULONG64 list_length:61;
+    
+    SRWLOCK list_lock;
 
     /**
      * We want to be able to insert at the head and pop from the tail simultaneously just using the pagelocks,
-     * 
+     * and having seperate locks for the flink and blink allows this to happen at greater granularity
      */
-    long flink_lock;
-    long blink_lock;
+    short flink_lock;
+    short blink_lock;
+
+
 
 } LISTHEAD_PAGE_FORMAT;
 #endif
+
 
 typedef struct PAGE_STRUCT {
     ULONG64 status:3;
@@ -102,7 +108,7 @@ typedef struct PAGE_STRUCT {
 
     // We could use a single bit here if we decided to be more careful with our interlocked operations (not to crush other bits),
     // but I decided to use this for simplicity so that I could spend time on the actual use of the pagelocks
-    long page_lock;
+    short page_lock;
 
     struct PAGE_STRUCT* flink;
     struct PAGE_STRUCT* blink;
@@ -125,6 +131,9 @@ typedef struct PAGE_STRUCT {
     ULONG64 five_ago;
     #endif
 } PAGE;
+
+
+
 
 
 #if DEBUG_PAGELOCK

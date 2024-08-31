@@ -25,6 +25,13 @@
 #define PTE_NOT_BEING_READ_FROM_DISK 0
 #define PTE_BEING_READ_FROM_DISK 1
 
+/**
+ * We choose 512 to match the real world where there is a PTE lock for each page of memory
+ * 
+ * However, in the real world, they would call this a "pagetable lock", but since we have a single level pagetable,
+ * we break the pagetable itself into locksections
+ */
+#define PTES_PER_LOCKSECTION 512
 
 #ifndef PTE_T
 #define PTE_T
@@ -80,6 +87,8 @@ typedef struct {
     CRITICAL_SECTION lock;
     volatile ULONG64 valid_pte_count;
     ULONG64 locksection_idx;
+    // This is the PTE index of the final PTE in the locksection
+    ULONG64 final_pte_index;
 } PTE_LOCKSECTION;
 
 
