@@ -323,16 +323,10 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
                
                 // We only want to set the event if we desperately need pages, and we check before we modify the global
                 signal_waiting_for_pages_event = (total_available_pages == 0);
-
-                EnterCriticalSection(&standby_list->lock);
                 
-                insert_page_section(&standby_list->listhead, beginning_of_section, end_of_section);
-
-                standby_list->list_length += trim_to_standby;
+                insert_page_section2(standby_list, beginning_of_section, end_of_section, trim_to_standby);
 
                 InterlockedAdd64(&total_available_pages, trim_to_standby);
-
-                LeaveCriticalSection(&standby_list->lock);
 
                 for (ULONG64 trim_idx = 0; trim_idx < trim_to_standby; trim_idx++) {
                     curr_page = page_section_trim_to_standby[trim_idx];
@@ -542,14 +536,9 @@ void faulter_trim_behind(PTE* accessed_pte) {
         beginning_of_section = pages_trimmed_to_standby[0];
         end_of_section = pages_trimmed_to_standby[trim_to_standby - 1];
 
-        EnterCriticalSection(&standby_list->lock);
-
-        insert_page_section(&standby_list->listhead, beginning_of_section, end_of_section);      
-
-        standby_list->list_length += trim_to_standby;
+        insert_page_section2(standby_list, beginning_of_section, end_of_section, trim_to_standby);      
 
         InterlockedAdd64(&total_available_pages, trim_to_standby);
-        LeaveCriticalSection(&standby_list->lock);
 
         for (ULONG64 i = 0; i < trim_to_standby; i++) {
             curr_page = pages_trimmed_to_standby[i];
@@ -942,14 +931,9 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
                
                 BOOL signal_waiting_for_pages = (total_available_pages == 0);
 
-                EnterCriticalSection(&standby_list->lock);
-
-                insert_page_section(&standby_list->listhead, beginning_of_section, end_of_section);
+                insert_page_section2(standby_list, beginning_of_section, end_of_section, num_pages_confirmed_to_standby);
                
-                standby_list->list_length += num_pages_confirmed_to_standby;
                 InterlockedAdd64(&total_available_pages, num_pages_confirmed_to_standby);
-
-                LeaveCriticalSection(&standby_list->lock);
 
                 /**
                  * Now edit all of the pages to add all of the pagefile information and release the pagelocks

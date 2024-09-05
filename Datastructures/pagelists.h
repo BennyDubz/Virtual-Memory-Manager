@@ -106,9 +106,6 @@ typedef struct {
     // Having both the shared lock and the normal critical section will help with the transition while implementing both
     DECLSPEC_ALIGN(64)
     SRWLOCK shared_lock;
-
-    DECLSPEC_ALIGN(64)
-    CRITICAL_SECTION lock;
 } PAGE_LISTHEAD;
 
 

@@ -66,12 +66,22 @@ lock_spinning_debug: CFLAGS += $(LOCK_SPINNING_FLAGS) $(DEBUG_FLAGS)
 lock_spinning_debug: vm.exe
 
 #### Other Targets ####
-.PHONY: clean
+.PHONY: clean test
 
 clean:
 	del /f *.exe *.obj *.pdb
 	del /f Datastructures\*.obj
 	del /f Machinery\*.obj
+
+
+test.exe: test.obj
+	$(CC) $(CFLAGS) /Fe:test.exe $^
+
+test.obj: test.c
+	$(CC) $(CFLAGS) /c /Fo:$@ $<
+
+test: test.exe
+
 
 #### Compilation rules for individual files ####
 Datastructures/pagelists.obj: Datastructures/pagelists.c $(DEPS)

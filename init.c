@@ -591,7 +591,7 @@ static int init_multithreading(ULONG64 num_usermode_threads) {
     for (ULONG64 thread_idx = 0; thread_idx < num_usermode_threads; thread_idx++) {
         THREAD_DISK_READ_RESOURCES* disk_resources = &thread_storage[thread_idx].disk_resources;
         
-        PULONG_PTR thread_read_base = disk->disk_read_base_addr + (thread_idx * PAGE_SIZE * num_readsections_per_thread / sizeof(PULONG_PTR));
+        PULONG_PTR thread_read_base = disk->disk_read_base_addr + (thread_idx * PAGE_SIZE * num_readsections_per_thread * DISK_READSECTION_SIZE / sizeof(PULONG_PTR));
 
         ULONG64 min_idx = num_readsections_per_thread * thread_idx;
         ULONG64 max_idx = num_readsections_per_thread * (thread_idx + 1) - 1;

@@ -15,7 +15,7 @@
 
 #define NUM_USERMODE_THREADS        ((ULONG64) (12))
 #define MAX_CONSECUTIVE_ACCESSES    64
-#define TOTAL_ACCESS_AMOUNT         (GB(10))
+#define TOTAL_ACCESS_AMOUNT         (MB(10))
 
 // How frequently in milliseconds we print out all of the information about the simulation and our current progress
 #define PRINT_FREQUECY_MS          2000 
@@ -350,30 +350,6 @@ int thread_access_random_addresses(void* params) {
 
 
 void main (int argc, char** argv) {
-
-    //
-    // Test our very complicated usermode virtual implementation.
-    // 
-    // We will control the virtual and physical address space management
-    // ourselves with the only two exceptions being that we will :
-    //
-    // 1. Ask the operating system for the physical pages we'll use to
-    //    form our pool.
-    //
-    // 2. Ask the operating system to connect one of our virtual addresses
-    //    to one of our physical pages (from our pool).
-    //
-    // We would do both of those operations ourselves but the operating
-    // system (for security reasons) does not allow us to.
-    //
-    // But we will do all the heavy lifting of maintaining translation
-    // tables, PFN data structures, management of physical pages,
-    // virtual memory operations like handling page faults, materializing
-    // mappings, freeing them, trimming them, writing them out to backing
-    // store, bringing them back from backing store, protecting them, etc.
-    //
-    // This is where we can be as creative as we like, the sky's the limit !
-    //
 
     usermode_virtual_memory_simulation();
 

@@ -1237,19 +1237,13 @@ PAGE* standby_pop_page() {
     
     if (potential_page == NULL) return NULL;
 
-    EnterCriticalSection(&standby_list->lock);
-
     #if DEBUG_PAGELOCK
     custom_spin_assert(potential_page->holding_threadid == GetCurrentThreadId());
     #endif
 
     // We remove the page from the list now
-    pop_page(&standby_list->listhead);
+    unlink_page2(standby_list, potential_page);
    
-    standby_list->list_length--;
-
-    LeaveCriticalSection(&standby_list->lock);
-
     InterlockedDecrement64(&total_available_pages);
 
     /**
@@ -1281,16 +1275,10 @@ ULONG64 standby_pop_batch(PAGE** page_storage, ULONG64 batch_size) {
     /**
      * Now, we have the pagelocks of all of the pages that we need to use
      */
-    EnterCriticalSection(&standby_list->lock);
-
-    remove_page_section(farthest_from_tail, clostest_to_tail);
+    remove_page_section2(standby_list, farthest_from_tail, clostest_to_tail, num_allocated);
     
-    standby_list->list_length -= num_allocated;
-
     InterlockedAdd64(&total_available_pages, - num_allocated);
     
-    LeaveCriticalSection(&standby_list->lock);
-
     return num_allocated;
 }
 
@@ -1442,15 +1430,7 @@ ULONG64 find_batch_available_pages(BOOL zeroed_pages_preferred, PAGE** page_stor
  */
 static void rescue_batch_standby_pages(PAGE** standby_rescues, ULONG64 num_standby_rescues) {
     if (num_standby_rescues > 0) {
-        EnterCriticalSection(&standby_list->lock);
-
-        for (ULONG64 i = 0; i < num_standby_rescues; i++) {
-            unlink_page(standby_rescues[i]);
-        }
-
-        standby_list->list_length -= num_standby_rescues;
-
-        LeaveCriticalSection(&standby_list->lock);
+        unlink_batch_scattered_pages(standby_list, standby_rescues, num_standby_rescues);
 
         InterlockedAdd64(&total_available_pages, - num_standby_rescues);
     }
@@ -1596,14 +1576,10 @@ int modified_rescue_page(PAGE* page) {
  * Returns SUCCESS if the rescue page was found and removed, ERROR otherwise
  */
 int standby_rescue_page(PAGE* page) {
-    EnterCriticalSection(&standby_list->lock);
 
-    unlink_page(page);
+    unlink_page2(standby_list, page);
 
-    standby_list->list_length--;
     InterlockedDecrement64(&total_available_pages);
-
-    LeaveCriticalSection(&standby_list->lock);
 
     return SUCCESS;
 }
@@ -1664,14 +1640,9 @@ void release_batch_unneeded_pages(PAGE** pages, ULONG64 num_pages) {
     if (num_standby_pages > 0) {
         create_chain_of_pages(standby_pages, num_standby_pages, STANDBY_STATUS);
 
-        EnterCriticalSection(&standby_list->lock);
+        insert_page_section2(standby_list, standby_pages[0], standby_pages[num_standby_pages - 1], num_standby_pages);
 
-        insert_page_section(&standby_list->listhead, standby_pages[0], standby_pages[num_standby_pages - 1]);
-
-        standby_list->list_length += num_standby_pages;
         InterlockedAdd64(&total_available_pages, num_standby_pages);
-
-        LeaveCriticalSection(&standby_list->lock);
 
         for (ULONG64 i = 0; i < num_standby_pages; i++) {
             release_pagelock(standby_pages[i], 40);
@@ -1702,13 +1673,11 @@ void release_batch_unneeded_pages(PAGE** pages, ULONG64 num_pages) {
  */
 void release_unneeded_page(PAGE* page) {
     if (page->status == STANDBY_STATUS) {
-        EnterCriticalSection(&standby_list->lock);
 
-        insert_page(&standby_list->listhead, page);
+        insert_page2(standby_list, page);
 
         InterlockedIncrement64(&total_available_pages);
 
-        LeaveCriticalSection(&standby_list->lock);
     } else if (page->status == MODIFIED_STATUS) {
        DebugBreak();
     } else if (page->status == FREE_STATUS) {
@@ -1733,7 +1702,6 @@ void zero_lists_add(PAGE* page) {
     int listhead_idx = page_to_pfn(page) % NUM_CACHE_SLOTS;
 
     PAGE_LISTHEAD* listhead = &zero_lists->listheads[listhead_idx];
-    PAGE* listhead_page = &listhead->listhead;
    
     #ifdef DEBUG_CHECKING
     int dbg_result;
@@ -1742,19 +1710,13 @@ void zero_lists_add(PAGE* page) {
     }
     #endif
 
-    EnterCriticalSection(&listhead->lock);
-
     page->status = ZERO_STATUS;
 
-    insert_page(listhead_page, page);
-
-    listhead->list_length++;
+    insert_page2(listhead, page);
     
     InterlockedIncrement64(&total_available_pages);
 
     InterlockedIncrement64(&zero_lists->total_available);
-
-    LeaveCriticalSection(&listhead->lock);
 }
 
 
@@ -1766,7 +1728,6 @@ void free_frames_add(PAGE* page) {
     int listhead_idx = page_to_pfn(page) % NUM_CACHE_SLOTS;
 
     PAGE_LISTHEAD* listhead = &free_frames->listheads[listhead_idx];
-    PAGE* listhead_page = &listhead->listhead;
 
     #ifdef DEBUG_CHECKING
     int dbg_result;
@@ -1775,19 +1736,13 @@ void free_frames_add(PAGE* page) {
     }
     #endif
 
-    EnterCriticalSection(&listhead->lock);
-
     page->status = FREE_STATUS;
 
-    insert_page(listhead_page, page);
-
-    listhead->list_length++;
+    insert_page2(listhead, page);
 
     InterlockedIncrement64(&total_available_pages);
 
     InterlockedIncrement64(&free_frames->total_available);
-
-    LeaveCriticalSection(&listhead->lock);
 }
 
 

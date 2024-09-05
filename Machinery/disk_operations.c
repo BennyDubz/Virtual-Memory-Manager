@@ -269,31 +269,44 @@ long disk_refresh_ongoing = FALSE; // We use the long for interlocked operation 
 
 
 static void refresh_disk_readslots(THREAD_DISK_READ_RESOURCES* thread_disk_resources) {
-    PULONG_PTR refresh_read_addresses[DISK_READ_SLOTS];
-    volatile long* refresh_read_status_slots[DISK_READSECTIONS];
+    
     // Synchronize whether we or someone else is refreshing the diskslots
     #if THREADS_REFRESH_THEMSELVES_ONLY
     #else
+    PULONG_PTR refresh_read_addresses[DISK_READ_SLOTS];
+    volatile long* refresh_read_status_slots[DISK_READSECTIONS];
+
     long old_val = InterlockedOr(&disk_refresh_ongoing, TRUE);
 
     if (old_val == TRUE) {
         return;
     }
-    #endif
 
     ULONG64 num_sections_refreshed = 0;
     ULONG64 num_slots_refreshed = 0;
     volatile long* disk_readsection;
     PULONG_PTR disk_read_addr;
-
+    #endif
     
     
     #if THREADS_REFRESH_THEMSELVES_ONLY
-    for (ULONG64 i = thread_disk_resources->min_readsection_idx; i < thread_disk_resources->max_readsection_idx + 1; i++) {
+
+    // for (ULONG64 i = thread_disk_resources->min_readsection_idx; i < thread_disk_resources->max_readsection_idx + 1; i++) {
+    if (MapUserPhysicalPages(thread_disk_resources->thread_disk_read_base, thread_disk_resources->num_allocated_readsections * DISK_READSECTION_SIZE, NULL) == FALSE) {
+        fprintf(stderr, "Error unmapping disk read VAs in refresh_disk_readslots\n");
+        DebugBreak();
+        return;
+    }
+
+    // Finally clear all of the slots
+    for (ULONG64 disk_status_refresh = thread_disk_resources->min_readsection_idx; disk_status_refresh < thread_disk_resources->max_readsection_idx + 1; disk_status_refresh++) {
+        // InterlockedIncrement64(&disk->num_available_readsections);
+        // InterlockedAnd(refresh_read_status_slots[disk_status_refresh], DISK_READSECTION_OPEN);
+        disk->disk_readsection_statuses[disk_status_refresh].status = DISK_READSECTION_OPEN;
+    }
     #else
     // Find all of the slots to clear
     for (ULONG64 i = 0; i < DISK_READSECTIONS; i++) {
-    #endif
         // printf("min %llx, max %llx, refresh %llx\n", thread_disk_resources->min_readsection_idx, thread_disk_resources->max_readsection_idx, i);
         disk_readsection = &disk->disk_readsection_statuses[i].status;
 
@@ -312,29 +325,26 @@ static void refresh_disk_readslots(THREAD_DISK_READ_RESOURCES* thread_disk_resou
             num_sections_refreshed++;
         }
     }
-
+    
     if (MapUserPhysicalPagesScatter(refresh_read_addresses, num_slots_refreshed, NULL) == FALSE) {
         fprintf(stderr, "Error unmapping disk read VAs in refresh_disk_readslots\n");
         DebugBreak();
         return;
     }
-
-    // InterlockedAdd64(&disk->num_available_readsections, num_sections_refreshed);
-
+    
     // Finally clear all of the slots
     for (ULONG64 disk_status_refresh = 0; disk_status_refresh < num_sections_refreshed; disk_status_refresh++) {
         // InterlockedIncrement64(&disk->num_available_readsections);
         InterlockedAnd(refresh_read_status_slots[disk_status_refresh], DISK_READSECTION_OPEN);
     }
+    
+    #endif
 
     #if THREADS_REFRESH_THEMSELVES_ONLY
     #else
     InterlockedAnd(&disk_refresh_ongoing, FALSE);
     #endif
 
-    if (num_sections_refreshed != thread_disk_resources->num_allocated_readsections) {
-        custom_spin_assert(FALSE);
-    }
 }
 
 #if 0

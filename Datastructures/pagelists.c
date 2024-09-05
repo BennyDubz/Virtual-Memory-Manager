@@ -917,7 +917,6 @@ PAGE_LISTHEAD* initialize_standby_list() {
     standby_list->list_length = 0;
 
     InitializeSRWLock(&standby_list->shared_lock);
-    initialize_lock(&standby_list->lock);
 
     return standby_list;
 }

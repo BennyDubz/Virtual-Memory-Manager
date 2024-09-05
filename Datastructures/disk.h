@@ -26,7 +26,7 @@
 #define MAX_PAGES_READABLE      16
 
 #define DISK_READSECTION_SIZE  MAX_PAGES_READABLE
-#define DISK_READSECTIONS       max(DISK_STORAGE_SLOTS >> 4, 64)
+#define DISK_READSECTIONS       max(DISK_STORAGE_SLOTS >> 8, 64)
 
 // The total number of page-sized virtual addresses we need to reser4ve for the disk
 #define DISK_READ_SLOTS     (DISK_READSECTIONS * DISK_READSECTION_SIZE)
