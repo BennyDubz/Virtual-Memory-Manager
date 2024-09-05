@@ -129,25 +129,32 @@ ULONG64 write_batch_to_disk(DISK_BATCH* disk_batch) {
  * 
  * Returns SUCCESS if a slot was allocated, ERROR otherwise
  */
-#define ONE_ATTEMPT 1
-static int acquire_disk_readsection(ULONG64* disk_readsection_idx_storage) {
+static int acquire_disk_readsection(ULONG64* disk_readsection_idx_storage, THREAD_DISK_READ_RESOURCES* thread_disk_resources) {
     long old_val;
     ULONG64 curr_idx;
     volatile long* disk_readsection;
 
     ULONG64 num_attempts = 0;
-    #if ONE_ATTEMPT
-    curr_idx = InterlockedIncrement64(&disk->disk_read_curr_idx) % DISK_READSECTIONS;
 
-    old_val = InterlockedCompareExchange(&disk->disk_readsection_statuses[curr_idx], DISK_READSECTION_USED, DISK_READSECTION_OPEN);
+    // curr_idx = InterlockedIncrement64(&disk->disk_read_curr_idx) % DISK_READSECTIONS;
+    if (thread_disk_resources->curr_readsection_idx == thread_disk_resources->max_readsection_idx) {
+        thread_disk_resources->curr_readsection_idx = thread_disk_resources->min_readsection_idx;
+    } else {
+        thread_disk_resources->curr_readsection_idx++;
+    }
+
+    curr_idx = thread_disk_resources->curr_readsection_idx;
+
+    old_val = InterlockedCompareExchange(&disk->disk_readsection_statuses[curr_idx].status, DISK_READSECTION_USED, DISK_READSECTION_OPEN);
     
     // We successfully claimed the disk slot
     if (old_val == DISK_READSECTION_OPEN) {
         *disk_readsection_idx_storage = curr_idx;
-        InterlockedDecrement64(&disk->num_available_readsections);
+        // InterlockedDecrement64(&disk->num_available_readsections);
         return SUCCESS;
     }
-    #else
+
+    #if 0
     while (num_attempts < DISK_READSECTIONS && disk->num_available_readsections > 0) {   
         /**
          * Using the interlocked operations here with the read indices makes it almost certain that threads will not share the same
@@ -179,11 +186,11 @@ static int acquire_disk_readsection(ULONG64* disk_readsection_idx_storage) {
  * Releases the given disk readslot and sets its status to DISK_READSECTION_NEEDS_FLUSH
  */
 static void release_disk_readsection(ULONG64 disk_readslot_idx) {
-    if (disk->disk_readsection_statuses[disk_readslot_idx] != DISK_READSECTION_USED) {
+    if (disk->disk_readsection_statuses[disk_readslot_idx].status != DISK_READSECTION_USED) {
         DebugBreak();
     }
 
-    custom_spin_assert(InterlockedIncrement(&disk->disk_readsection_statuses[disk_readslot_idx]) == DISK_READSECTION_NEEDS_FLUSH);
+    custom_spin_assert(InterlockedIncrement(&disk->disk_readsection_statuses[disk_readslot_idx].status) == DISK_READSECTION_NEEDS_FLUSH);
 }
 
 #if 0
@@ -283,7 +290,7 @@ static void refresh_disk_readslots() {
     for (ULONG64 i = 0; i < DISK_READSECTIONS; i++) {
         curr_idx = (start + i) % DISK_READSECTIONS;
 
-        disk_readsection = &disk->disk_readsection_statuses[curr_idx];
+        disk_readsection = &disk->disk_readsection_statuses[curr_idx].status;
 
         if (*disk_readsection == DISK_READSECTION_NEEDS_FLUSH) {
             refresh_read_status_slots[num_sections_refreshed] = disk_readsection;
@@ -305,7 +312,7 @@ static void refresh_disk_readslots() {
         return;
     }
 
-    InterlockedAdd64(&disk->num_available_readsections, num_sections_refreshed);
+    // InterlockedAdd64(&disk->num_available_readsections, num_sections_refreshed);
 
     // Finally clear all of the slots
     for (ULONG64 disk_status_refresh = 0; disk_status_refresh < num_sections_refreshed; disk_status_refresh++) {
@@ -316,7 +323,7 @@ static void refresh_disk_readslots() {
     InterlockedAnd(&disk_refresh_ongoing, FALSE);
 }
 
-
+#if 0
 /**
  * Fetches the memory from the disk index and puts it onto the open page
  * 
@@ -378,7 +385,7 @@ int read_page_from_disk(PAGE* open_page, ULONG64 disk_idx) {
 
     return SUCCESS;
 }
-
+#endif
 
 /**
  * Reads all of the data from the given disk indices on the PTEs into the given pages
@@ -387,7 +394,7 @@ int read_page_from_disk(PAGE* open_page, ULONG64 disk_idx) {
  * 
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
-int read_pages_from_disk(PAGE** open_pages, PTE** ptes_to_read, ULONG64 num_to_read) {
+int read_pages_from_disk(PAGE** open_pages, PTE** ptes_to_read, ULONG64 num_to_read, THREAD_DISK_READ_RESOURCES* thread_disk_resources) {
     if (num_to_read > MAX_PAGES_READABLE) {
         fprintf(stderr, "Trying to read too many pages from the disk\n");
         DebugBreak();
@@ -405,7 +412,7 @@ int read_pages_from_disk(PAGE** open_pages, PTE** ptes_to_read, ULONG64 num_to_r
     }
 
     // We if this fails, we need to try to begin the refresh process if it hasn't begun already
-    while (acquire_disk_readsection(&disk_readsection) == ERROR) {
+    while (acquire_disk_readsection(&disk_readsection, thread_disk_resources) == ERROR) {
         
         /**
          * Right now, we will try immediately again if the refresh is ongoing - since it may have refreshed pages behind us
@@ -453,11 +460,13 @@ int read_pages_from_disk(PAGE** open_pages, PTE** ptes_to_read, ULONG64 num_to_r
     // If we are simulating a penalty for the disk operations, we spin here
     disk_spin();
 
+    #if 0
     // If we are running low on disk read slots, attempt to refresh the disk slots
     if (disk->num_available_readsections < DISK_REFRESH_BOUNDARY && disk_refresh_ongoing == FALSE) {
         // If someone else is already doing it (race condition) - we will return almost immediately
         refresh_disk_readslots();
     }
+    #endif
 
     return SUCCESS;
 }

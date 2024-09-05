@@ -40,7 +40,6 @@
 /**
  * Other pagefault macros
  */
-#define MAX_PAGES_TRANSITION_RESCUE     MAX_PAGES_READABLE
 
 // If we have less than (total physical pages / proportion) pages, we will resolve just the current fault and not speculate ahead
 #define SPECULATIVE_PAGE_MINIMUM_PROPORTION     STANDBY_LIST_REFRESH_PROPORTION

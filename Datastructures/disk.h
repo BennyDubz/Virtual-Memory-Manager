@@ -66,6 +66,15 @@
 #ifndef DISK_T
 #define DISK_T
 
+/**
+ * We want the statuses to be far apart to reduce cache collisions
+ */
+typedef struct {
+    volatile long status;
+    long buffer[15];
+} DISK_READSECTION_STATUS;
+
+
 typedef struct {
     /**
      *  Since we are not actually accessing the disk, we need to use some of the virtual memory of the process
@@ -99,7 +108,7 @@ typedef struct {
      * saving constant calls to MapUserPhysicalPagesScatter
      */
     DECLSPEC_ALIGN(64)
-    volatile long disk_readsection_statuses[DISK_READ_SLOTS];
+    DISK_READSECTION_STATUS disk_readsection_statuses[DISK_READ_SLOTS];
 
     DECLSPEC_ALIGN(64)
     volatile ULONG64 num_available_readsections;
@@ -107,9 +116,16 @@ typedef struct {
     // We use interlocked operations to help reduce the amount of linear searching that threads will have to do
     DECLSPEC_ALIGN(64)
     volatile ULONG64 disk_read_curr_idx; 
-    
-
 } DISK;
+
+
+typedef struct {
+    PULONG_PTR thread_disk_read_base;
+    ULONG64 num_allocated_readsections;
+    ULONG64 min_readsection_idx;
+    ULONG64 curr_readsection_idx;
+    ULONG64 max_readsection_idx;
+} THREAD_DISK_READ_RESOURCES;
 
 #endif
 

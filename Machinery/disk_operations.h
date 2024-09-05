@@ -39,14 +39,14 @@ void pre_prepare_page_memcpys(PULONG_PTR* virtual_addresses, ULONG64 num_address
  */
 ULONG64 write_batch_to_disk(DISK_BATCH* disk_batch);
 
-
+#if 0
 /**
  * Fetches the memory from the disk index and puts it onto the open page
  * 
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
 int read_page_from_disk(PAGE* open_page, ULONG64 disk_idx);
-
+#endif
 
 /**
  * Reads all of the data from the given disk indices on the PTEs into the given pages
@@ -55,7 +55,7 @@ int read_page_from_disk(PAGE* open_page, ULONG64 disk_idx);
  * 
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
-int read_pages_from_disk(PAGE** open_pages, PTE** ptes_to_read, ULONG64 num_to_read);
+int read_pages_from_disk(PAGE** open_pages, PTE** ptes_to_read, ULONG64 num_to_read, THREAD_DISK_READ_RESOURCES* thread_disk_resources);
 
 
 /**

@@ -55,9 +55,9 @@ ZEROED_PAGES_LISTS* zero_lists;
 
 FREE_FRAMES_LISTS* free_frames;
 
-STANDBY_LIST* standby_list;
+PAGE_LISTHEAD* standby_list;
 
-MODIFIED_LIST* modified_list;
+PAGE_LISTHEAD* modified_list;
 
 PAGE_ZEROING_STRUCT* page_zeroing;
 
@@ -581,6 +581,26 @@ static int init_multithreading(ULONG64 num_usermode_threads) {
     for (ULONG64 thread_idx = 0; thread_idx < num_usermode_threads + num_worker_threads; thread_idx++) {
         thread_storage[thread_idx].list_refresh_status = LIST_REFRESH_NOT_ONGOING;
         // The thread handles will be initialized when we create the usermode threads in the parent usermode_simulation thread
+    }
+
+    /**
+     * Only the faulting threads need to have their disk resources allocated to them
+     */
+    ULONG64 num_readsections_per_thread = DISK_READSECTIONS / num_usermode_threads;
+
+    for (ULONG64 thread_idx = 0; thread_idx < num_usermode_threads; thread_idx++) {
+        THREAD_DISK_READ_RESOURCES* disk_resources = &thread_storage[thread_idx].disk_resources;
+        
+        PULONG_PTR thread_read_base = disk->disk_read_base_addr + (thread_idx * PAGE_SIZE * num_readsections_per_thread / sizeof(PULONG_PTR));
+
+        ULONG64 min_idx = num_readsections_per_thread * thread_idx;
+        ULONG64 max_idx = num_readsections_per_thread * (thread_idx + 1);
+
+        disk_resources->thread_disk_read_base = thread_read_base;
+        disk_resources->min_readsection_idx = min_idx;
+        disk_resources->max_readsection_idx = max_idx;
+        disk_resources->num_allocated_readsections = num_readsections_per_thread;
+        disk_resources->curr_readsection_idx = min_idx;
     }
 
 

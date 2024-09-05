@@ -39,7 +39,7 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
 
 static BOOL acquire_disk_pte_read_rights(PTE* accessed_pte, PTE local_pte);
 
-static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result_page_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage);
+static int handle_disk_pte_fault(ULONG64 thread_idx, PTE* accessed_pte, PAGE** result_page_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage);
 
 static ULONG64 get_trailing_valid_pte_count(PTE* accessed_pte);
 
@@ -135,7 +135,7 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
 
     } else if (is_disk_format(local_pte)) {
 
-        if ((handler_result = handle_disk_pte_fault(local_pte, accessed_pte, allocated_pages, ptes_to_connect, &num_ptes_to_connect)) != SUCCESS) {
+        if ((handler_result = handle_disk_pte_fault(thread_idx, accessed_pte, allocated_pages, ptes_to_connect, &num_ptes_to_connect)) != SUCCESS) {
             return handler_result;
         }
 
@@ -526,15 +526,15 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
     if (total_available_pages < physical_page_count / SPECULATIVE_PAGE_MINIMUM_PROPORTION) {
         num_to_speculate = 0;
     } else {
-        num_to_speculate = min(get_trailing_valid_pte_count(accessed_pte), MAX_PAGES_TRANSITION_RESCUE - 1);
+        num_to_speculate = min(get_trailing_valid_pte_count(accessed_pte), MAX_PAGES_RESCUABLE - 1);
     }
 
     ULONG64 accessed_pte_idx = pte_to_pagetable_idx(accessed_pte);
     ULONG64 total_pages_acquired = 1;
 
-    PAGE* modified_rescues[MAX_PAGES_TRANSITION_RESCUE];
+    PAGE* modified_rescues[MAX_PAGES_RESCUABLE];
     ULONG64 num_modifed_rescues = 0;
-    PAGE* standby_rescues[MAX_PAGES_TRANSITION_RESCUE];
+    PAGE* standby_rescues[MAX_PAGES_RESCUABLE];
     ULONG64 num_standby_rescues = 0;
 
     result_page_storage[0] = page_to_rescue;
@@ -720,8 +720,7 @@ static BOOL acquire_disk_pte_read_rights(PTE* accessed_pte, PTE local_pte) {
  */
 static ULONG64 find_unread_sequential_disk_ptes(PTE* accessed_pte, PTE** found_pte_storage, ULONG64* locksection_switch_storage, ULONG64 num_to_check) {
     ULONG64 curr_pte_index = pte_to_pagetable_idx(accessed_pte);
-    ULONG64 final_locksection_idx = pte_to_locksection(accessed_pte)->final_pte_index;
-
+    ULONG64 final_locksection_idx = INFINITE;
     ULONG64 num_ptes_checked = 0;
     ULONG64 num_unread_disk_ptes_found = 0;
     BOOL found_locksection_switch = FALSE;
@@ -735,7 +734,18 @@ static ULONG64 find_unread_sequential_disk_ptes(PTE* accessed_pte, PTE** found_p
         pte_copy = read_pte_contents(curr_pte);
 
         if (is_disk_format(pte_copy) && pte_copy.disk_format.being_read_from_disk == PTE_NOT_BEING_READ_FROM_DISK) {
-            
+            /**
+             * The goal is to keep track of when we would need to switch PTE locksections when reading and editing PTEs
+             * that (we speculate will be later) in the disk/unread format. We want this to start at the index of the PTE that
+             * we find first in the correct format - not necessarily in the accessed PTE.
+             * 
+             * The issue that caused this was that the first PTE that we found that was disk/unread was in a different section than the accessed PTE,
+             * so we would accidentlly switch locksections when we were not supposed to later
+             */
+            if (final_locksection_idx == INFINITE) {
+                final_locksection_idx = pte_to_locksection(curr_pte)->final_pte_index;
+            }
+
             if (found_locksection_switch == FALSE && curr_pte_index > final_locksection_idx) {
                 *locksection_switch_storage = num_unread_disk_ptes_found;
                 found_locksection_switch = TRUE;
@@ -808,7 +818,14 @@ static ULONG64 acquire_sequential_disk_read_rights(PTE* accessed_pte, PTE** acqu
             LeaveCriticalSection(&curr_pte_locksection->lock);
 
             // The next pte locksection is stored adjacent to this one, so we can increment the pointer
+            PTE_LOCKSECTION* old_section = curr_pte_locksection;
+
             curr_pte_locksection++;
+            
+            ULONG64 pte_idx = pte_to_pagetable_idx(potential_ptes[i]);
+            PTE_LOCKSECTION* ls = pte_to_locksection(potential_ptes[i]);
+            custom_spin_assert(curr_pte_locksection == ls);
+
             EnterCriticalSection(&curr_pte_locksection->lock);
         }
 
@@ -913,10 +930,11 @@ static void release_sequential_disk_read_rights(PTE** ptes_to_release, ULONG64 n
     PTE* curr_pte;
     CRITICAL_SECTION* pte_lock = &pte_to_locksection(ptes_to_release[0])->lock;
     PTE pte_contents;
+
     // All fields except the pagefile index will be zero - wiping out the PTE_BEING_READ_FROM_DISK bit
     pte_contents.complete_format = 0;
 
-    EnterCriticalSection(pte_lock);
+    // EnterCriticalSection(pte_lock);
 
     for (ULONG64 i = 0; i < num_ptes; i++) {
         curr_pte = ptes_to_release[i];
@@ -928,7 +946,7 @@ static void release_sequential_disk_read_rights(PTE** ptes_to_release, ULONG64 n
         write_pte_contents(curr_pte, pte_contents);
     }
 
-    LeaveCriticalSection(pte_lock);
+    // LeaveCriticalSection(pte_lock);
 
 }
 
@@ -940,7 +958,7 @@ static void release_sequential_disk_read_rights(PTE** ptes_to_release, ULONG64 n
  * Returns a pointer to the page with the restored contents on it, and stores the
  * disk index that it was at in disk_idx_storage
  */
-static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result_pages_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage) {
+static int handle_disk_pte_fault(ULONG64 thread_idx, PTE* accessed_pte, PAGE** result_pages_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage) {
     
     #if SEQUENTIAL_SPECULATIVE_DISK_READS
 
@@ -991,7 +1009,9 @@ static int handle_disk_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result
         release_sequential_disk_read_rights(&ptes_to_connect_storage[num_pages_acquired], num_to_read - num_pages_acquired);
     }
 
-    if (read_pages_from_disk(result_pages_storage, ptes_to_connect_storage, num_pages_acquired) == ERROR) {
+    THREAD_DISK_READ_RESOURCES* thread_disk_resources = &thread_information.thread_local_storages[thread_idx].disk_resources;
+
+    if (read_pages_from_disk(result_pages_storage, ptes_to_connect_storage, num_pages_acquired, thread_disk_resources) == ERROR) {
         DebugBreak();
     }
 

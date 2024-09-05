@@ -47,12 +47,16 @@ typedef struct {
     ULONG64 thread_id;
     ULONG64 buffer1[7];
     #endif
+
     UCHAR list_refresh_status;
     UCHAR buffer2[63];
 
     UCHAR trim_signaled;
     UCHAR buffer3[63];
+
+    THREAD_DISK_READ_RESOURCES disk_resources;
 } THREAD_LOCAL_STORAGE;
+
 
 typedef struct {
     // This value might be accessed frequently in loops,
@@ -97,9 +101,9 @@ extern ZEROED_PAGES_LISTS* zero_lists;
 
 extern FREE_FRAMES_LISTS* free_frames;
 
-extern STANDBY_LIST* standby_list;
+extern PAGE_LISTHEAD* standby_list;
 
-extern MODIFIED_LIST* modified_list;
+extern PAGE_LISTHEAD* modified_list;
 
 extern PAGE_ZEROING_STRUCT* page_zeroing;
 

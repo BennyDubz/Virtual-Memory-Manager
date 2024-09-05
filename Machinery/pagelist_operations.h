@@ -49,7 +49,7 @@
 /** 
  * These determine the number of pages we take off the standby list to add to the zero/free lists when we are refreshing the lists
  */
-#define NUM_PAGES_FAULTER_REFRESH   NUM_CACHE_SLOTS
+#define NUM_PAGES_FAULTER_REFRESH   max(NUM_CACHE_SLOTS / 4, 64)
 
 // When refreshing both the free and zero lists, this proportion goes to the free lists
 #define FREE_FRAMES_PORTION   NUM_PAGES_FAULTER_REFRESH / 2
@@ -70,6 +70,12 @@
  * This helps us potentially reduce contention on the free list
  */
 #define REDUCE_FREE_LIST_PRESSURE_AMOUNT    NUM_CACHE_SLOTS
+
+/**
+ * This allows us to separate pages that need to be removed from the modified list from 
+ * those that do not (are being written and are not modified)
+ */
+#define MAX_PAGES_RESCUABLE     MAX_PAGES_READABLE
 
 
 #include "../Datastructures/datastructures.h"
@@ -285,23 +291,3 @@ void free_frames_add(PAGE* page);
  * section to a list very quickly. This can avoid an extra loop later.
  */
 void create_chain_of_pages(PAGE** pages_to_chain, ULONG64 num_pages, ULONG64 new_page_status);
-
-
-/**
- * Spins until the pagelock for the given page can be acquired and returns
- */
-void acquire_pagelock(PAGE* page, ULONG64 origin_code);
-
-
-/**
- * Releases the pagelock for other threads to use
- */
-void release_pagelock(PAGE* page, ULONG64 origin_code);
-
-
-/**
- * Tries to acquire the pagelock without any spinning. 
- * 
- * Returns TRUE if successful, FALSE otherwise
- */
-BOOL try_acquire_pagelock(PAGE* page, ULONG64 origin_code);

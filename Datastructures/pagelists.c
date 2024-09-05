@@ -97,6 +97,532 @@ PAGE* initialize_pages(PULONG_PTR physical_frame_numbers, ULONG64 num_physical_f
 
 
 /**
+ * Spins until the pagelock for the given page can be acquired and returns
+ */
+void acquire_pagelock(PAGE* page, ULONG64 origin_code) {
+
+    #if DEBUG_PAGELOCK
+    EnterCriticalSection(&page->dev_page_lock);
+    log_page_status(page);
+    page->page_lock = PAGE_LOCKED;
+    page->holding_threadid = GetCurrentThreadId();
+    return;
+    #endif
+
+    unsigned old_lock_status;
+    while(TRUE) {
+        old_lock_status = InterlockedCompareExchange16(&page->page_lock, PAGE_LOCKED, PAGE_UNLOCKED);
+
+        #if LIGHT_DEBUG_PAGELOCK
+        if (old_lock_status == PAGE_UNLOCKED) {
+            page->holding_threadid = GetCurrentThreadId();
+            page->five_ago = page->four_ago;
+            page->four_ago = page->three_ago;
+            page->three_ago = page->two_ago;
+            page->two_ago = page->prev_code;
+            page->prev_code = page->origin_code;
+            page->origin_code = origin_code;
+        }
+        #endif
+
+        if (old_lock_status == PAGE_UNLOCKED) break;
+    }
+}
+
+
+/**
+ * Releases the pagelock for other threads to use
+ */
+void release_pagelock(PAGE* page, ULONG64 origin_code) {
+    
+    #if DEBUG_PAGELOCK
+    log_page_status(page);
+    if (page->holding_threadid != GetCurrentThreadId()) {
+        DebugBreak();
+    }
+    page->page_lock = PAGE_UNLOCKED;
+    page->holding_threadid = 0;
+    LeaveCriticalSection(&page->dev_page_lock);
+    return;
+    #endif
+
+    #if LIGHT_DEBUG_PAGELOCK
+    if (page->holding_threadid != GetCurrentThreadId()) {
+        DebugBreak();
+    }
+    page->holding_threadid = 0;
+    page->five_ago = page->four_ago;
+    page->four_ago = page->three_ago;
+    page->three_ago = page->two_ago;
+    page->two_ago = page->prev_code;
+    page->prev_code = page->origin_code;
+    page->origin_code = origin_code;
+    #endif
+
+    if (InterlockedCompareExchange16(&page->page_lock, PAGE_UNLOCKED, PAGE_LOCKED) != PAGE_LOCKED) {
+        DebugBreak();
+    };
+}
+
+
+/**
+ * Tries to acquire the pagelock without any spinning. 
+ * 
+ * Returns TRUE if successful, FALSE otherwise
+ */
+BOOL try_acquire_pagelock(PAGE* page, ULONG64 origin_code) {
+    #if DEBUG_PAGELOCK
+    if (TryEnterCriticalSection(&page->dev_page_lock)) {
+        log_page_status(page);
+        page->page_lock = PAGE_LOCKED;
+        page->holding_threadid = GetCurrentThreadId();
+        return TRUE;
+    } else {
+        return FALSE;
+    }
+    #endif
+
+
+    #if LIGHT_DEBUG_PAGELOCK
+    if (InterlockedCompareExchange16(&page->page_lock, PAGE_LOCKED, PAGE_UNLOCKED) == PAGE_UNLOCKED) {
+        page->holding_threadid = GetCurrentThreadId();
+        page->five_ago = page->four_ago;
+        page->four_ago = page->three_ago;
+        page->three_ago = page->two_ago;
+        page->two_ago = page->prev_code;
+        page->prev_code = page->origin_code;
+        page->origin_code = origin_code;
+        return TRUE;
+    } else {
+        return FALSE;
+    }
+    #endif
+    
+    return InterlockedCompareExchange16(&page->page_lock, PAGE_LOCKED, PAGE_UNLOCKED) == PAGE_UNLOCKED;
+
+}
+
+
+/**
+ * Inserts the page into the list using the shared list lock scheme alongside the page locks,
+ * and releases the lock on the given page before returning
+ */
+void insert_page2(PAGE_LISTHEAD* list, PAGE* page) {
+    PAGE* listhead = &list->listhead;
+    PAGE* old_head;
+
+    AcquireSRWLockShared(&list->shared_lock);
+
+    if (try_acquire_pagelock(listhead, 49)) {
+        old_head = listhead->flink;
+        if (old_head == listhead || try_acquire_pagelock(old_head, 50)) {
+
+            /**
+             * At this point, we have all of the pagelocks necessary to insert the page into the list 
+             */
+            listhead->flink = page;
+            old_head->blink = page;
+            page->blink = listhead;
+            page->flink = old_head;
+            InterlockedIncrement64(&list->list_length);
+
+
+            release_pagelock(listhead, 52);
+            release_pagelock(page, 53);
+
+            if (old_head != listhead) {
+                release_pagelock(old_head, 54);
+            }
+
+            ReleaseSRWLockShared(&list->shared_lock);
+            return;
+
+        } else {
+            release_pagelock(listhead, 51);
+        }
+    }
+
+    ReleaseSRWLockShared(&list->shared_lock);
+
+    /**
+     * We have the policy that we can modify the flinks/blinks of the pages with the exclusive lock
+     * **without** having to acquire the pagelocks
+     */
+    AcquireSRWLockExclusive(&list->shared_lock);
+
+    old_head = listhead->flink;
+
+    listhead->flink = page;
+    old_head->blink = page;
+    page->blink = listhead;
+    page->flink = old_head;
+    list->list_length++;
+
+    ReleaseSRWLockExclusive(&list->shared_lock);
+}
+
+
+/**
+ * Pops a page from the list while taking advantage of the shared lock and pagelock scheme
+ * 
+ * Assumes you already own the pagelock of the tail page
+ * 
+ * Returns a pointer to the popped page if successful with its pagelock acquired, NULL otherwise. 
+ */
+PAGE* pop_page2(PAGE_LISTHEAD* list) {
+    PAGE* listhead = &list->listhead;
+    PAGE* page_to_pop;
+    PAGE* new_tail;
+
+    // Pre-emptively return NULL without having to acquire any locks. The list might repopulate immediately after, though
+    if (list->list_length == 0) {
+        return NULL;
+    }
+
+    
+    AcquireSRWLockShared(&list->shared_lock);
+
+    if (try_acquire_pagelock(listhead, 55)) {
+        page_to_pop = listhead->blink;
+
+        if (page_to_pop == listhead) {
+            release_pagelock(listhead, 56);
+
+            ReleaseSRWLockShared(&list->shared_lock);
+            return NULL;
+        }
+
+        if (try_acquire_pagelock(page_to_pop, 57)) {
+            
+            new_tail = page_to_pop->blink;
+
+            if (try_acquire_pagelock(new_tail, 58)) {
+                
+                /**
+                 * Here, we have all three of the pagelocks required to correctly modify the list
+                 */
+
+                release_pagelock(listhead, 61);
+                release_pagelock(new_tail, 62);
+
+                ReleaseSRWLockShared(&list->shared_lock);
+                return page_to_pop;
+            } else {    
+                release_pagelock(listhead, 59);
+                release_pagelock(page_to_pop, 60);
+            }
+
+        } else {
+            release_pagelock(listhead, 51);
+        }
+    }
+
+    ReleaseSRWLockShared(&list->shared_lock);
+
+    /**
+     * We have the policy that we can modify the flinks/blinks of the pages with the exclusive lock
+     * **without** having to acquire the pagelocks
+     */
+    AcquireSRWLockExclusive(&list->shared_lock);
+
+    ReleaseSRWLockExclusive(&list->shared_lock);
+
+    return NULL;
+}
+
+
+/**
+ * Returns TRUE if the given page is in the list, FALSE otherwise
+ */
+static BOOL page_is_in_list(PAGE* page_to_find, PAGE** page_list, ULONG64 list_length) {
+    if (list_length == 0) return FALSE;
+
+    for (ULONG64 i = 0; i < list_length; i++) {
+        if (page_list[i] == page_to_find) return TRUE;
+    }
+
+    return FALSE;
+}
+
+
+/**
+ * Removes all of the given pages from the list, assumes that all of the pagelocks are held.
+ * 
+ * Takes advantage of the shared lock scheme.
+ * 
+ * This function is intended for use with rescuing a batch of pages from the modified/standby list, 
+ * where the batch of pages might not be adjacent to eachother
+ */
+void unlink_batch_scattered_pages(PAGE_LISTHEAD* list, PAGE** pages_to_remove, ULONG64 num_pages) {
+    if (num_pages == 0) {
+        return;
+    }
+
+    PAGE* ahead;
+    PAGE* behind;
+    ULONG64 page_idx;
+    PAGE* curr_page;
+    
+    // This helps us distinguish from pagelocks we acquire from neighboring nodes versus those we already hold
+    BOOL acquired_unique_pagelock_ahead;
+    BOOL acquired_unique_pagelock_behind;
+
+    AcquireSRWLockShared(&list->shared_lock);
+
+    for (page_idx = 0; page_idx < num_pages; page_idx++) {
+        curr_page = pages_to_remove[page_idx];
+
+        ahead = curr_page->flink;
+        behind = curr_page->blink;
+
+        acquired_unique_pagelock_ahead = try_acquire_pagelock(ahead, 79);
+
+        // If we have already acquired the pagelock or it is somewhere in our list of pages ahead of us, then we can keep going
+        // Note that the page_idx + 1 will never cause an overflow in page_is_in_list function as the given list_length is 0
+        if (acquired_unique_pagelock_ahead || page_is_in_list(ahead, &pages_to_remove[page_idx + 1], num_pages - page_idx - 1)) {
+            
+            acquired_unique_pagelock_behind = try_acquire_pagelock(behind, 80);
+
+            if (acquired_unique_pagelock_behind || page_is_in_list(ahead, &pages_to_remove[page_idx + 1], num_pages - page_idx - 1) 
+                                || ahead == behind) {
+                
+                ahead->blink = behind;
+                behind->flink = ahead;
+
+                /**
+                 * We need to check that we acquired pagelocks that were NOT in our list already before we release them
+                 */
+                if (acquired_unique_pagelock_ahead) {
+                    release_pagelock(ahead, 82);
+                }
+
+                if (acquired_unique_pagelock_behind) {
+                    release_pagelock(behind, 83);
+                }
+
+            // Only release the pagelock if it wasn't in our list
+            } else if (acquired_unique_pagelock_ahead) {
+                release_pagelock(ahead, 81);
+                break;
+            } else {
+                break;
+            }
+            
+        } else {
+            break;
+        }
+    }
+
+    ReleaseSRWLockShared(&list->shared_lock);
+
+    if (page_idx == num_pages) {
+        InterlockedAdd64(&list->list_length, - num_pages);
+        return;
+    }
+
+
+    // We no longer need the other pagelocks in order to unlink the pages
+    AcquireSRWLockExclusive(&list->shared_lock);
+
+    // Remove the pages that we couldn't remove before
+    while (page_idx < num_pages) {
+        curr_page = pages_to_remove[page_idx];
+
+        ahead = curr_page->flink;
+        behind = curr_page->blink;
+
+        ahead->blink = behind;
+        behind->flink = ahead;
+
+        page_idx++;
+    }
+    
+    ReleaseSRWLockExclusive(&list->shared_lock);
+
+    InterlockedAdd64(&list->list_length, - num_pages);
+}   
+
+
+/**
+ * Unlinks the page from its list, and takes advantage of the shared lock and pagelock scheme to avoid colliding with other unlinkers
+ * and threads inserting/popping from the ends of the list
+ * 
+ * Assumes that you already hold the lock for the page that you are trying to unlink
+ */
+void unlink_page2(PAGE_LISTHEAD* list, PAGE* page) {
+    if (page->status == LISTHEAD_STATUS) {
+        DebugBreak();
+    }
+
+    PAGE* ahead;
+    PAGE* behind;
+
+    AcquireSRWLockShared(&list->shared_lock);
+
+    ahead = page->flink;
+    behind = page->blink;
+
+    if (try_acquire_pagelock(ahead, 63)) {
+        if (ahead == behind || try_acquire_pagelock(behind, 64)) {
+
+            /**
+             * At this point, we have all of the pagelocks necessary to insert the page into the list 
+             */
+            ahead->blink = behind;
+            behind->flink = ahead;
+            InterlockedDecrement64(&list->list_length);
+
+            release_pagelock(ahead, 65);
+
+            if (ahead != behind) {
+                release_pagelock(behind, 66);
+            }
+
+            ReleaseSRWLockShared(&list->shared_lock);
+            return;
+
+        } else {
+            release_pagelock(ahead, 67);
+        }
+    }
+
+    ReleaseSRWLockShared(&list->shared_lock);
+
+
+    // We no longer need the other pagelocks in order to unlink this page
+    AcquireSRWLockExclusive(&list->shared_lock);
+
+    ahead = page->flink;
+    behind = page->blink;
+
+    ahead->blink = behind;
+    behind->flink = ahead;
+    list->list_length--;
+
+    ReleaseSRWLockExclusive(&list->shared_lock);
+}   
+
+
+/**
+ * Inserts the chain of pages between the beginning and end at the listhead,
+ * where the beginning node will be closest to the head 
+ * 
+ * Takes advantage of the shared lock and pagelock scheme. Does NOT release the pagelocks for each node in the section
+ */
+void insert_page_section2(PAGE_LISTHEAD* list, PAGE* beginning, PAGE* end, ULONG64 num_pages) {
+
+    PAGE* listhead = &list->listhead;
+    PAGE* old_head;
+
+    AcquireSRWLockShared(&list->shared_lock);
+
+    if (try_acquire_pagelock(listhead, 68)) {
+        old_head = listhead->flink;
+        if (old_head == listhead || try_acquire_pagelock(old_head, 69)) {
+
+            /**
+             * At this point, we have all of the pagelocks necessary to insert the page into the list 
+             */
+            listhead->flink = beginning;
+            old_head->blink = end;
+            beginning->blink = listhead;
+            end->flink = old_head;
+
+            InterlockedAdd64(&list->list_length, num_pages);
+
+            release_pagelock(listhead, 70);
+
+            if (old_head != listhead) {
+                release_pagelock(old_head, 72);
+            }
+
+            ReleaseSRWLockShared(&list->shared_lock);
+            return;
+
+        } else {
+            release_pagelock(listhead, 71);
+        }
+    }
+
+    ReleaseSRWLockShared(&list->shared_lock);
+
+    /**
+     * We have the policy that we can modify the flinks/blinks of the pages with the exclusive lock
+     * **without** having to acquire the pagelocks
+     */
+    AcquireSRWLockExclusive(&list->shared_lock);
+
+    old_head = listhead->flink;
+
+    listhead->flink = beginning;
+    old_head->blink = end;
+    beginning->blink = listhead;
+    end->flink = old_head;
+    
+    InterlockedAdd64(&list->list_length, num_pages);
+
+    ReleaseSRWLockExclusive(&list->shared_lock);
+}
+
+
+/**
+ * Removes the section of pages from the list they are in,
+ * where the beginning node is closest to the head and the end node is closest to the tail
+ * 
+ * Assumes that the pagelocks for the nodes including and between the beginning and the end are all held
+ */
+void remove_page_section2(PAGE_LISTHEAD* list, PAGE* beginning, PAGE* end, ULONG64 num_pages) {
+
+    PAGE* ahead;
+    PAGE* behind;
+
+    AcquireSRWLockShared(&list->shared_lock);
+
+    ahead = end->flink;
+    behind = beginning->blink;
+
+    if (try_acquire_pagelock(ahead, 73)) {
+
+        if (ahead == behind || try_acquire_pagelock(behind, 74)) {
+
+            behind->flink = ahead;
+            ahead->blink = behind;
+
+            InterlockedAdd64(&list->list_length, - num_pages);
+
+            release_pagelock(ahead, 75);
+
+            if (ahead != behind) {
+                release_pagelock(behind, 76);
+            }
+
+            ReleaseSRWLockShared(&list->shared_lock);
+
+            return;
+        } else {
+            release_pagelock(ahead, 77);
+        }
+
+    }
+
+    ReleaseSRWLockShared(&list->shared_lock);
+
+    AcquireSRWLockExclusive(&list->shared_lock);
+
+    ahead = end->flink;
+    behind = beginning->blink;
+
+    behind->flink = ahead;
+    ahead->blink = behind;
+
+    InterlockedAdd64(&list->list_length, - num_pages);
+
+    ReleaseSRWLockExclusive(&list->shared_lock);
+}
+
+
+
+/**
  * Inserts the given page to the head of the list
  */
 void insert_page(PAGE* listhead, PAGE* page) {
@@ -216,12 +742,14 @@ ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR 
 
     for (int new_list = 0; new_list < NUM_CACHE_SLOTS; new_list++) {
         
-        zeroed_lists->listheads[new_list].status = LISTHEAD_STATUS;
-        zeroed_lists->listheads[new_list].flink = &zeroed_lists->listheads[new_list];
-        zeroed_lists->listheads[new_list].blink = &zeroed_lists->listheads[new_list];
-        zeroed_lists->list_lengths[new_list] = 0;
+        zeroed_lists->listheads[new_list].listhead.status = LISTHEAD_STATUS;
+        zeroed_lists->listheads[new_list].listhead.flink = &zeroed_lists->listheads[new_list].listhead;
+        zeroed_lists->listheads[new_list].listhead.blink = &zeroed_lists->listheads[new_list].listhead;
 
-        initialize_lock(&zeroed_lists->list_locks[new_list]);
+        zeroed_lists->listheads[new_list].list_length = 0;
+
+        InitializeSRWLock(&zeroed_lists->listheads[new_list].shared_lock);
+        initialize_lock(&zeroed_lists->listheads[new_list].lock);
     }
 
     // Add all the physical frames to their respective zero lists
@@ -231,7 +759,9 @@ ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR 
         // Modulo operation based on the pfn to put it alongside other cache-colliding pages
         int listhead_idx = frame_number % NUM_CACHE_SLOTS;
 
-        PAGE* relevant_listhead = &zeroed_lists->listheads[listhead_idx];
+        PAGE_LISTHEAD* relevant_listhead = &zeroed_lists->listheads[listhead_idx];
+
+        PAGE* listhead_page = &relevant_listhead->listhead;
         
         PAGE* zero_frame = page_storage_base + frame_number;
 
@@ -240,11 +770,11 @@ ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR 
             return NULL;
         }
 
-        insert_page(relevant_listhead, zero_frame);
+        insert_page(listhead_page, zero_frame);
 
         zero_frame->status = ZERO_STATUS;
 
-        zeroed_lists->list_lengths[listhead_idx]++;
+        relevant_listhead->list_length++;
     }
   
     zeroed_lists->total_available = num_physical_frames;
@@ -274,12 +804,13 @@ FREE_FRAMES_LISTS* initialize_free_frames() {
     }
 
     for (int new_list = 0; new_list < NUM_CACHE_SLOTS; new_list++) {
-        free_frames->listheads[new_list].status = LISTHEAD_STATUS;
-        free_frames->listheads[new_list].flink = &free_frames->listheads[new_list];
-        free_frames->listheads[new_list].blink = &free_frames->listheads[new_list];
-        free_frames->list_lengths[new_list] = 0;
+        free_frames->listheads[new_list].listhead.status = LISTHEAD_STATUS;
+        free_frames->listheads[new_list].listhead.flink = &free_frames->listheads[new_list].listhead;
+        free_frames->listheads[new_list].listhead.blink = &free_frames->listheads[new_list].listhead;
+        free_frames->listheads[new_list].list_length = 0;
 
-        initialize_lock(&free_frames->list_locks[new_list]);
+        InitializeSRWLock(&free_frames->listheads[new_list].shared_lock);
+        initialize_lock(&free_frames->listheads[new_list].lock);
     }
 
     free_frames->total_available = 0;
@@ -300,8 +831,8 @@ FREE_FRAMES_LISTS* initialize_free_frames() {
  * 
  * Returns a pointer to the modified list or NULL upon error
  */
-MODIFIED_LIST* initialize_modified_list() {
-    MODIFIED_LIST* modified_list = (MODIFIED_LIST*) malloc(sizeof(MODIFIED_LIST));
+PAGE_LISTHEAD* initialize_modified_list() {
+    PAGE_LISTHEAD* modified_list = (PAGE_LISTHEAD*) malloc(sizeof(PAGE_LISTHEAD));
 
     if (modified_list == NULL) {
         fprintf(stderr, "Unable to allocate memory for modified list in initialize_modified_list\n");
@@ -314,21 +845,19 @@ MODIFIED_LIST* initialize_modified_list() {
 
     modified_list->list_length = 0;
 
-    #if MODIFIED_SHARED_LOCK
     InitializeSRWLock(&modified_list->shared_lock);
-    #else
     initialize_lock(&modified_list->lock);
-    #endif
+
     return modified_list;
 }
 
-
+#if 0
 /**
  * Adds the given page to the modified list (at the head)
  * 
  * Returns SUCCESS if there are no issues, ERROR otherwise
  */
-int modified_add_page(PAGE* page, MODIFIED_LIST* modified_list) {
+int modified_add_page(PAGE* page, PAGE_LISTHEAD* modified_list) {
     if (page == NULL || modified_list == NULL) {
         fprintf(stderr, "NULL page or modified list given to modified_add_page\n");
         return ERROR;
@@ -348,7 +877,7 @@ int modified_add_page(PAGE* page, MODIFIED_LIST* modified_list) {
  * 
  * Returns NULL upon any error or if the list is empty
  */
-PAGE* modified_pop_page(MODIFIED_LIST* modified_list) {
+PAGE* modified_pop_page(PAGE_LISTHEAD* modified_list) {
     if (modified_list == NULL) {
         fprintf(stderr, "NULL standby list given to modified_pop_page\n");
         return NULL;
@@ -362,6 +891,7 @@ PAGE* modified_pop_page(MODIFIED_LIST* modified_list) {
 
     return popped;
 }   
+#endif
 
 
 /**
@@ -376,8 +906,8 @@ PAGE* modified_pop_page(MODIFIED_LIST* modified_list) {
  * 
  * Returns a pointer to the standby list or NULL upon error
  */
-STANDBY_LIST* initialize_standby_list() {
-    STANDBY_LIST* standby_list = (STANDBY_LIST*) malloc(sizeof(STANDBY_LIST));
+PAGE_LISTHEAD* initialize_standby_list() {
+    PAGE_LISTHEAD* standby_list = (PAGE_LISTHEAD*) malloc(sizeof(PAGE_LISTHEAD));
 
     if (standby_list == NULL) {
         fprintf(stderr, "Unable to allocate memory for standby list in initialize_standby_list\n");
@@ -390,12 +920,13 @@ STANDBY_LIST* initialize_standby_list() {
     
     standby_list->list_length = 0;
 
+    InitializeSRWLock(&standby_list->shared_lock);
     initialize_lock(&standby_list->lock);
 
     return standby_list;
 }
 
-
+#if 0
 /**
  * Adds the given page to the standby list
  * 
@@ -415,3 +946,4 @@ int standby_add_page(PAGE* page, STANDBY_LIST* standby_list) {
 
     return SUCCESS;
 }
+#endif
