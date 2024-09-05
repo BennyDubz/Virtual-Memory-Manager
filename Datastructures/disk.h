@@ -108,7 +108,7 @@ typedef struct {
      * saving constant calls to MapUserPhysicalPagesScatter
      */
     DECLSPEC_ALIGN(64)
-    DISK_READSECTION_STATUS disk_readsection_statuses[DISK_READ_SLOTS];
+    DISK_READSECTION_STATUS disk_readsection_statuses[DISK_READSECTIONS];
 
     DECLSPEC_ALIGN(64)
     volatile ULONG64 num_available_readsections;

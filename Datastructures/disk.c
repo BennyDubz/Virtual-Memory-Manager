@@ -186,7 +186,7 @@ static int initialize_disk_read(DISK* disk, MEM_EXTENDED_PARAMETER* vmem_paramet
     }
 
     disk->disk_read_base_addr = disk_read_base;
-    for (ULONG64 slot_num = 0; slot_num < DISK_READ_SLOTS; slot_num++) {
+    for (ULONG64 slot_num = 0; slot_num < DISK_READSECTIONS; slot_num++) {
         disk->disk_readsection_statuses[slot_num].status = DISK_READSECTION_OPEN;
     }
 
