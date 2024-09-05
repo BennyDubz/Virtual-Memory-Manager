@@ -188,17 +188,6 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
         }
 
         num_ptes_to_connect = num_ptes_not_changed;
-
-        #if 0
-        /**
-         * More than one thread was trying to access this PTE at once, meaning that only one of them succeeded and mapped the page
-         */
-        if (ptes_are_equal(local_pte, *accessed_pte) == FALSE) {
-            LeaveCriticalSection(pte_lock);
-            release_unneeded_page(allocated_pages[0]);
-            return UNACCESSED_RACE_CONDITION_FAIL;
-        }
-        #endif
     }
 
     // We may need to edit the old PTE, in which case, we want a copy so we can still find it
@@ -277,8 +266,6 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
      * The worst case is that other threads are spinning on the pagelock in transition format waiting for this to happen,
      * and they will need to retry the fault as their PTE will be in disk format
      */
-
-    //BW: We will need to change this if we speculate on more than just disk PTEs!
     if (is_transition_format(local_pte) == FALSE) {
         PAGE curr_page_copy;
         PTE pte_contents;

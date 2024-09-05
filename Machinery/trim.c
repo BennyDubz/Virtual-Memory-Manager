@@ -171,7 +171,7 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
                 curr_pte = &pagetable->pte_list[pte_idx];
 
                 // Ignore invalid PTEs
-                if (! is_memory_format(*curr_pte)) {
+                if (is_memory_format(read_pte_contents(curr_pte)) == FALSE) {
                     continue;
                 }
 

@@ -126,8 +126,6 @@ static void free_frames_add_batch(PAGE** page_list, ULONG64 num_pages) {
     ULONG64 last_page_in_section_idx = 0;
 
     PAGE_LISTHEAD* curr_listhead = &free_frames->listheads[curr_cache_color];
-    CRITICAL_SECTION* curr_locksection = &curr_listhead->lock;
-    PAGE* curr_head = &curr_listhead->listhead;
 
     ULONG64 page_idx = 0;
     ULONG64 page_section_size;
@@ -138,35 +136,23 @@ static void free_frames_add_batch(PAGE** page_list, ULONG64 num_pages) {
         if (curr_cache_color != page_cache_color) {
             page_section_size = page_idx - first_in_section_idx;
 
-            EnterCriticalSection(curr_locksection);
 
-            insert_page_section(curr_head, page_list[first_in_section_idx], page_list[page_idx - 1]);
-            InterlockedAdd64(&curr_listhead->list_length, page_section_size);
+            insert_page_section2(curr_listhead, page_list[first_in_section_idx], page_list[page_idx - 1], page_section_size);
             InterlockedAdd64(&free_frames->total_available, page_section_size);
             InterlockedAdd64(&total_available_pages, page_section_size);
-
-            LeaveCriticalSection(curr_locksection);
-
 
             // Adjust the indices, cache color, and locksection to the next section of pages
             first_in_section_idx = page_idx;
             curr_cache_color = page_cache_color;
             curr_listhead = &free_frames->listheads[curr_cache_color];
-            curr_locksection = &curr_listhead->lock;
-            curr_head = &curr_listhead->listhead;
         }
     }
     
     page_section_size = num_pages - first_in_section_idx;
 
-    EnterCriticalSection(curr_locksection);
-
-    insert_page_section(curr_head, page_list[first_in_section_idx], page_list[num_pages - 1]);
-    InterlockedAdd64(&curr_listhead->list_length, page_section_size);
+    insert_page_section2(curr_listhead, page_list[first_in_section_idx], page_list[num_pages - 1], page_section_size);
     InterlockedAdd64(&free_frames->total_available, page_section_size);
     InterlockedAdd64(&total_available_pages, page_section_size);
-
-    LeaveCriticalSection(curr_locksection);
 
     SetEvent(waiting_for_pages_event);
 }
@@ -202,8 +188,6 @@ static void zero_list_add_batch(PAGE** page_list, ULONG64 num_pages) {
     ULONG64 last_page_in_section_idx = 0;
 
     PAGE_LISTHEAD* curr_listhead = &zero_lists->listheads[curr_cache_color];
-    CRITICAL_SECTION* curr_locksection = &curr_listhead->lock;
-    PAGE* curr_head = &curr_listhead->listhead;
 
     ULONG64 page_idx = 0;
     ULONG64 page_section_size;
@@ -214,35 +198,25 @@ static void zero_list_add_batch(PAGE** page_list, ULONG64 num_pages) {
         if (curr_cache_color != page_cache_color) {
             page_section_size = page_idx - first_in_section_idx;
 
-            EnterCriticalSection(curr_locksection);
 
-            insert_page_section(curr_head, page_list[first_in_section_idx], page_list[page_idx - 1]);
-            InterlockedAdd64(&curr_listhead->list_length, page_section_size);
+            insert_page_section2(curr_listhead, page_list[first_in_section_idx], page_list[page_idx - 1], page_section_size);
             InterlockedAdd64(&zero_lists->total_available, page_section_size);
             InterlockedAdd64(&total_available_pages, page_section_size);
-
-            LeaveCriticalSection(curr_locksection);
 
 
             // Adjust the indices, cache color, and locksection to the next section of pages
             first_in_section_idx = page_idx;
             curr_cache_color = page_cache_color;
             curr_listhead = &zero_lists->listheads[curr_cache_color];
-            curr_locksection = &curr_listhead->lock;
-            curr_head = &curr_listhead->listhead;
+
         }
     }
     
     page_section_size = num_pages - first_in_section_idx;
 
-    EnterCriticalSection(curr_locksection);
-
-    insert_page_section(curr_head, page_list[first_in_section_idx], page_list[num_pages - 1]);
-    InterlockedAdd64(&curr_listhead->list_length, page_section_size);
+    insert_page_section2(curr_listhead, page_list[first_in_section_idx], page_list[num_pages - 1], page_section_size);
     InterlockedAdd64(&zero_lists->total_available, page_section_size);
     InterlockedAdd64(&total_available_pages, page_section_size);
-
-    LeaveCriticalSection(curr_locksection);
 
     SetEvent(waiting_for_pages_event);
 }
@@ -589,7 +563,8 @@ void zero_out_pages(PAGE** pages, ULONG64 num_pages) {
  * 
  * Returns the page if its lock was acquired, NULL otherwise
  */
-static PAGE* try_acquire_list_tail_pagelock(PAGE* pagelist_listhead) {
+static PAGE* try_acquire_list_tail_pagelock(PAGE_LISTHEAD* list) {
+    PAGE* pagelist_listhead = &list->listhead;
     BOOL pagelock_acquired = FALSE;
     PAGE* potential_page = NULL;
 
@@ -624,8 +599,8 @@ static PAGE* try_acquire_list_tail_pagelock(PAGE* pagelist_listhead) {
  * 
  * Returns the page whose lock was acquired, or NULL if the list was empty and it was unable
  */
-static PAGE* acquire_list_tail_pagelock(PAGE* pagelist_listhead) {
-
+static PAGE* acquire_list_tail_pagelock(PAGE_LISTHEAD* list) {
+    PAGE* pagelist_listhead = &list->listhead;
     BOOL pagelock_acquired = FALSE;
     PAGE* potential_page = NULL;
 
@@ -652,8 +627,8 @@ static PAGE* acquire_list_tail_pagelock(PAGE* pagelist_listhead) {
  * Tries to acquire num_pages pagelocks starting at the tail of the given listhead, stores the acquired pages in page_storage,
  * and returns the number of pages whose locks were acquired
  */
-static ULONG64 acquire_batch_list_tail_pagelocks(PAGE* pagelist_listhead, PAGE** page_storage, ULONG64 num_pages) {
-
+static ULONG64 acquire_batch_list_tail_pagelocks(PAGE_LISTHEAD* list, PAGE** page_storage, ULONG64 num_pages) {
+    PAGE* pagelist_listhead = &list->listhead;
     PAGE* curr_page;
     
     /**
@@ -665,7 +640,7 @@ static ULONG64 acquire_batch_list_tail_pagelocks(PAGE* pagelist_listhead, PAGE**
      */
     BOOL pagelock_acquired = FALSE;
 
-    PAGE* first_page = acquire_list_tail_pagelock(pagelist_listhead);
+    PAGE* first_page = acquire_list_tail_pagelock(list);
     
     if (first_page == NULL) return 0;
 
@@ -679,7 +654,6 @@ static ULONG64 acquire_batch_list_tail_pagelocks(PAGE* pagelist_listhead, PAGE**
         
         pagelock_acquired = try_acquire_pagelock(potential_page, 5);
 
-        // Once we have the lock, we need to ensure that it is still inside the standby list
         if (pagelock_acquired && potential_page == (PAGE*) curr_page->blink) {
             curr_page = potential_page;
             page_storage[num_allocated] = potential_page;
@@ -741,14 +715,11 @@ PAGE* allocate_zeroed_frame() {
             continue;
         }
 
-        // By here, the **odds are better** that we will get a frame, but not guaranteed
-        PAGE* listhead_page = &zero_lists->listheads[local_index].listhead;
-
         // If multiple threads are contending on the same sections, this will help alleviate contention
         if (curr_attempts < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS) {
-            potential_page = try_acquire_list_tail_pagelock(listhead_page);
+            potential_page = try_acquire_list_tail_pagelock(curr_listhead);
         } else {
-            potential_page = acquire_list_tail_pagelock(listhead_page);
+            potential_page = acquire_list_tail_pagelock(curr_listhead);
         }
 
         // We failed to get a page from this section, it was empty
@@ -758,16 +729,11 @@ PAGE* allocate_zeroed_frame() {
             continue;
         }
 
-        EnterCriticalSection(&curr_listhead->lock);
-
         // Remove the page from the list
-        pop_page(listhead_page);
+        unlink_page2(curr_listhead, potential_page);
        
-        curr_listhead->list_length--;
         InterlockedDecrement64(&zero_lists->total_available);
         InterlockedDecrement64(&total_available_pages);
-
-        LeaveCriticalSection(&curr_listhead->lock);
 
         custom_spin_assert(potential_page->pagefile_idx == DISK_IDX_NOTUSED);
 
@@ -811,12 +777,10 @@ ULONG64 allocate_batch_zeroed_frames(PAGE** page_storage, ULONG64 num_pages) {
             continue;
         }
 
-        PAGE* listhead_page = &zero_lists->listheads[local_index].listhead;
-
         if (num_consecutive_failures < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS) {
-            curr_page = try_acquire_list_tail_pagelock(listhead_page);
+            curr_page = try_acquire_list_tail_pagelock(curr_listhead);
         } else {
-            curr_page = acquire_list_tail_pagelock(listhead_page);
+            curr_page = acquire_list_tail_pagelock(curr_listhead);
         }
 
         // We failed to acquire a page - this list is now empty
@@ -829,21 +793,15 @@ ULONG64 allocate_batch_zeroed_frames(PAGE** page_storage, ULONG64 num_pages) {
             continue;
         }
 
-        EnterCriticalSection(&curr_listhead->lock);
-
-        pop_page(listhead_page);
-        
-        curr_listhead->list_length--;
-
-        InterlockedDecrement64(&zero_lists->total_available);
-        InterlockedDecrement64(&total_available_pages);
-
-        LeaveCriticalSection(&curr_listhead->lock);
+        unlink_page2(curr_listhead, curr_page);
 
         page_storage[num_allocated] = curr_page;
         num_consecutive_failures = 0;
         num_allocated++;
     }
+
+    InterlockedAdd64(&zero_lists->total_available, - num_allocated);
+    InterlockedAdd64(&total_available_pages, - num_allocated);
 
     return num_allocated;
 }
@@ -881,19 +839,13 @@ PAGE* allocate_free_frame() {
             local_index = (local_index + 1) % NUM_CACHE_SLOTS;
             continue;
         }
-
-        PAGE* listhead_page = &free_frames->listheads[local_index].listhead;
         
         // If multiple threads are contending on the same sections, this will help alleviate contention
         if (curr_attempts < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS / 2) {
-            potential_page = try_acquire_list_tail_pagelock(listhead_page);
+            potential_page = try_acquire_list_tail_pagelock(curr_listhead);
         } else {
-            potential_page = acquire_list_tail_pagelock(listhead_page);
+            potential_page = acquire_list_tail_pagelock(curr_listhead);
         }
-
-        // potential_page = acquire_list_tail_pagelock(section_listhead);
-
-        // potential_page = try_acquire_list_tail_pagelock(section_listhead);
 
         // We failed to get a page from this section, it was empty
         if (potential_page == NULL) {
@@ -902,17 +854,11 @@ PAGE* allocate_free_frame() {
             continue;
         }
 
-        EnterCriticalSection(&curr_listhead->lock);
-
         // Remove the page from the list
-        pop_page(listhead_page);
+        unlink_page2(curr_listhead, potential_page);
        
-        curr_listhead->list_length--;
-
         InterlockedDecrement64(&free_frames->total_available);
         InterlockedDecrement64(&total_available_pages);
-
-        LeaveCriticalSection(&curr_listhead->lock);
 
         custom_spin_assert(potential_page->pagefile_idx == DISK_IDX_NOTUSED);
 
@@ -959,13 +905,10 @@ ULONG64 allocate_batch_free_frames(PAGE** page_storage, ULONG64 batch_size) {
             continue;
         }
 
-        // By here, the odds are better that we will get a frame, but not guaranteed
-        PAGE* listhead_page = &free_frames->listheads[local_index].listhead;
-
         if (num_consecutive_failures < MAX_ATTEMPTS_FREE_OR_ZERO_LISTS / 2) {
-            curr_page = try_acquire_list_tail_pagelock(listhead_page);
+            curr_page = try_acquire_list_tail_pagelock(curr_listhead);
         } else {
-            curr_page = acquire_list_tail_pagelock(listhead_page);
+            curr_page = acquire_list_tail_pagelock(curr_listhead);
         }
 
         // We failed to acquire a page - this list is now empty
@@ -978,22 +921,15 @@ ULONG64 allocate_batch_free_frames(PAGE** page_storage, ULONG64 batch_size) {
             continue;
         }
 
-        // By here, the **odds are better** that we will get a frame, but not guaranteed
-        EnterCriticalSection(&curr_listhead->lock);
-
-        pop_page(listhead_page);
-
-        curr_listhead->list_length--;
-
-        InterlockedDecrement64(&free_frames->total_available);
-        InterlockedDecrement64(&total_available_pages);
-
-        LeaveCriticalSection(&curr_listhead->lock);
+        unlink_page2(curr_listhead, curr_page);
 
         page_storage[num_allocated] = curr_page;
         num_consecutive_failures = 0;
         num_allocated++;
     }
+
+    InterlockedAdd64(&free_frames->total_available, - num_allocated);
+    InterlockedAdd64(&total_available_pages, - num_allocated);
 
     return num_allocated;
 }
@@ -1297,7 +1233,7 @@ PAGE* standby_pop_page() {
 
     BOOL pagelock_acquired = FALSE;
 
-    PAGE* potential_page = acquire_list_tail_pagelock(&standby_list->listhead);
+    PAGE* potential_page = acquire_list_tail_pagelock(standby_list);
     
     if (potential_page == NULL) return NULL;
 
@@ -1335,7 +1271,7 @@ ULONG64 standby_pop_batch(PAGE** page_storage, ULONG64 batch_size) {
     // Pre-emptively check for the list length being empty before doing any more work
     if (standby_list->list_length == 0) return 0;
 
-    ULONG64 num_allocated = acquire_batch_list_tail_pagelocks(&standby_list->listhead, page_storage, batch_size);
+    ULONG64 num_allocated = acquire_batch_list_tail_pagelocks(standby_list, page_storage, batch_size);
     
     if (num_allocated == 0) return 0;
 

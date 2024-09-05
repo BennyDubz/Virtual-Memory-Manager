@@ -621,7 +621,6 @@ void remove_page_section2(PAGE_LISTHEAD* list, PAGE* beginning, PAGE* end, ULONG
 }
 
 
-
 /**
  * Inserts the given page to the head of the list
  */
@@ -749,7 +748,6 @@ ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR 
         zeroed_lists->listheads[new_list].list_length = 0;
 
         InitializeSRWLock(&zeroed_lists->listheads[new_list].shared_lock);
-        initialize_lock(&zeroed_lists->listheads[new_list].lock);
     }
 
     // Add all the physical frames to their respective zero lists
@@ -810,7 +808,6 @@ FREE_FRAMES_LISTS* initialize_free_frames() {
         free_frames->listheads[new_list].list_length = 0;
 
         InitializeSRWLock(&free_frames->listheads[new_list].shared_lock);
-        initialize_lock(&free_frames->listheads[new_list].lock);
     }
 
     free_frames->total_available = 0;
@@ -846,7 +843,6 @@ PAGE_LISTHEAD* initialize_modified_list() {
     modified_list->list_length = 0;
 
     InitializeSRWLock(&modified_list->shared_lock);
-    initialize_lock(&modified_list->lock);
 
     return modified_list;
 }
