@@ -896,6 +896,7 @@ PAGE* modified_pop_page(PAGE_LISTHEAD* modified_list) {
  * ######################
  */
 
+DECLSPEC_ALIGN(64) PAGE_LISTHEAD actual_standby_list;
 
 /**
  * Allocates memory for and initializes a standby list struct
@@ -903,12 +904,12 @@ PAGE* modified_pop_page(PAGE_LISTHEAD* modified_list) {
  * Returns a pointer to the standby list or NULL upon error
  */
 PAGE_LISTHEAD* initialize_standby_list() {
+    #if 0
+    PAGE_LISTHEAD* standby_list = &actual_standby_list; //(PAGE_LISTHEAD*) malloc(sizeof(PAGE_LISTHEAD));
+    #else
     PAGE_LISTHEAD* standby_list = (PAGE_LISTHEAD*) malloc(sizeof(PAGE_LISTHEAD));
+    #endif
 
-    if (standby_list == NULL) {
-        fprintf(stderr, "Unable to allocate memory for standby list in initialize_standby_list\n");
-        return NULL;
-    }
 
     standby_list->listhead.status = LISTHEAD_STATUS;
     standby_list->listhead.flink = &standby_list->listhead;

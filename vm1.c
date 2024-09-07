@@ -18,7 +18,7 @@
 #define TOTAL_ACCESS_AMOUNT         (MB(10))
 
 // How frequently in milliseconds we print out all of the information about the simulation and our current progress
-#define PRINT_FREQUECY_MS          2000 
+#define PRINT_FREQUECY_MS          100 
 
 /**
  * 1 thread - 10mb - 21.1 seconds
@@ -146,42 +146,9 @@ void usermode_virtual_memory_simulation () {
             printf("Total access count 0x%llx is %.4f%% of the total amount\n", current_access_count, proportion_of_total * 100);
             printf("\tPhys page standby ratio: %f Zeroed: 0x%llX Free: 0x%llX Standby: 0x%llX Mod 0x%llX Num disk slots %llX\n", (double)  standby_list->list_length / physical_page_count, zero_lists->total_available, free_frames->total_available, 
                                             standby_list->list_length, modified_list->list_length, disk->total_available_slots);
-            
-            #if 0
-            ULONG64 num_valid = 0;
-            ULONG64 num_transition = 0;
-            ULONG64 num_disk = 0;
-            ULONG64 num_unaccessed = 0;
-            PTE pte_copy;
-            for (ULONG64 i = 0; i < pagetable->num_virtual_pages; i++) {
-                pte_copy = read_pte_contents(&pagetable->pte_list[i]);
-
-                if (is_memory_format(pte_copy)) {
-                    num_valid++;
-                } else if (is_transition_format(pte_copy)) {
-                    num_transition++;
-                } else if (is_disk_format(pte_copy)) {
-                    num_disk++;
-                } else {
-                    num_unaccessed++;
-                }
-            }
-
-            ULONG64 actual_on_standby = 0;
-
-            EnterCriticalSection(&standby_list->lock);
-            PAGE* curr_page = standby_list->listhead.flink;
-
-            while (curr_page != &standby_list->listhead) {
-                curr_page = curr_page->flink;
-                actual_on_standby++;
-            }
-
-            LeaveCriticalSection(&standby_list->lock);
-            printf("Num valid ptes %llx Num transition %llx Num disk %llx Num unaccessed %llx Num standby %llx\n", num_valid, num_transition, num_disk, num_unaccessed, actual_on_standby);
-            #endif
 
             user_thread_num --;
+
         }
 
         current_access_count = 0;
@@ -233,7 +200,7 @@ int thread_access_random_addresses(void* params) {
     ULONG64 i;
     BOOL page_faulted;
     PULONG_PTR arbitrary_va;
-    ULONG64 random_number;
+    ULONG64 random_number = 0;
     PULONG_PTR vmem_base;
     ULONG_PTR virtual_address_size;
     ULONG64 thread_idx;
@@ -263,6 +230,12 @@ int thread_access_random_addresses(void* params) {
      */
     ULONG64 access_type;
 
+    ULONG64 curr_rand_number_idx = 0;
+    ULONG64 last_random_number;
+
+    ULONG64 random_number_idx_storages[32];
+
+    for (ULONG64 i = 0; i < 32; i++) random_number_idx_storages[i] = 0;
 
     WaitForSingleObject(thread_start_event, INFINITE);
 
@@ -289,7 +262,16 @@ int thread_access_random_addresses(void* params) {
         if (arbitrary_va == NULL) {
 
             // Not cryptographically strong, but good enough to get a spread-out distribution
+            last_random_number = random_number;
             random_number = ReadTimeStampCounter();
+
+            if (i != 0) {
+                 ULONG64 idx = (random_number - last_random_number) / 512;
+
+                if (idx >= 32) idx = 31;
+
+                random_number_idx_storages[idx]++;
+            }
 
             random_number %= virtual_address_size_in_unsigned_chunks;
 
@@ -341,8 +323,6 @@ int thread_access_random_addresses(void* params) {
         }
         //BW: ELSE: we mark the relevant PTE as accessed (real hardware would do this for us)
     }
-
-    printf("Thread complete\n");
 
     return SUCCESS;
 }

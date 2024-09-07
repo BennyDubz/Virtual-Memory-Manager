@@ -20,6 +20,9 @@
 #define MOD_WRITER_MAX_NUM_SECTIONS 16
 #define MOD_WRITER_SECTION_SIZE     (MAX_PAGES_WRITABLE / MOD_WRITER_MAX_NUM_SECTIONS)
 
+// How many memcpys will we perform in each section before we re-acquire the pagelocks, chain the pages together, and add them to standby
+#define MOD_WRITER_MINIBATCH_SIZE 32
+
 /**
  * If the standby list is smaller than the (total physical memory / proportion) then it will hog the modified list lock
  */
