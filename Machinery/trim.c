@@ -1099,10 +1099,6 @@ int disconnect_pte_from_cpu(PTE* pte) {
 
     InterlockedDecrement64(&pte_locksection->valid_pte_count);
 
-    // if (pte_valid_count_check(pte) == FALSE) {
-    //     DebugBreak();
-    // }
-
     #ifdef DEBUG_CHECKING
     if (pte_valid_count_check(pte) == FALSE) {
         DebugBreak();

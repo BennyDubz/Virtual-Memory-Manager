@@ -54,7 +54,7 @@
 #define DISK_READSECTION_NEEDS_FLUSH 2 
 
 // This determines the size of the large write slot that the mod-writer uses
-#define MAX_PAGES_WRITABLE      max(DISK_STORAGE_SLOTS >> 10, 512)
+#define MAX_PAGES_WRITABLE      max(DISK_STORAGE_SLOTS >> 8, 512)
 
 // For storage slots on the disk
 #define DISK_USEDSLOT 0

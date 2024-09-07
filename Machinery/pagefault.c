@@ -39,13 +39,16 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
 
 static BOOL acquire_disk_pte_read_rights(PTE* accessed_pte, PTE local_pte);
 
-static int handle_disk_pte_fault(ULONG64 thread_idx, PTE* accessed_pte, PAGE** result_page_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage);
+static int handle_disk_pte_fault(ULONG64 thread_idx, PTE* accessed_pte, PAGE** result_page_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage, ULONG64 access_type);
 
 static ULONG64 get_trailing_valid_pte_count(PTE* accessed_pte);
 
 static ULONG64 get_trailing_valid_and_being_read_pte_count(PTE* accessed_pte);
 
 static void end_of_fault_work();
+
+static void commit_pages(PAGE** pages_to_commit, PTE** ptes, PTE* accessed_pte, ULONG64 num_pages, ULONG64 access_type);
+
 
 
 /**
@@ -135,7 +138,7 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
 
     } else if (is_disk_format(local_pte)) {
 
-        if ((handler_result = handle_disk_pte_fault(thread_idx, accessed_pte, allocated_pages, ptes_to_connect, &num_ptes_to_connect)) != SUCCESS) {
+        if ((handler_result = handle_disk_pte_fault(thread_idx, accessed_pte, allocated_pages, ptes_to_connect, &num_ptes_to_connect, access_type)) != SUCCESS) {
             return handler_result;
         }
 
@@ -187,7 +190,22 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
             }
         }
 
+        // For unaccessed PTEs that we might have speculated on incorrectly, we might need to return pages that we never used
+        if (num_unneeded_pages > 0) {
+            release_batch_unneeded_pages(unneeded_pages, num_unneeded_pages);
+        }   
+
         num_ptes_to_connect = num_ptes_not_changed;
+    }
+    
+    if (is_disk_format(local_pte) == FALSE) {
+        commit_pages(allocated_pages, ptes_to_connect, accessed_pte, num_ptes_to_connect, access_type);
+    }
+
+    #if 0
+    // We are writing to the page - this may communicate to the modified writer that they need to return pagefile space
+    if (access_type == WRITE_ACCESS) {
+        allocated_pages[0]->modified = PAGE_MODIFIED;
     }
 
     // We may need to edit the old PTE, in which case, we want a copy so we can still find it
@@ -198,6 +216,7 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
             allocated_pages_copies[i] = *allocated_pages[i];
         }
     }
+
 
     // We may need to release stale pagefile slots and/or modify the page's pagefile information
     if (num_ptes_to_connect == 1) {
@@ -238,11 +257,8 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
     if (num_pages_to_zero > 0) {
         zero_out_pages(pages_to_zero, num_pages_to_zero);
     }
+    #endif
 
-    // We are writing to the page - this may communicate to the modified writer that they need to return pagefile space
-    if (access_type == WRITE_ACCESS) {
-        allocated_pages[0]->modified = PAGE_MODIFIED;
-    }
 
     if (num_ptes_to_connect == 1) {
         if (connect_pte_to_page(ptes_to_connect[0], allocated_pages[0], access_type) == ERROR) {
@@ -259,7 +275,7 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
         LeaveCriticalSection(pte_lock);
     }
     
-
+    #if 0
     /**
      * We need to modify the other PTEs associated with the standby pages now that we are committing
      * 
@@ -286,11 +302,12 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
     for (ULONG64 i = 0; i < num_ptes_to_connect; i++) {
         release_pagelock(allocated_pages[i], 11);
     }
+    #endif
     
-    // For unaccessed PTEs that we might have speculated on incorrectly, we might need to return pages that we never used
-    if (num_unneeded_pages > 0) {
-        release_batch_unneeded_pages(unneeded_pages, num_unneeded_pages);
-    }
+    // // For unaccessed PTEs that we might have speculated on incorrectly, we might need to return pages that we never used
+    // if (num_unneeded_pages > 0) {
+    //     release_batch_unneeded_pages(unneeded_pages, num_unneeded_pages);
+    // }
 
     end_of_fault_work(accessed_pte, thread_idx);
 
@@ -869,7 +886,7 @@ static void release_sequential_disk_read_rights(PTE** ptes_to_release, ULONG64 n
  * Returns a pointer to the page with the restored contents on it, and stores the
  * disk index that it was at in disk_idx_storage
  */
-static int handle_disk_pte_fault(ULONG64 thread_idx, PTE* accessed_pte, PAGE** result_pages_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage) {
+static int handle_disk_pte_fault(ULONG64 thread_idx, PTE* accessed_pte, PAGE** result_pages_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage, ULONG64 access_type) {
     
     #if SEQUENTIAL_SPECULATIVE_DISK_READS
 
@@ -919,6 +936,8 @@ static int handle_disk_pte_fault(ULONG64 thread_idx, PTE* accessed_pte, PAGE** r
         // We failed to acquire enough pages - but we will continue
         release_sequential_disk_read_rights(&ptes_to_connect_storage[num_pages_acquired], num_to_read - num_pages_acquired);
     }
+
+    commit_pages(result_pages_storage, ptes_to_connect_storage, accessed_pte, num_pages_acquired, access_type);
 
     THREAD_DISK_READ_RESOURCES* thread_disk_resources = &thread_information.thread_local_storages[thread_idx].disk_resources;
 
@@ -1008,6 +1027,91 @@ static ULONG64 get_trailing_valid_and_being_read_pte_count(PTE* accessed_pte) {
 
     return total_count;
 
+}
+
+
+static void commit_pages(PAGE** pages_to_commit, PTE** ptes, PTE* accessed_pte, ULONG64 num_pages, ULONG64 access_type) {
+    // We may need to edit the old PTE, in which case, we want a copy so we can still find it
+    PAGE allocated_pages_copies[MAX_PAGES_READABLE];
+
+    if (is_transition_format(read_pte_contents(ptes[0])) == FALSE) {
+        for (ULONG64 i = 0; i < num_pages; i++) {
+            allocated_pages_copies[i] = *pages_to_commit[i];
+        }
+    }
+
+    // We are writing to the page - this may communicate to the modified writer that they need to return pagefile space
+    if (access_type == WRITE_ACCESS) {
+        pages_to_commit[0]->modified = PAGE_MODIFIED;
+    }
+
+
+    // We may need to release stale pagefile slots and/or modify the page's pagefile information
+    if (num_pages == 1) {
+        handle_end_of_fault_disk_slot(read_pte_contents(ptes[0]), pages_to_commit[0], access_type);
+    } else {
+        handle_batch_end_of_fault_disk_slot(ptes, accessed_pte, pages_to_commit, access_type, num_pages);
+    }
+
+    /**
+     * For unaccessed PTEs, we need to ensure they start off with a clean page
+     * 
+     * Note - this is treating the individual threads to be similar to different processes accessing the same
+     * address space, which would not be the case normally. However, this allows us to demonstrate the infrastructure
+     * required to zero out pages when needed. Typically, different threads within a process would not need to have zeroed out pages
+     * if their previous owner was withn the same process - since the threads are a part of the same process, we do not have the
+     * security concern of sharing data between processes. 
+     */
+
+    PAGE* pages_to_zero[MAX_PAGES_READABLE];
+    ULONG64 num_pages_to_zero = 0;
+
+    for (ULONG64 i = 0; i < num_pages; i++) {
+        if (is_used_pte(read_pte_contents(ptes[i])) == FALSE) {
+            if (pages_to_commit[i]->status != ZERO_STATUS) {
+                pages_to_zero[num_pages_to_zero] = pages_to_commit[i];
+                num_pages_to_zero++;
+            }
+        }
+
+        pages_to_commit[i]->status = ACTIVE_STATUS;
+        pages_to_commit[i]->pte = ptes[i];
+
+        #if LIGHT_DEBUG_PAGELOCK
+        pages_to_commit[i]->acquiring_pte_copy = read_pte_contents(ptes[i]);
+        #endif
+    }
+
+    if (num_pages_to_zero > 0) {
+        zero_out_pages(pages_to_zero, num_pages_to_zero);
+    }
+
+    /**
+     * We need to modify the other PTEs associated with the standby pages now that we are committing
+     * 
+     * The worst case is that other threads are spinning on the pagelock in transition format waiting for this to happen,
+     * and they will need to retry the fault as their PTE will be in disk format
+     */
+    if (is_transition_format(read_pte_contents(ptes[0])) == FALSE) {
+        PAGE curr_page_copy;
+        PTE pte_contents;
+        pte_contents.complete_format = 0;
+
+        for (ULONG64 i = 0; i < num_pages; i++) {
+            curr_page_copy = allocated_pages_copies[i];
+
+            if (curr_page_copy.status == STANDBY_STATUS) {
+                PTE* old_pte = curr_page_copy.pte;
+                pte_contents.disk_format.pagefile_idx = curr_page_copy.pagefile_idx;
+
+                write_pte_contents(old_pte, pte_contents);
+            }
+        }
+    }
+
+    for (ULONG64 i = 0; i < num_pages; i++) {
+        release_pagelock(pages_to_commit[i], 11);
+    }
 }
 
 
