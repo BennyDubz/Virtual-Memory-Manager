@@ -35,9 +35,9 @@
 
 PAGE* page_storage_base;
 
-volatile ULONG64 total_available_pages;
+DECLSPEC_ALIGN(64) volatile ULONG64 total_available_pages;
 
-ULONG64 physical_page_count;
+DECLSPEC_ALIGN(64) ULONG64 physical_page_count;
 
 MEM_EXTENDED_PARAMETER vmem_parameters;
 
@@ -55,9 +55,9 @@ ZEROED_PAGES_LISTS* zero_lists;
 
 FREE_FRAMES_LISTS* free_frames;
 
-PAGE_LISTHEAD* standby_list;
+PAGE_LIST* standby_list;
 
-PAGE_LISTHEAD* modified_list;
+PAGE_LIST* modified_list;
 
 PAGE_ZEROING_STRUCT* page_zeroing;
 

@@ -237,17 +237,7 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
                 beginning_of_section = page_section_trim_to_modified[0];
                 end_of_section = page_section_trim_to_modified[trim_to_modified - 1];
                 
-                #if SRW_MOD
-                insert_page_section2(modified_list, beginning_of_section, end_of_section, trim_to_modified);
-                #else
-                EnterCriticalSection(&modified_list->lock); 
-
-                insert_page_section(&modified_list->listhead, beginning_of_section, end_of_section);
-
-                modified_list->list_length += trim_to_modified;
-
-                LeaveCriticalSection(&modified_list->lock);
-                #endif
+                insert_page_section(modified_list, beginning_of_section, end_of_section, trim_to_modified);
                 
                 // Now release the pagelocks so that the mod-writer can use them
                 for (ULONG64 trim_idx = 0; trim_idx < trim_to_modified; trim_idx++) {
@@ -277,7 +267,7 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
                 // We only want to set the event if we desperately need pages, and we check before we modify the global
                 signal_waiting_for_pages_event = (total_available_pages == 0);
                 
-                insert_page_section2(standby_list, beginning_of_section, end_of_section, trim_to_standby);
+                insert_page_section(standby_list, beginning_of_section, end_of_section, trim_to_standby);
 
                 InterlockedAdd64(&total_available_pages, trim_to_standby);
 
@@ -456,17 +446,7 @@ void faulter_trim_behind(PTE* accessed_pte) {
         beginning_of_section = pages_trimmed_to_modified[0];
         end_of_section = pages_trimmed_to_modified[trim_to_modified - 1];
         
-        #if SRW_MOD
-        insert_page_section2(modified_list, beginning_of_section, end_of_section, trim_to_modified);
-        #else
-        EnterCriticalSection(&modified_list->lock);
-
-        insert_page_section(&modified_list->listhead, beginning_of_section, end_of_section);
-        
-        modified_list->list_length += trim_to_modified;
-
-        LeaveCriticalSection(&modified_list->lock);
-        #endif
+        insert_page_section(modified_list, beginning_of_section, end_of_section, trim_to_modified);
 
         for (ULONG64 i = 0; i < trim_to_modified; i++) {
             curr_page = pages_trimmed_to_modified[i];
@@ -489,7 +469,7 @@ void faulter_trim_behind(PTE* accessed_pte) {
         beginning_of_section = pages_trimmed_to_standby[0];
         end_of_section = pages_trimmed_to_standby[trim_to_standby - 1];
 
-        insert_page_section2(standby_list, beginning_of_section, end_of_section, trim_to_standby);      
+        insert_page_section(standby_list, beginning_of_section, end_of_section, trim_to_standby);      
 
         InterlockedAdd64(&total_available_pages, trim_to_standby);
 
@@ -573,11 +553,7 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
         ULONG64 curr_attempts = 0;
         ULONG64 section_attempts = 0;
         ULONG64 curr_page_num = 0;
-        #if SRW_MOD
-        #else
-        BOOL acquire_mod_lock;
-        BOOL optional_continue_popping_pages;
-        #endif
+
         disk_batch->num_pages = 0;
         disk_batch->write_complete = FALSE;
 
@@ -599,19 +575,14 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
             section_attempts = 0;
 
             // We pop from the tail, so we have to acquire the tail pagelock first
-            potential_page = modified_list->listhead.blink;
+            potential_page = modified_list->tail.blink;
             
             // The list is empty
-            if (potential_page == &modified_list->listhead) break;
+            if (potential_page == &modified_list->head) break;
 
             // The rare case where the page we want to pop has its pagelock held. We surrender the modified listlock
             if (try_acquire_pagelock(potential_page, 8) == FALSE) {
-                #if SRW_MOD
-                #else
-                LeaveCriticalSection(&modified_list->lock);
-                acquire_mod_lock = TRUE;
-                #endif
-            
+                
                 curr_attempts++;
                 continue;
             }
@@ -628,14 +599,8 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
 
 
             // We now remove the page from the modified list
-            // modified_pop_page(modified_list);
-            #if SRW_MOD
-            unlink_page2(modified_list, potential_page);
-            #else
-            pop_page(&modified_list->listhead);
-            modified_list->list_length--;
-            #endif
-
+            unlink_page(modified_list, potential_page);
+            
             /**
              * Addressing a race condition where a page we had previously popped
              * from this loop was rescued and trimmed again - and is now about to be added again
@@ -658,13 +623,6 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
             release_pagelock(potential_page, 20);
 
             curr_attempts++;
-
-            #if SRW_MOD
-            #else
-            if (acquire_mod_lock == FALSE) {
-                LeaveCriticalSection(&modified_list->lock);
-            }
-            #endif
 
         }  
 
@@ -784,7 +742,7 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
             
                 BOOL signal_waiting_for_pages = (total_available_pages == 0);
 
-                insert_page_section2(standby_list, beginning_page, end_page, num_pages_confirmed_to_standby);
+                insert_page_section(standby_list, beginning_page, end_page, num_pages_confirmed_to_standby);
             
                 InterlockedAdd64(&total_available_pages, num_pages_confirmed_to_standby);
 
@@ -875,7 +833,7 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
                
                 BOOL signal_waiting_for_pages = (total_available_pages == 0);
 
-                insert_page_section2(standby_list, beginning_of_section, end_of_section, num_pages_confirmed_to_standby);
+                insert_page_section(standby_list, beginning_of_section, end_of_section, num_pages_confirmed_to_standby);
                
                 InterlockedAdd64(&total_available_pages, num_pages_confirmed_to_standby);
 

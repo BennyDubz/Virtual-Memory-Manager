@@ -101,9 +101,9 @@ extern ZEROED_PAGES_LISTS* zero_lists;
 
 extern FREE_FRAMES_LISTS* free_frames;
 
-extern PAGE_LISTHEAD* standby_list;
+extern PAGE_LIST* standby_list;
 
-extern PAGE_LISTHEAD* modified_list;
+extern PAGE_LIST* modified_list;
 
 extern PAGE_ZEROING_STRUCT* page_zeroing;
 

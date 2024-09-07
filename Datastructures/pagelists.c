@@ -206,39 +206,41 @@ BOOL try_acquire_pagelock(PAGE* page, ULONG64 origin_code) {
 /**
  * Inserts the page into the list using the shared list lock scheme alongside the page locks,
  * and releases the lock on the given page before returning
+ * 
+ * We insert pages onto the head
  */
-void insert_page2(PAGE_LISTHEAD* list, PAGE* page) {
-    PAGE* listhead = &list->listhead;
-    PAGE* old_head;
+void insert_page(PAGE_LIST* list, PAGE* page) {
+    PAGE* head = &list->head;
+    PAGE* front_page;
 
     AcquireSRWLockShared(&list->shared_lock);
 
-    if (try_acquire_pagelock(listhead, 49)) {
-        old_head = listhead->flink;
-        if (old_head == listhead || try_acquire_pagelock(old_head, 50)) {
+    if (try_acquire_pagelock(head, 49)) {
+        front_page = head->flink;
+        if (try_acquire_pagelock(front_page, 50)) {
 
             /**
              * At this point, we have all of the pagelocks necessary to insert the page into the list 
              */
-            listhead->flink = page;
-            old_head->blink = page;
-            page->blink = listhead;
-            page->flink = old_head;
+            head->flink = page;
+            front_page->blink = page;
+            page->blink = head;
+            page->flink = front_page;
             InterlockedIncrement64(&list->list_length);
 
 
-            release_pagelock(listhead, 52);
+            release_pagelock(head, 52);
             release_pagelock(page, 53);
 
-            if (old_head != listhead) {
-                release_pagelock(old_head, 54);
+            if (front_page != head) {
+                release_pagelock(front_page, 54);
             }
 
             ReleaseSRWLockShared(&list->shared_lock);
             return;
 
         } else {
-            release_pagelock(listhead, 51);
+            release_pagelock(head, 51);
         }
     }
 
@@ -250,12 +252,12 @@ void insert_page2(PAGE_LISTHEAD* list, PAGE* page) {
      */
     AcquireSRWLockExclusive(&list->shared_lock);
 
-    old_head = listhead->flink;
+    front_page = head->flink;
 
-    listhead->flink = page;
-    old_head->blink = page;
-    page->blink = listhead;
-    page->flink = old_head;
+    head->flink = page;
+    front_page->blink = page;
+    page->blink = head;
+    page->flink = front_page;
     list->list_length++;
 
     ReleaseSRWLockExclusive(&list->shared_lock);
@@ -269,8 +271,8 @@ void insert_page2(PAGE_LISTHEAD* list, PAGE* page) {
  * 
  * Returns a pointer to the popped page if successful with its pagelock acquired, NULL otherwise. 
  */
-PAGE* pop_page2(PAGE_LISTHEAD* list) {
-    PAGE* listhead = &list->listhead;
+PAGE* pop_page2(PAGE_LIST* list) {
+    PAGE* head = &list->head;
     PAGE* page_to_pop;
     PAGE* new_tail;
 
@@ -282,11 +284,11 @@ PAGE* pop_page2(PAGE_LISTHEAD* list) {
     
     AcquireSRWLockShared(&list->shared_lock);
 
-    if (try_acquire_pagelock(listhead, 55)) {
-        page_to_pop = listhead->blink;
+    if (try_acquire_pagelock(head, 55)) {
+        page_to_pop = head->blink;
 
-        if (page_to_pop == listhead) {
-            release_pagelock(listhead, 56);
+        if (page_to_pop == head) {
+            release_pagelock(head, 56);
 
             ReleaseSRWLockShared(&list->shared_lock);
             return NULL;
@@ -302,18 +304,18 @@ PAGE* pop_page2(PAGE_LISTHEAD* list) {
                  * Here, we have all three of the pagelocks required to correctly modify the list
                  */
 
-                release_pagelock(listhead, 61);
+                release_pagelock(head, 61);
                 release_pagelock(new_tail, 62);
 
                 ReleaseSRWLockShared(&list->shared_lock);
                 return page_to_pop;
             } else {    
-                release_pagelock(listhead, 59);
+                release_pagelock(head, 59);
                 release_pagelock(page_to_pop, 60);
             }
 
         } else {
-            release_pagelock(listhead, 51);
+            release_pagelock(head, 51);
         }
     }
 
@@ -353,7 +355,7 @@ static BOOL page_is_in_list(PAGE* page_to_find, PAGE** page_list, ULONG64 list_l
  * This function is intended for use with rescuing a batch of pages from the modified/standby list, 
  * where the batch of pages might not be adjacent to eachother
  */
-void unlink_batch_scattered_pages(PAGE_LISTHEAD* list, PAGE** pages_to_remove, ULONG64 num_pages) {
+void unlink_batch_scattered_pages(PAGE_LIST* list, PAGE** pages_to_remove, ULONG64 num_pages) {
     if (num_pages == 0) {
         return;
     }
@@ -449,8 +451,8 @@ void unlink_batch_scattered_pages(PAGE_LISTHEAD* list, PAGE** pages_to_remove, U
  * 
  * Assumes that you already hold the lock for the page that you are trying to unlink
  */
-void unlink_page2(PAGE_LISTHEAD* list, PAGE* page) {
-    if (page->status == LISTHEAD_STATUS) {
+void unlink_page(PAGE_LIST* list, PAGE* page) {
+    if (page->status == LIST_STATUS) {
         DebugBreak();
     }
 
@@ -463,7 +465,7 @@ void unlink_page2(PAGE_LISTHEAD* list, PAGE* page) {
     behind = page->blink;
 
     if (try_acquire_pagelock(ahead, 63)) {
-        if (ahead == behind || try_acquire_pagelock(behind, 64)) {
+        if (try_acquire_pagelock(behind, 64)) {
 
             /**
              * At this point, we have all of the pagelocks necessary to insert the page into the list 
@@ -473,10 +475,8 @@ void unlink_page2(PAGE_LISTHEAD* list, PAGE* page) {
             InterlockedDecrement64(&list->list_length);
 
             release_pagelock(ahead, 65);
+            release_pagelock(behind, 66);
 
-            if (ahead != behind) {
-                release_pagelock(behind, 66);
-            }
 
             ReleaseSRWLockShared(&list->shared_lock);
             return;
@@ -504,43 +504,43 @@ void unlink_page2(PAGE_LISTHEAD* list, PAGE* page) {
 
 
 /**
- * Inserts the chain of pages between the beginning and end at the listhead,
+ * Inserts the chain of pages between the beginning and end at the head,
  * where the beginning node will be closest to the head 
  * 
  * Takes advantage of the shared lock and pagelock scheme. Does NOT release the pagelocks for each node in the section
  */
-void insert_page_section2(PAGE_LISTHEAD* list, PAGE* beginning, PAGE* end, ULONG64 num_pages) {
+void insert_page_section(PAGE_LIST* list, PAGE* beginning, PAGE* end, ULONG64 num_pages) {
 
-    PAGE* listhead = &list->listhead;
-    PAGE* old_head;
+    PAGE* head = &list->head;
+    PAGE* front_page;
 
     AcquireSRWLockShared(&list->shared_lock);
 
-    if (try_acquire_pagelock(listhead, 68)) {
-        old_head = listhead->flink;
-        if (old_head == listhead || try_acquire_pagelock(old_head, 69)) {
+    if (try_acquire_pagelock(head, 68)) {
+        front_page = head->flink;
+        if (try_acquire_pagelock(front_page, 69)) {
 
             /**
              * At this point, we have all of the pagelocks necessary to insert the page into the list 
              */
-            listhead->flink = beginning;
-            old_head->blink = end;
-            beginning->blink = listhead;
-            end->flink = old_head;
+            head->flink = beginning;
+            front_page->blink = end;
+            beginning->blink = head;
+            end->flink = front_page;
 
             InterlockedAdd64(&list->list_length, num_pages);
 
-            release_pagelock(listhead, 70);
+            release_pagelock(head, 70);
 
-            if (old_head != listhead) {
-                release_pagelock(old_head, 72);
+            if (front_page != head) {
+                release_pagelock(front_page, 72);
             }
 
             ReleaseSRWLockShared(&list->shared_lock);
             return;
 
         } else {
-            release_pagelock(listhead, 71);
+            release_pagelock(head, 71);
         }
     }
 
@@ -552,12 +552,12 @@ void insert_page_section2(PAGE_LISTHEAD* list, PAGE* beginning, PAGE* end, ULONG
      */
     AcquireSRWLockExclusive(&list->shared_lock);
 
-    old_head = listhead->flink;
+    front_page = head->flink;
 
-    listhead->flink = beginning;
-    old_head->blink = end;
-    beginning->blink = listhead;
-    end->flink = old_head;
+    head->flink = beginning;
+    front_page->blink = end;
+    beginning->blink = head;
+    end->flink = front_page;
     
     InterlockedAdd64(&list->list_length, num_pages);
 
@@ -571,7 +571,7 @@ void insert_page_section2(PAGE_LISTHEAD* list, PAGE* beginning, PAGE* end, ULONG
  * 
  * Assumes that the pagelocks for the nodes including and between the beginning and the end are all held
  */
-void remove_page_section2(PAGE_LISTHEAD* list, PAGE* beginning, PAGE* end, ULONG64 num_pages) {
+void remove_page_section(PAGE_LIST* list, PAGE* beginning, PAGE* end, ULONG64 num_pages) {
 
     PAGE* ahead;
     PAGE* behind;
@@ -583,7 +583,7 @@ void remove_page_section2(PAGE_LISTHEAD* list, PAGE* beginning, PAGE* end, ULONG
 
     if (try_acquire_pagelock(ahead, 73)) {
 
-        if (ahead == behind || try_acquire_pagelock(behind, 74)) {
+        if (try_acquire_pagelock(behind, 74)) {
 
             behind->flink = ahead;
             ahead->blink = behind;
@@ -622,82 +622,6 @@ void remove_page_section2(PAGE_LISTHEAD* list, PAGE* beginning, PAGE* end, ULONG
 
 
 /**
- * Inserts the given page to the head of the list
- */
-void insert_page(PAGE* listhead, PAGE* page) {
-    listhead->flink->blink = page;
-    page->flink = listhead->flink;
-    page->blink = listhead;
-    listhead->flink = page;
-}
-
-
-/**
- * Pops a page from the tail of the list
- * 
- * Returns a pointer to the popped page, or NULL if the list is empty
- */
-PAGE* pop_page(PAGE* listhead) {
-    if (listhead->flink == listhead) {
-        return NULL;
-    }
-
-    PAGE* page_to_pop = listhead->blink;
-
-    page_to_pop->blink->flink = listhead;
-    listhead->blink = page_to_pop->blink;
-
-    if (page_to_pop->status == LISTHEAD_STATUS) {
-        DebugBreak();
-    }
-
-    return page_to_pop;
-}
-
-
-/**
- * Unlinks the given page from its list
- */
-void unlink_page(PAGE* page) {
-    if (page->status == LISTHEAD_STATUS) {
-        DebugBreak();
-    }
-
-    page->blink->flink = page->flink;
-    page->flink->blink = page->blink;
-}
-
-
-/**
- * Removes the section of pages from the list they are in,
- * where the beginning node is closest to the head and the end node is closest to the tail
- */
-void remove_page_section(PAGE* beginning, PAGE* end) {
-    
-    PAGE* closer_to_head = beginning->blink;
-    PAGE* closer_to_tail = end->flink;
-
-    closer_to_head->flink = closer_to_tail;
-    closer_to_tail->blink = closer_to_head;
-}
-
-
-/**
- * Inserts the chain of pages between the beginning and end at the listhead,
- * where the beginning node will be closest to the head 
- */
-void insert_page_section(PAGE* listhead, PAGE* beginning, PAGE* end) {
-    PAGE* old_head = listhead->flink;
-
-    listhead->flink = beginning;
-    beginning->blink = listhead;
-
-    end->flink = old_head;
-    old_head->blink = end;
-}
-
-
-/**
  * Returns TRUE if the page is in the free status, FALSE otherwise
  */
 BOOL page_is_free(PAGE page) {
@@ -726,24 +650,26 @@ BOOL page_is_standby(PAGE page) {
  * #######################################
  */
 
+
+DECLSPEC_ALIGN(64) ZEROED_PAGES_LISTS actual_zeroed_lists;
+
 /**
  * Initializes the zeroed frame lists with all of the initial physical memory in the system
  * 
  * Returns a pointer to the zero lists if successful, NULL otherwise
  */
 ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR physical_frame_numbers, ULONG64 num_physical_frames) {
-    ZEROED_PAGES_LISTS* zeroed_lists = (ZEROED_PAGES_LISTS*) malloc(sizeof(ZEROED_PAGES_LISTS));
-
-    if (zeroed_lists == NULL) {
-        fprintf(stderr, "Unable to allocate memory for zeroed_lists");
-        return NULL;
-    }
+    ZEROED_PAGES_LISTS* zeroed_lists = &actual_zeroed_lists;
 
     for (int new_list = 0; new_list < NUM_CACHE_SLOTS; new_list++) {
         
-        zeroed_lists->listheads[new_list].listhead.status = LISTHEAD_STATUS;
-        zeroed_lists->listheads[new_list].listhead.flink = &zeroed_lists->listheads[new_list].listhead;
-        zeroed_lists->listheads[new_list].listhead.blink = &zeroed_lists->listheads[new_list].listhead;
+        zeroed_lists->listheads[new_list].head.status = LIST_STATUS;
+        zeroed_lists->listheads[new_list].head.flink = &zeroed_lists->listheads[new_list].tail;
+        zeroed_lists->listheads[new_list].head.blink = &zeroed_lists->listheads[new_list].tail;
+
+        zeroed_lists->listheads[new_list].tail.status = LIST_STATUS;
+        zeroed_lists->listheads[new_list].tail.flink = &zeroed_lists->listheads[new_list].head;
+        zeroed_lists->listheads[new_list].tail.blink = &zeroed_lists->listheads[new_list].head;
 
         zeroed_lists->listheads[new_list].list_length = 0;
 
@@ -757,9 +683,7 @@ ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR 
         // Modulo operation based on the pfn to put it alongside other cache-colliding pages
         int listhead_idx = frame_number % NUM_CACHE_SLOTS;
 
-        PAGE_LISTHEAD* relevant_listhead = &zeroed_lists->listheads[listhead_idx];
-
-        PAGE* listhead_page = &relevant_listhead->listhead;
+        PAGE_LIST* relevant_listhead = &zeroed_lists->listheads[listhead_idx];
         
         PAGE* zero_frame = page_storage_base + frame_number;
 
@@ -768,7 +692,9 @@ ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR 
             return NULL;
         }
 
-        insert_page(listhead_page, zero_frame);
+        // When we insert a page, the function releases the pagelock - so we need to be holding it to not trigger any asserts
+        acquire_pagelock(zero_frame, 0xFFFFFF);
+        insert_page(relevant_listhead, zero_frame);
 
         zero_frame->status = ZERO_STATUS;
 
@@ -787,6 +713,7 @@ ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR 
  * ##########################
  */
 
+DECLSPEC_ALIGN(64) FREE_FRAMES_LISTS actual_free_frames;
 
 /**
  * Creates the free frames list structure and its associated listheads and locks
@@ -794,17 +721,17 @@ ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR 
  * Returns a memory allocated pointer to a FREE_FRAMES_LISTS struct, or NULL if an error occurs
  */
 FREE_FRAMES_LISTS* initialize_free_frames() {
-    FREE_FRAMES_LISTS* free_frames = (FREE_FRAMES_LISTS*) malloc(sizeof(FREE_FRAMES_LISTS));
-
-    if (free_frames == NULL) {
-        fprintf(stderr, "Unable to allocate memory for free frames lists");
-        return NULL;
-    }
+    FREE_FRAMES_LISTS* free_frames = &actual_free_frames;
 
     for (int new_list = 0; new_list < NUM_CACHE_SLOTS; new_list++) {
-        free_frames->listheads[new_list].listhead.status = LISTHEAD_STATUS;
-        free_frames->listheads[new_list].listhead.flink = &free_frames->listheads[new_list].listhead;
-        free_frames->listheads[new_list].listhead.blink = &free_frames->listheads[new_list].listhead;
+        free_frames->listheads[new_list].head.status = LIST_STATUS;
+        free_frames->listheads[new_list].head.flink = &free_frames->listheads[new_list].tail;
+        free_frames->listheads[new_list].head.blink = &free_frames->listheads[new_list].tail;
+
+        free_frames->listheads[new_list].tail.status = LIST_STATUS;
+        free_frames->listheads[new_list].tail.flink = &free_frames->listheads[new_list].head;
+        free_frames->listheads[new_list].tail.blink = &free_frames->listheads[new_list].head;
+
         free_frames->listheads[new_list].list_length = 0;
 
         InitializeSRWLock(&free_frames->listheads[new_list].shared_lock);
@@ -822,23 +749,28 @@ FREE_FRAMES_LISTS* initialize_free_frames() {
  * #######################
  */
 
+DECLSPEC_ALIGN(64) PAGE_LIST actual_modified_list;
 
 /**
  * Allocates memory for and initializes a modified list struct
  * 
  * Returns a pointer to the modified list or NULL upon error
  */
-PAGE_LISTHEAD* initialize_modified_list() {
-    PAGE_LISTHEAD* modified_list = (PAGE_LISTHEAD*) malloc(sizeof(PAGE_LISTHEAD));
+PAGE_LIST* initialize_modified_list() {
+    PAGE_LIST* modified_list = &actual_modified_list;
 
     if (modified_list == NULL) {
         fprintf(stderr, "Unable to allocate memory for modified list in initialize_modified_list\n");
         return NULL;
     }
 
-    modified_list->listhead.status = LISTHEAD_STATUS;
-    modified_list->listhead.flink = &modified_list->listhead;
-    modified_list->listhead.blink = &modified_list->listhead;    
+    modified_list->head.status = LIST_STATUS;
+    modified_list->head.flink = &modified_list->tail;
+    modified_list->head.blink = &modified_list->tail;    
+
+    modified_list->tail.status = LIST_STATUS;
+    modified_list->tail.flink = &modified_list->head;
+    modified_list->tail.blink = &modified_list->head;    
 
     modified_list->list_length = 0;
 
@@ -847,48 +779,6 @@ PAGE_LISTHEAD* initialize_modified_list() {
     return modified_list;
 }
 
-#if 0
-/**
- * Adds the given page to the modified list (at the head)
- * 
- * Returns SUCCESS if there are no issues, ERROR otherwise
- */
-int modified_add_page(PAGE* page, PAGE_LISTHEAD* modified_list) {
-    if (page == NULL || modified_list == NULL) {
-        fprintf(stderr, "NULL page or modified list given to modified_add_page\n");
-        return ERROR;
-    }
-
-    insert_page(&modified_list->listhead, page);
-    
-    page->status = MODIFIED_STATUS;
-    modified_list->list_length += 1;
-
-    return SUCCESS;
-}
-
-
-/**
- * Pops the oldest page (tail) from the modified list and returns it
- * 
- * Returns NULL upon any error or if the list is empty
- */
-PAGE* modified_pop_page(PAGE_LISTHEAD* modified_list) {
-    if (modified_list == NULL) {
-        fprintf(stderr, "NULL standby list given to modified_pop_page\n");
-        return NULL;
-    }
-
-    PAGE* popped = pop_page(&modified_list->listhead);
-    
-    if (popped != NULL) {
-        modified_list->list_length -= 1;
-    }
-
-    return popped;
-}   
-#endif
-
 
 /**
  * ######################
@@ -896,24 +786,23 @@ PAGE* modified_pop_page(PAGE_LISTHEAD* modified_list) {
  * ######################
  */
 
-DECLSPEC_ALIGN(64) PAGE_LISTHEAD actual_standby_list;
+DECLSPEC_ALIGN(64) PAGE_LIST actual_standby_list;
 
 /**
  * Allocates memory for and initializes a standby list struct
  * 
  * Returns a pointer to the standby list or NULL upon error
  */
-PAGE_LISTHEAD* initialize_standby_list() {
-    #if 0
-    PAGE_LISTHEAD* standby_list = &actual_standby_list; //(PAGE_LISTHEAD*) malloc(sizeof(PAGE_LISTHEAD));
-    #else
-    PAGE_LISTHEAD* standby_list = (PAGE_LISTHEAD*) malloc(sizeof(PAGE_LISTHEAD));
-    #endif
+PAGE_LIST* initialize_standby_list() {
+    PAGE_LIST* standby_list = &actual_standby_list;
 
+    standby_list->head.status = LIST_STATUS;
+    standby_list->head.flink = &standby_list->tail;
+    standby_list->head.blink = &standby_list->tail;
 
-    standby_list->listhead.status = LISTHEAD_STATUS;
-    standby_list->listhead.flink = &standby_list->listhead;
-    standby_list->listhead.blink = &standby_list->listhead;
+    standby_list->tail.status = LIST_STATUS;
+    standby_list->tail.flink = &standby_list->head;
+    standby_list->tail.blink = &standby_list->head;
     
     standby_list->list_length = 0;
 
@@ -921,25 +810,3 @@ PAGE_LISTHEAD* initialize_standby_list() {
 
     return standby_list;
 }
-
-#if 0
-/**
- * Adds the given page to the standby list
- * 
- * Returns SUCCESS if there are no issues, ERROR otherwise
- */
-int standby_add_page(PAGE* page, STANDBY_LIST* standby_list) {
-    if (page == NULL || standby_list == NULL) {
-        fprintf(stderr, "NULL page or standby list given to standby_add_page\n");
-        return ERROR;
-    }
-    
-    page->status = STANDBY_STATUS;
-
-    insert_page(&standby_list->listhead, page);
-
-    standby_list->list_length += 1;
-
-    return SUCCESS;
-}
-#endif

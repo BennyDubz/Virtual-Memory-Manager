@@ -14,6 +14,9 @@ static int initialize_disk_write(DISK* disk, MEM_EXTENDED_PARAMETER* vmem_parame
 static int initialize_disk_read(DISK* disk, MEM_EXTENDED_PARAMETER* vmem_parameters);
 
 
+DECLSPEC_ALIGN(64) DISK actual_disk;
+
+
 /**
  * Initializes the disk and commits the memory for it in the simulating process's virtual address space
  * 
@@ -23,12 +26,7 @@ static int initialize_disk_read(DISK* disk, MEM_EXTENDED_PARAMETER* vmem_paramet
  * Returns NULL upon any error
  */
 DISK* initialize_disk(MEM_EXTENDED_PARAMETER* vmem_parameters) {
-    DISK* disk = (DISK*) malloc(sizeof(DISK));
-
-    if (disk == NULL) {
-        fprintf(stderr, "Unable to allocate memory for disk struct in initialize_disk\n");
-        return NULL;
-    }
+    DISK* disk = &actual_disk;
 
     PULONG_PTR disk_base = VirtualAlloc(NULL, DISK_SIZE, 
                         MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);

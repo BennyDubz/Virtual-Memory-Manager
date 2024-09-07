@@ -15,9 +15,6 @@
 // For development while switching between generic linked list nodes and keeping the flink/blink inside the page
 #define PAGE_LINKED_LISTS 1
 
-// For testing while we implement the use of the shared lock in the modified list
-#define SRW_MOD 1
-
 
 #include <windows.h>
 #include "../hardware.h"
@@ -30,7 +27,7 @@
  * #################################################
  */
 
-#define LISTHEAD_STATUS 0
+#define LIST_STATUS 0
 #define ZERO_STATUS 1
 #define FREE_STATUS 2
 #define MODIFIED_STATUS 3
@@ -98,7 +95,10 @@ typedef struct {
     // These lists and their contents might be hot, so at least trying to keep them in different cache lines
     // should help reduce collisons
     DECLSPEC_ALIGN(64)
-    PAGE listhead;
+    PAGE head;
+
+    DECLSPEC_ALIGN(64)
+    PAGE tail;
 
     DECLSPEC_ALIGN(64)
     ULONG64 list_length;
@@ -106,7 +106,7 @@ typedef struct {
     // Having both the shared lock and the normal critical section will help with the transition while implementing both
     DECLSPEC_ALIGN(64)
     SRWLOCK shared_lock;
-} PAGE_LISTHEAD;
+} PAGE_LIST;
 
 
 #if DEBUG_PAGELOCK
@@ -164,7 +164,7 @@ BOOL try_acquire_pagelock(PAGE* page, ULONG64 origin_code);
  * Inserts the page into the list using the shared list lock scheme alongside the page locks,
  * and releases the lock on the given page before returning
  */
-void insert_page2(PAGE_LISTHEAD* list, PAGE* page);
+void insert_page(PAGE_LIST* list, PAGE* page);
 
 
 #if 0
@@ -175,7 +175,7 @@ void insert_page2(PAGE_LISTHEAD* list, PAGE* page);
  * 
  * Returns a pointer to the popped page if successful with its pagelock acquired, NULL otherwise. 
  */
-PAGE* pop_page2(PAGE_LISTHEAD* list);
+PAGE* pop_page2(PAGE_LIST* list);
 #endif
 
 
@@ -187,7 +187,7 @@ PAGE* pop_page2(PAGE_LISTHEAD* list);
  * This function is intended for use with rescuing a batch of pages from the modified/standby list, 
  * where the batch of pages might not be adjacent to eachother
  */
-void unlink_batch_scattered_pages(PAGE_LISTHEAD* list, PAGE** pages_to_remove, ULONG64 num_pages);
+void unlink_batch_scattered_pages(PAGE_LIST* list, PAGE** pages_to_remove, ULONG64 num_pages);
 
 
 /**
@@ -196,16 +196,16 @@ void unlink_batch_scattered_pages(PAGE_LISTHEAD* list, PAGE** pages_to_remove, U
  * 
  * Assumes that you already hold the lock for the page that you are trying to unlink
  */
-void unlink_page2(PAGE_LISTHEAD* list, PAGE* page);
+void unlink_page(PAGE_LIST* list, PAGE* page);
 
 
 /**
- * Inserts the chain of pages between the beginning and end at the listhead,
+ * Inserts the chain of pages between the beginning and end at the head,
  * where the beginning node will be closest to the head 
  * 
  * Takes advantage of the shared lock and pagelock scheme. Does NOT release the pagelocks for each node in the section
  */
-void insert_page_section2(PAGE_LISTHEAD* list, PAGE* beginning, PAGE* end, ULONG64 num_pages);
+void insert_page_section(PAGE_LIST* list, PAGE* beginning, PAGE* end, ULONG64 num_pages);
 
 
 /**
@@ -214,42 +214,7 @@ void insert_page_section2(PAGE_LISTHEAD* list, PAGE* beginning, PAGE* end, ULONG
  * 
  * Assumes that the pagelocks for the nodes including and between the beginning and the end are all held
  */
-void remove_page_section2(PAGE_LISTHEAD* list, PAGE* beginning, PAGE* end, ULONG64 num_pages);
-
-
-/**
- * Inserts the given page to the head of the list
- */
-void insert_page(PAGE* listhead, PAGE* page);
-
-
-/**
- * Pops a page from the tail of the list
- * 
- * Returns a pointer to the popped page, or NULL if the list is empty
- */
-PAGE* pop_page(PAGE* listhead);
-
-
-/**
- * Unlinks the given page from its list
- */
-void unlink_page(PAGE* page);
-
-
-/**
- * Removes the section of pages from the list they are in,
- * where the beginning node is closest to the head and the end node is closest to the tail
- */
-void remove_page_section(PAGE* beginning, PAGE* end);
-
-
-/**
- * Inserts the chain of pages between the beginning and end at the listhead,
- * where the beginning node will be closest to the head 
- */
-void insert_page_section(PAGE* listhead, PAGE* beginning, PAGE* end);
-
+void remove_page_section(PAGE_LIST* list, PAGE* beginning, PAGE* end, ULONG64 num_pages);
 
 
 /**
@@ -290,7 +255,7 @@ BOOL page_is_standby(PAGE page);
  *      to each cache slot
  */
 typedef struct {
-    PAGE_LISTHEAD listheads[NUM_CACHE_SLOTS];
+    PAGE_LIST listheads[NUM_CACHE_SLOTS];
     
     volatile ULONG64 total_available;
     
@@ -319,7 +284,7 @@ ZEROED_PAGES_LISTS* initialize_zeroed_lists(PAGE* page_storage_base, PULONG_PTR 
  * An array of free lists whose length corresponds to the size of the cache
  */
 typedef struct {
-    PAGE_LISTHEAD listheads[NUM_CACHE_SLOTS];   
+    PAGE_LIST listheads[NUM_CACHE_SLOTS];   
 
     volatile ULONG64 total_available;
     
@@ -347,7 +312,7 @@ FREE_FRAMES_LISTS* initialize_free_frames();
  * 
  * Returns a pointer to the modified list or NULL upon error
  */
-PAGE_LISTHEAD* initialize_modified_list();
+PAGE_LIST* initialize_modified_list();
 
 
 /**
@@ -362,7 +327,7 @@ PAGE_LISTHEAD* initialize_modified_list();
  * 
  * Returns a pointer to the standby list or NULL upon error
  */
-PAGE_LISTHEAD* initialize_standby_list();
+PAGE_LIST* initialize_standby_list();
 
 #if 0
 /**

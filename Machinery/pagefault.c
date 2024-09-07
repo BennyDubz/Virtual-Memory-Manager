@@ -458,28 +458,7 @@ static int handle_unaccessed_pte_fault(PTE* accessed_pte, PAGE** result_page_sto
     // If we get fewer pages than there are PTEs that we speculated on, they will be ignored
     *num_ptes_to_connect_storage = num_pages_acquired;
 
-    return SUCCESS;
-
-
-    #if 0
-    /**
-     * In this case, all we need to do is get a valid page and return it - nothing else
-     */
-    PAGE* allocated_page = find_available_page(TRUE);
-
-    if (allocated_page == NULL) {
-
-        // The thread will sleep until pages are available
-        wait_for_pages_signalling();
-
-        return NO_AVAILABLE_PAGES_FAIL;
-    }
-
-    *ptes_to_connect_storage = accessed_pte;
-    *result_page_storage = allocated_page;
-    return SUCCESS;
-    #endif
-    
+    return SUCCESS;    
 }
 
 
@@ -638,61 +617,6 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
     return SUCCESS;    
     #endif
 }
-
-
-#if 0
-/**
- * Sets the being_read_from_disk bit in the accessed PTE to 1 if possible, otherwise releases the lock and spins until the read is complete
- * 
- * This is certainly not perfect - as we don't like the other CPU spinning while this one is being read from disk... but it is a temporary
- * way to reduce contention on the entire PTE lock. Ideally, collisons on just this single PTE should be rare so this should be uncommon
- */
-static BOOL acquire_disk_pte_read_rights(PTE* accessed_pte, PTE local_pte) {
-    PTE_LOCKSECTION* pte_locksection = pte_to_locksection(accessed_pte);
-    BOOL wait_until_change = FALSE;
-
-    // If the local PTE is already indicating that it is being read from the disk, we should just spin and not enter the critical section
-    if (local_pte.disk_format.being_read_from_disk == PTE_NOT_BEING_READ_FROM_DISK) {
-        EnterCriticalSection(&pte_locksection->lock);
-
-        // Someone else is reading this disk PTE right now
-        if (is_disk_format(read_pte_contents(accessed_pte))) {
-            if (accessed_pte->disk_format.being_read_from_disk == PTE_BEING_READ_FROM_DISK) {
-                wait_until_change = TRUE;
-            } else {
-                PTE pte_contents;
-                pte_contents.complete_format = 0;
-                pte_contents.disk_format.pagefile_idx = local_pte.disk_format.pagefile_idx;
-                pte_contents.disk_format.being_read_from_disk = PTE_BEING_READ_FROM_DISK;
-
-                local_pte = pte_contents;
-                write_pte_contents(accessed_pte, pte_contents);
-            }
-        } else {
-            // The disk read is already complete! We can just return now
-            LeaveCriticalSection(&pte_locksection->lock);
-            return FALSE;
-        }
-
-        LeaveCriticalSection(&pte_locksection->lock);
-    } else {
-        // The local PTE indicates that we should spin until the disk read is finished
-        wait_until_change = TRUE;
-    }
-    
-    // We would like some sort of set event here... but this is the interim solution. Collisions here should be very rare
-    if (wait_until_change) {
-        while (ptes_are_equal(read_pte_contents(accessed_pte), local_pte)) {
-
-        }
-        //WaitOnAddress(accessed_pte, &local_pte, sizeof(PTE), INFINITE);
-        return FALSE;
-    }
-
-    return TRUE;
-
-}
-#endif
 
 
 /**

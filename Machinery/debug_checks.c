@@ -45,8 +45,8 @@ int page_is_isolated(PAGE* page) {
 
     // Check the modified list
     EnterCriticalSection(&modified_list->lock);
-    curr_node = modified_list->listhead->flink;
-    while (curr_node != modified_list->listhead) {
+    curr_node = modified_list->head->flink;
+    while (curr_node != modified_list->head) {
         if (curr_node->item == page) {
             LeaveCriticalSection(&modified_list->lock);
             return IN_MODIIFED;
@@ -60,8 +60,8 @@ int page_is_isolated(PAGE* page) {
 
     // Check the standby list
     EnterCriticalSection(&standby_list->lock);
-    curr_node = standby_list->listhead->flink;
-    while (curr_node != standby_list->listhead) {
+    curr_node = standby_list->head->flink;
+    while (curr_node != standby_list->head) {
         if (curr_node->item == page) {
             LeaveCriticalSection(&standby_list->lock);
             return IN_STANDBY;

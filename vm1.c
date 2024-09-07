@@ -18,7 +18,7 @@
 #define TOTAL_ACCESS_AMOUNT         (MB(10))
 
 // How frequently in milliseconds we print out all of the information about the simulation and our current progress
-#define PRINT_FREQUECY_MS          100 
+#define PRINT_FREQUECY_MS          2000 
 
 /**
  * 1 thread - 10mb - 21.1 seconds
