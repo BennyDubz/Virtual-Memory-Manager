@@ -67,15 +67,6 @@ ULONG64 allocate_many_disk_slots(ULONG64* result_storage, ULONG64 num_disk_slots
 
 
 /**
- * Writes an open disk idx into the result storage pointer
- * 
- * Returns SUCCESS if we successfully wrote a disk idx, ERROR otherwise (may be empty)
- * 
- */
-int allocate_single_disk_slot(ULONG64* result_storage);
-
-
-/**
  * Modifies the bitmap on the disk to indicate the given disk slot is free
  * 
  * Returns SUCCESS upon no issues, ERROR otherwise

@@ -267,7 +267,6 @@ static ULONG64 acquire_batch_disk_readslots(ULONG64* disk_read_indices_storage, 
 long disk_refresh_ongoing = FALSE; // We use the long for interlocked operation parameters
 #endif
 
-
 static void refresh_disk_readslots(THREAD_DISK_READ_RESOURCES* thread_disk_resources) {
     
     // Synchronize whether we or someone else is refreshing the diskslots
@@ -510,66 +509,49 @@ int read_pages_from_disk(PAGE** open_pages, PTE** ptes_to_read, ULONG64 num_to_r
 ULONG64 allocate_many_disk_slots(ULONG64* result_storage, ULONG64 num_disk_slots) {
     ULONG64 section_start;
     ULONG64 open_disk_idx;
-    BOOL lock_result; 
     ULONG64 slots_in_this_section;
     ULONG64 num_slots_allocated = 0;
 
-
-    // Go through each lock section and **try** to enter the critical sections
-    for (ULONG64 lock_section = 0; lock_section < disk->num_locks; lock_section++) {
-        section_start = lock_section * disk->slots_per_lock;
-
-        /**
-         * First, we only TRY to enter the critical sections - but then we wait the second time around
-         * 
-         * This ensures faster response times in ideal cases, and could spread out the disk slot allocation across
-         * multiple lock sections, hopefully reducing contension for locks 
-         */
+    for (ULONG64 section = 0; section < disk->num_disk_sections; section++) {
+        section_start = section * disk->slots_per_section;
 
         // Skip over empty disk sections
-        if (disk->open_slot_counts[lock_section] == 0) {
-            continue;
-        }
-        
-        lock_result = TryEnterCriticalSection(&disk->disk_slot_locks[lock_section]);
-
-        if (lock_result == FALSE) {
+        if (disk->open_slot_counts[section] == 0) {
             continue;
         }
 
-        // Skip over empty disk sections
-        if (disk->open_slot_counts[lock_section] == 0) {
-            LeaveCriticalSection(&disk->disk_slot_locks[lock_section]);
-            continue;
-        }
-
-        // Now we are guaranteed to find a disk slot somewhere in this section - take as many as possible
-        for (ULONG64 disk_idx = section_start; disk_idx < section_start + disk->slots_per_lock; disk_idx++) {
+        for (ULONG64 disk_idx = section_start; disk_idx < section_start + disk->slots_per_section; disk_idx++) {
             if (disk->disk_slot_statuses[disk_idx] == DISK_USEDSLOT) continue;
+
+            // Currently, we do not have threads racing to acquire disk storage slots. This would protect us if that changed
+            if (InterlockedExchange8(&disk->disk_slot_statuses[disk_idx], DISK_USEDSLOT) == DISK_USEDSLOT) {
+                continue;
+            }
 
             // Now we have a disk slot to use
             open_disk_idx = disk_idx;
             disk->disk_slot_statuses[disk_idx] = DISK_USEDSLOT;
-            disk->open_slot_counts[lock_section] -= 1;
+            disk->open_slot_counts[section] -= 1;
             InterlockedDecrement64(&disk->total_available_slots);
 
             result_storage[num_slots_allocated] = disk_idx;
             num_slots_allocated++;
 
             // If we have found enough slots, or there are none left in this section, break out
-            if (num_slots_allocated == num_disk_slots || disk->open_slot_counts[lock_section] == 0) break;
+            if (num_slots_allocated == num_disk_slots || disk->open_slot_counts[section] == 0) break;
         }
-
-        LeaveCriticalSection(&disk->disk_slot_locks[lock_section]);
 
         if (num_slots_allocated == num_disk_slots) return num_disk_slots;
     }
 
+    return num_slots_allocated;
+
+    #if 0
     /**
      * Now, we are forced to wait for disk lock sections
      */
     for (ULONG64 lock_section = 0; lock_section < disk->num_locks; lock_section++) {
-        section_start = lock_section * disk->slots_per_lock;
+        section_start = lock_section * disk->slots_per_section;
         
         // This will block the thread until we get into the critical section, and is the only part
         // that differs from the previous loop
@@ -582,7 +564,7 @@ ULONG64 allocate_many_disk_slots(ULONG64* result_storage, ULONG64 num_disk_slots
         }
 
         // Now we are guaranteed to find a disk slot somewhere in this section
-        for (ULONG64 disk_idx = section_start; disk_idx < section_start + disk->slots_per_lock; disk_idx++) {
+        for (ULONG64 disk_idx = section_start; disk_idx < section_start + disk->slots_per_section; disk_idx++) {
             if (disk->disk_slot_statuses[disk_idx] == DISK_USEDSLOT) continue;
 
             // Now we have a disk slot to use
@@ -604,102 +586,7 @@ ULONG64 allocate_many_disk_slots(ULONG64* result_storage, ULONG64 num_disk_slots
 
 
     return num_slots_allocated;
-}
-
-/**
- * Writes an open disk idx into the result storage pointer and sets the disk slot to DISK_USEDSLOT
- * 
- * Returns SUCCESS if we successfully wrote a disk idx, ERROR otherwise (may be empty)
- */
-int allocate_single_disk_slot(ULONG64* result_storage) {
-    //
-    // if (disk->num_open_slots == 0) {
-    //     return ERROR;
-    // }
-    ULONG64 section_start;
-    ULONG64 open_disk_idx;
-    BOOL lock_result; 
-    ULONG64 disk_slots_per_lock = DISK_STORAGE_SLOTS / disk->num_locks;
-
-    // Go through each lock section and **try** to enter the critical sections
-    for (ULONG64 lock_section = 0; lock_section < disk->num_locks; lock_section++) {
-        section_start = lock_section * disk_slots_per_lock;
-
-        /**
-         * First, we only TRY to enter the critical sections - but then we wait the second time around
-         * 
-         * This ensures faster response times in ideal cases, and could spread out the disk slot allocation across
-         * multiple lock sections, hopefully reducing contension for locks 
-         */
-        
-        lock_result = TryEnterCriticalSection(&disk->disk_slot_locks[lock_section]);
-
-        if (lock_result == FALSE) {
-            continue;
-        }
-
-        // Skip over empty disk sections
-        if (disk->open_slot_counts[lock_section] == 0) {
-            LeaveCriticalSection(&disk->disk_slot_locks[lock_section]);
-            continue;
-        }
-
-        // Now we are guaranteed to find a disk slot somewhere in this section
-        for (ULONG64 disk_idx = section_start; disk_idx < section_start + disk_slots_per_lock; disk_idx++) {
-            if (disk->disk_slot_statuses[disk_idx] == DISK_USEDSLOT) continue;
-
-            // Now we have a disk slot to use
-            open_disk_idx = disk_idx;
-            disk->disk_slot_statuses[disk_idx] = DISK_USEDSLOT;
-            disk->open_slot_counts[lock_section] -= 1;
-
-            break;
-        }
-
-        LeaveCriticalSection(&disk->disk_slot_locks[lock_section]);
-
-        *result_storage = open_disk_idx;
-        return SUCCESS;
-    }
-
-    /**
-     * Now, we are forced to wait for disk lock sections
-     * 
-     */
-    for (ULONG64 lock_section = 0; lock_section < disk->num_locks; lock_section++) {
-        section_start = lock_section * disk_slots_per_lock;
-        
-        // This will block the thread until we get into the critical section, and is the only part
-        // that differs from the previous loop
-        EnterCriticalSection(&disk->disk_slot_locks[lock_section]);
-
-        // Skip over empty disk sections
-        if (disk->open_slot_counts[lock_section] == 0) {
-            LeaveCriticalSection(&disk->disk_slot_locks[lock_section]);
-            continue;
-        }
-
-        // Now we are guaranteed to find a disk slot somewhere in this section
-        for (ULONG64 disk_idx = section_start; disk_idx < section_start + disk_slots_per_lock; disk_idx++) {
-            if (disk->disk_slot_statuses[disk_idx] == DISK_USEDSLOT) continue;
-
-            // Now we have a disk slot to use
-            open_disk_idx = disk_idx;
-            disk->disk_slot_statuses[disk_idx] = DISK_USEDSLOT;
-            disk->open_slot_counts[lock_section] -= 1;
-            InterlockedDecrement64(&disk->total_available_slots);
-
-            break;
-        }
-
-        LeaveCriticalSection(&disk->disk_slot_locks[lock_section]);
-        custom_spin_assert(open_disk_idx != 0);
-        *result_storage = open_disk_idx;
-        return SUCCESS;
-    }
-
-    // The disk is empty
-    return ERROR;
+    #endif
 }
 
 
@@ -723,16 +610,17 @@ int release_single_disk_slot(ULONG64 disk_idx) {
 
     // singly_allocated_disk_idx_check(disk_idx);
 
-    EnterCriticalSection(disk_idx_to_lock(disk_idx));
+    // EnterCriticalSection(disk_idx_to_lock(disk_idx));
 
-    disk->disk_slot_statuses[disk_idx] = DISK_FREESLOT;
-    disk->open_slot_counts[disk_idx / disk->slots_per_lock] ++;
+    InterlockedExchange8(&disk->disk_slot_statuses[disk_idx], DISK_FREESLOT);
+
+    InterlockedIncrement64(&disk->open_slot_counts[disk_idx / disk->slots_per_section]);
 
     if (InterlockedIncrement64(&disk->total_available_slots) == 0) {
         SetEvent(disk_open_slots_event);
     }
 
-    LeaveCriticalSection(disk_idx_to_lock(disk_idx));
+    // LeaveCriticalSection(disk_idx_to_lock(disk_idx));
     
 
     return SUCCESS;

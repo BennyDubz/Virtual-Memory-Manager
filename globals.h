@@ -141,7 +141,11 @@ extern HANDLE disk_read_available_event;
 
 extern HANDLE disk_open_slots_event;
 
+extern HANDLE refresh_lists_event;
+
 extern ULONG64 num_worker_threads;
+
+extern HANDLE shutdown_event;
 
 extern HANDLE* threads;
 

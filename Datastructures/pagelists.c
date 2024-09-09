@@ -258,7 +258,7 @@ void insert_page(PAGE_LIST* list, PAGE* page) {
     front_page->blink = page;
     page->blink = head;
     page->flink = front_page;
-    list->list_length++;
+    InterlockedIncrement64(&list->list_length);
 
     ReleaseSRWLockExclusive(&list->shared_lock);
 }
@@ -391,6 +391,9 @@ void unlink_batch_scattered_pages(PAGE_LIST* list, PAGE** pages_to_remove, ULONG
                 ahead->blink = behind;
                 behind->flink = ahead;
 
+                curr_page->flink = NULL;
+                curr_page->blink = NULL;
+
                 /**
                  * We need to check that we acquired pagelocks that were NOT in our list already before we release them
                  */
@@ -436,6 +439,9 @@ void unlink_batch_scattered_pages(PAGE_LIST* list, PAGE** pages_to_remove, ULONG
         ahead->blink = behind;
         behind->flink = ahead;
 
+        curr_page->flink = NULL;
+        curr_page->blink = NULL;
+
         page_idx++;
     }
     
@@ -474,6 +480,9 @@ void unlink_page(PAGE_LIST* list, PAGE* page) {
             behind->flink = ahead;
             InterlockedDecrement64(&list->list_length);
 
+            page->flink = NULL;
+            page->blink = NULL;
+
             release_pagelock(ahead, 65);
             release_pagelock(behind, 66);
 
@@ -495,9 +504,12 @@ void unlink_page(PAGE_LIST* list, PAGE* page) {
     ahead = page->flink;
     behind = page->blink;
 
+    page->flink = NULL;
+    page->blink = NULL;
+
     ahead->blink = behind;
     behind->flink = ahead;
-    list->list_length--;
+    InterlockedDecrement64(&list->list_length);
 
     ReleaseSRWLockExclusive(&list->shared_lock);
 }   
@@ -505,9 +517,11 @@ void unlink_page(PAGE_LIST* list, PAGE* page) {
 
 /**
  * Inserts the chain of pages between the beginning and end at the head,
- * where the beginning node will be closest to the head 
+ * where the beginning node will be closest to the head. 
  * 
- * Takes advantage of the shared lock and pagelock scheme. Does NOT release the pagelocks for each node in the section
+ * Releases all of the pagelocks for the pages we add into the list
+ * 
+ * Takes advantage of the shared lock and pagelock scheme
  */
 void insert_page_section(PAGE_LIST* list, PAGE* beginning, PAGE* end, ULONG64 num_pages) {
 
@@ -517,7 +531,10 @@ void insert_page_section(PAGE_LIST* list, PAGE* beginning, PAGE* end, ULONG64 nu
     AcquireSRWLockShared(&list->shared_lock);
 
     if (try_acquire_pagelock(head, 68)) {
+
+        // this might be the tail of the list if it is empty
         front_page = head->flink;
+
         if (try_acquire_pagelock(front_page, 69)) {
 
             /**
@@ -531,10 +548,16 @@ void insert_page_section(PAGE_LIST* list, PAGE* beginning, PAGE* end, ULONG64 nu
             InterlockedAdd64(&list->list_length, num_pages);
 
             release_pagelock(head, 70);
+            release_pagelock(front_page, 72);
 
-            if (front_page != head) {
-                release_pagelock(front_page, 72);
+            PAGE* curr_page = beginning;
+
+            while (curr_page != end) {
+                release_pagelock(curr_page, 84);
+                curr_page = curr_page->flink;
             }
+
+            release_pagelock(end, 85);
 
             ReleaseSRWLockShared(&list->shared_lock);
             return;
@@ -560,6 +583,14 @@ void insert_page_section(PAGE_LIST* list, PAGE* beginning, PAGE* end, ULONG64 nu
     end->flink = front_page;
     
     InterlockedAdd64(&list->list_length, num_pages);
+
+    PAGE* curr_page = beginning;
+    while (curr_page != end) {
+        release_pagelock(curr_page, 84);
+        curr_page = curr_page->flink;
+    }
+
+    release_pagelock(end, 85);
 
     ReleaseSRWLockExclusive(&list->shared_lock);
 }

@@ -198,9 +198,10 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
         num_ptes_to_connect = num_ptes_not_changed;
     }
     
-    if (is_disk_format(local_pte) == FALSE) {
-        commit_pages(allocated_pages, ptes_to_connect, accessed_pte, num_ptes_to_connect, access_type);
-    }
+
+    // if (is_disk_format(local_pte) == FALSE) {
+    commit_pages(allocated_pages, ptes_to_connect, accessed_pte, num_ptes_to_connect, access_type);
+    // }
 
     #if 0
     // We are writing to the page - this may communicate to the modified writer that they need to return pagefile space
@@ -357,18 +358,6 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
         return VALID_PTE_RACE_CONTIION_FAIL;
     }
 
-    #if 0
-    EnterCriticalSection(pte_lock);
-
-    if (ptes_are_equal(local_pte, *accessed_pte) == FALSE) {
-        LeaveCriticalSection(pte_lock);
-        release_pagelock(curr_page, 35);
-        return VALID_PTE_RACE_CONTIION_FAIL;
-    }
-    #endif
-
-    // PAGE* curr_page = pfn_to_page(local_pte.memory_format.frame_number);
-
     // See if we need to change the permissions to PAGE_READWRITE
     if (access_type == WRITE_ACCESS && local_pte.memory_format.protections == PTE_PROTREAD) {
         ULONG64 pfn = page_to_pfn(curr_page);
@@ -400,10 +389,6 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
     write_pte_contents(accessed_pte, pte_contents);
 
     release_pagelock(curr_page, 34);
-
-    #if 0
-    LeaveCriticalSection(pte_lock);
-    #endif
 
     return SUCCESS;
 }
@@ -487,7 +472,7 @@ static int handle_unaccessed_pte_fault(PTE* accessed_pte, PAGE** result_page_sto
  * 
  * Returns SUCCESS if there are no issues, or RESCUE_FAIL otherwise
  */
-#define ONLY_SAME_STATUS 1
+#define ONLY_SAME_STATUS 0
 static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** result_page_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage) {
     ULONG64 pfn = local_pte.transition_format.frame_number;
 
@@ -600,7 +585,7 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
 
             if (possible_page->status == MODIFIED_STATUS) {
                 modified_rescues[num_modifed_rescues] = possible_page;
-                num_modifed_rescues ++;
+                num_modifed_rescues++;
             } else {
                 standby_rescues[num_standby_rescues] = possible_page;
                 num_standby_rescues++;
@@ -613,26 +598,6 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
     *num_ptes_to_connect_storage = num_modifed_rescues + num_standby_rescues;
 
     return SUCCESS;
-
-    #if 0
-    // We now try to rescue the page from the modified or standby list
-    if (rescue_page(page_to_rescue) == ERROR) {
-        DebugBreak();
-        release_pagelock(page_to_rescue, 3);
-        return RESCUE_FAIL;
-    }
-
-    *result_page_storage = page_to_rescue;
-
-    custom_spin_assert(page_to_rescue->page_lock == PAGE_LOCKED);
-    custom_spin_assert(page_to_rescue->status != ACTIVE_STATUS);
-
-    #if DEBUG_PAGELOCK
-    custom_spin_assert(page_to_rescue->holding_threadid == GetCurrentThreadId());
-    #endif
-
-    return SUCCESS;    
-    #endif
 }
 
 
@@ -772,74 +737,6 @@ static ULONG64 acquire_sequential_disk_read_rights(PTE* accessed_pte, PTE** acqu
     LeaveCriticalSection(&curr_pte_locksection->lock);
 
     return num_pte_rights_acquired;
-
-    #if 0
-    PTE_LOCKSECTION* prev_pte_locksection = pte_to_locksection(accessed_pte);
-    PTE_LOCKSECTION* curr_pte_locksection = prev_pte_locksection;
-
-    ULONG64 num_ptes_checked = 0;
-    ULONG64 num_rights_acquired = 0;
-    ULONG64 curr_pte_idx = pte_to_pagetable_idx(accessed_pte);
-    PTE* curr_pte;
-    PTE curr_pte_copy;
-
-    // We can pre-prepare most of the PTE contents, but will need to adjust the pagefile-idx field for each PTE
-    PTE pte_contents;
-    pte_contents.complete_format = 0;
-    pte_contents.disk_format.being_read_from_disk = PTE_BEING_READ_FROM_DISK;
-
-    EnterCriticalSection(&curr_pte_locksection->lock);
-
-    while (num_ptes_checked < num_ptes) {
-        curr_pte = &pagetable->pte_list[curr_pte_idx];
-
-        // We opt to stay within just our own current PTE locksection to avoid extra waiting
-        curr_pte_locksection = pte_to_locksection(curr_pte);
-        
-        if (curr_pte_locksection != prev_pte_locksection) {
-            LeaveCriticalSection(&prev_pte_locksection->lock);
-            return num_rights_acquired;
-            #if 0
-            LeaveCriticalSection(&prev_pte_locksection->lock);
-            EnterCriticalSection(&curr_pte_locksection->lock);
-            break;
-            #endif
-        }
-
-        /**
-         * Importantly, we are only ever able to set the disk pte's reading from disk status to PTE_BEING_READ_FROM_DSIK 
-         * while holding the lock, so we can make a decision by looking at the copy of the PTE here.
-         * 
-         * If the copy shows that it is already being read - or that the read has finished and the status has changed -
-         * then we can ignore it. If the copy shows that the disk PTE is NOT being read, then we are the only ones who are able to
-         * set it's status to PTE_BEING_READ_FROM_DISK. This scheme is able to reduce contention on the PTE lock at the end of the fault.
-         */
-        curr_pte_copy = read_pte_contents(curr_pte);
-
-        if (is_disk_format(curr_pte_copy)) {
-            if (curr_pte_copy.disk_format.being_read_from_disk == PTE_NOT_BEING_READ_FROM_DISK) {
-                pte_contents.disk_format.pagefile_idx = curr_pte_copy.disk_format.pagefile_idx;
-                write_pte_contents(curr_pte, pte_contents);
-
-                acquired_rights_pte_storage[num_rights_acquired] = curr_pte;
-                num_rights_acquired++;
-            }
-        }
-
-        num_ptes_checked++;
-        curr_pte_idx++;
-        prev_pte_locksection = curr_pte_locksection;
-
-        // BW: We would need to adjust this if we move to a multi-level pagetable
-        if (curr_pte_idx == pagetable->num_virtual_pages) {
-            break;
-        }
-    }
-
-    LeaveCriticalSection(&curr_pte_locksection->lock);
-
-    return num_rights_acquired;
-    #endif
 }
 
 
@@ -937,7 +834,7 @@ static int handle_disk_pte_fault(ULONG64 thread_idx, PTE* accessed_pte, PAGE** r
         release_sequential_disk_read_rights(&ptes_to_connect_storage[num_pages_acquired], num_to_read - num_pages_acquired);
     }
 
-    commit_pages(result_pages_storage, ptes_to_connect_storage, accessed_pte, num_pages_acquired, access_type);
+    // commit_pages(result_pages_storage, ptes_to_connect_storage, accessed_pte, num_pages_acquired, access_type);
 
     THREAD_DISK_READ_RESOURCES* thread_disk_resources = &thread_information.thread_local_storages[thread_idx].disk_resources;
 
@@ -1030,6 +927,13 @@ static ULONG64 get_trailing_valid_and_being_read_pte_count(PTE* accessed_pte) {
 }
 
 
+/**
+ * Commits the pages and releases the pagelocks
+ * 
+ * - All standby pages have their old PTEs set to disk format
+ * 
+ * - For unaccessed PTEs, their pages are zeroed if necessary
+ */
 static void commit_pages(PAGE** pages_to_commit, PTE** ptes, PTE* accessed_pte, ULONG64 num_pages, ULONG64 access_type) {
     // We may need to edit the old PTE, in which case, we want a copy so we can still find it
     PAGE allocated_pages_copies[MAX_PAGES_READABLE];
@@ -1045,6 +949,9 @@ static void commit_pages(PAGE** pages_to_commit, PTE** ptes, PTE* accessed_pte, 
         pages_to_commit[0]->modified = PAGE_MODIFIED;
     }
 
+    for (ULONG64 i = 0; i < num_pages; i++) {
+        custom_spin_assert(pages_to_commit[i]->status != ACTIVE_STATUS);
+    }
 
     // We may need to release stale pagefile slots and/or modify the page's pagefile information
     if (num_pages == 1) {

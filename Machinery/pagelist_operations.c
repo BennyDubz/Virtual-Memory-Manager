@@ -111,12 +111,10 @@ static void free_frames_add_batch(PAGE** page_list, ULONG64 num_pages) {
     create_chain_of_pages(page_list, num_pages, FREE_STATUS);
 
     /**
-     * After this, no one will be able to use this page accidentally until we have added it to the list as transition
-     * PTEs will see that the PTE and the page status do not match anymore, and will not try to rescue it
+     * Since we are typically using standby pages to add to the free list, the PTEs should be cleared
      */
     for (ULONG64 release_idx = 0; release_idx < num_pages; release_idx++) {
         page_list[release_idx]->pte = NULL;
-        release_pagelock(page_list[release_idx], 13);
     }
 
     ULONG64 curr_cache_color = page_to_pfn(page_list[0]) % NUM_CACHE_SLOTS;
@@ -136,10 +134,10 @@ static void free_frames_add_batch(PAGE** page_list, ULONG64 num_pages) {
         if (curr_cache_color != page_cache_color) {
             page_section_size = page_idx - first_in_section_idx;
 
-
-            insert_page_section(curr_listhead, page_list[first_in_section_idx], page_list[page_idx - 1], page_section_size);
             InterlockedAdd64(&free_frames->total_available, page_section_size);
             InterlockedAdd64(&total_available_pages, page_section_size);
+            insert_page_section(curr_listhead, page_list[first_in_section_idx], page_list[page_idx - 1], page_section_size);
+            
 
             // Adjust the indices, cache color, and locksection to the next section of pages
             first_in_section_idx = page_idx;
@@ -150,9 +148,9 @@ static void free_frames_add_batch(PAGE** page_list, ULONG64 num_pages) {
     
     page_section_size = num_pages - first_in_section_idx;
 
-    insert_page_section(curr_listhead, page_list[first_in_section_idx], page_list[num_pages - 1], page_section_size);
     InterlockedAdd64(&free_frames->total_available, page_section_size);
     InterlockedAdd64(&total_available_pages, page_section_size);
+    insert_page_section(curr_listhead, page_list[first_in_section_idx], page_list[num_pages - 1], page_section_size);
 
     SetEvent(waiting_for_pages_event);
 }
@@ -173,12 +171,10 @@ static void zero_list_add_batch(PAGE** page_list, ULONG64 num_pages) {
     create_chain_of_pages(page_list, num_pages, FREE_STATUS);
 
     /**
-     * After this, no one will be able to use this page accidentally until we have added it to the list as transition
-     * PTEs will see that the PTE and the page status do not match anymore, and will not try to rescue it
+     * Since we are typically using standby pages to add to the zero list, the PTEs should be cleared
      */
     for (ULONG64 release_idx = 0; release_idx < num_pages; release_idx++) {
         page_list[release_idx]->pte = NULL;
-        release_pagelock(page_list[release_idx], 13);
     }
 
     ULONG64 curr_cache_color = page_to_pfn(page_list[0]) % NUM_CACHE_SLOTS;
@@ -198,11 +194,9 @@ static void zero_list_add_batch(PAGE** page_list, ULONG64 num_pages) {
         if (curr_cache_color != page_cache_color) {
             page_section_size = page_idx - first_in_section_idx;
 
-
-            insert_page_section(curr_listhead, page_list[first_in_section_idx], page_list[page_idx - 1], page_section_size);
             InterlockedAdd64(&zero_lists->total_available, page_section_size);
             InterlockedAdd64(&total_available_pages, page_section_size);
-
+            insert_page_section(curr_listhead, page_list[first_in_section_idx], page_list[page_idx - 1], page_section_size);
 
             // Adjust the indices, cache color, and locksection to the next section of pages
             first_in_section_idx = page_idx;
@@ -214,9 +208,10 @@ static void zero_list_add_batch(PAGE** page_list, ULONG64 num_pages) {
     
     page_section_size = num_pages - first_in_section_idx;
 
-    insert_page_section(curr_listhead, page_list[first_in_section_idx], page_list[num_pages - 1], page_section_size);
     InterlockedAdd64(&zero_lists->total_available, page_section_size);
     InterlockedAdd64(&total_available_pages, page_section_size);
+
+    insert_page_section(curr_listhead, page_list[first_in_section_idx], page_list[num_pages - 1], page_section_size);
 
     SetEvent(waiting_for_pages_event);
 }
@@ -293,16 +288,32 @@ LPTHREAD_START_ROUTINE thread_populate_zero_lists(void* parameters) {
         fprintf(stderr, "Unable to allocate memory for pfn_list in thread_populate_zero_lists\n");
         return NULL;
     }
+
     
+    HANDLE events[2];
+    ULONG64 signaled_event;
+
+    events[0] = zero_pages_event;
+    events[1] = shutdown_event;
      
     while (TRUE) {
-        WaitForSingleObject(zero_pages_event, INFINITE);
+        signaled_event = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+
+        if (signaled_event == 1) {
+            free(page_list);
+            free(pfn_list);
+            VirtualFree(thread_zeroing_address, 0, MEM_RELEASE);
+            return NULL;
+        }
 
         InterlockedOr(&page_zeroing->zeroing_ongoing, TRUE);
 
         ULONG64 num_to_zero = zero_list_get_pages_to_clear(page_list, pfn_list);
 
-        if (num_to_zero == 0) continue;
+        if (num_to_zero == 0) {
+            InterlockedAnd(&page_zeroing->zeroing_ongoing, FALSE);
+            continue;
+        }
 
         if (MapUserPhysicalPages(thread_zeroing_address, num_to_zero, pfn_list) == FALSE) {
             fprintf(stderr, "Failed to map zeroing address in thread_populate_zero_lists\n");
@@ -573,7 +584,6 @@ static PAGE* try_acquire_list_tail_pagelock(PAGE_LIST* list) {
 
         if (potential_page->status == LIST_STATUS) return NULL;
 
-
         pagelock_acquired = try_acquire_pagelock(potential_page, 4);
         
         if (pagelock_acquired && potential_page != pagelist_tail->blink) {
@@ -594,9 +604,9 @@ static PAGE* try_acquire_list_tail_pagelock(PAGE_LIST* list) {
 }
 
 
-/**
- * Spins until it acquires the pagelock for the tail entry of the list, if there is a tail entry
+/** it acquires the pagelock for the tail entry of the list, if there is a tail entry
  * 
+ * Spins until
  * Returns the page whose lock was acquired, or NULL if the list was empty and it was unable
  */
 static PAGE* acquire_list_tail_pagelock(PAGE_LIST* list) {
@@ -612,7 +622,7 @@ static PAGE* acquire_list_tail_pagelock(PAGE_LIST* list) {
 
         pagelock_acquired = try_acquire_pagelock(potential_page, 4);
 
-        if (pagelock_acquired && potential_page != (PAGE*) pagelist_tail->blink) {
+        if (pagelock_acquired && potential_page != pagelist_tail->blink) {
             release_pagelock(potential_page, 15);
             pagelock_acquired = FALSE;
             continue;
@@ -800,6 +810,9 @@ ULONG64 allocate_batch_zeroed_frames(PAGE** page_storage, ULONG64 num_pages) {
     }
 
     InterlockedAdd64(&zero_lists->total_available, - num_allocated);
+
+    custom_spin_assert(zero_lists->total_available >= 0);
+    
     InterlockedAdd64(&total_available_pages, - num_allocated);
 
     return num_allocated;
@@ -955,7 +968,7 @@ static void refresh_update_thread_storages(UCHAR list_refresh_status) {
 long list_refresh_ongoing = FALSE;
 #endif
 
-static void refresh_free_and_zero_lists() {
+static void refresh_free_and_zero_lists(PAGE** page_storage) {
     
     #if ONLY_ONE_REFRESHER
     if (InterlockedOr(&list_refresh_ongoing, TRUE) == TRUE) {
@@ -963,11 +976,7 @@ static void refresh_free_and_zero_lists() {
     }
     #endif
 
-    refresh_update_thread_storages(LIST_REFRESH_ONGOING);
-
-    PAGE* pages_to_refresh[NUM_PAGES_FAULTER_REFRESH];
-
-    ULONG64 num_allocated = standby_pop_batch(pages_to_refresh, NUM_PAGES_FAULTER_REFRESH);
+    ULONG64 num_allocated = standby_pop_batch(page_storage, NUM_PAGES_THREAD_REFRESH);
 
     // The standby list is empty!
     if (num_allocated == 0) {
@@ -977,20 +986,17 @@ static void refresh_free_and_zero_lists() {
         InterlockedAnd(&list_refresh_ongoing, FALSE);
         #endif
 
-        refresh_update_thread_storages(LIST_REFRESH_NOT_ONGOING);
-
         return;
     }
 
     // Update the old transition PTEs to be disk format
-    update_pte_sections_to_disk_format(pages_to_refresh, num_allocated);
+    update_pte_sections_to_disk_format(page_storage, num_allocated);
 
     // Add half the pages to the free list, and releases their pagelocks to be used freely
-    free_frames_add_batch(pages_to_refresh, min(num_allocated, FREE_FRAMES_PORTION));
-
+    free_frames_add_batch(page_storage, min(num_allocated, NUM_PAGES_THREAD_REFRESH / FREE_FRAMES_PROPORTION));
 
     // See if we still have pages remaining to add to the zeroing threads buffer
-    if (num_allocated < FREE_FRAMES_PORTION + 1) { // + 1 to reflect the indices used
+    if (num_allocated < (NUM_PAGES_THREAD_REFRESH / FREE_FRAMES_PROPORTION) + 1) { // + 1 to reflect the indices used
         // There are still very few pages on standby...
         SetEvent(trimming_event);
 
@@ -998,17 +1004,20 @@ static void refresh_free_and_zero_lists() {
         InterlockedAnd(&list_refresh_ongoing, FALSE);
         #endif
 
-        refresh_update_thread_storages(LIST_REFRESH_NOT_ONGOING);
-
         return;
     }
+
+    ULONG64 zeroing_start = NUM_PAGES_THREAD_REFRESH / FREE_FRAMES_PROPORTION;
 
     long old_slot_val;
 
     PAGE* curr_page;
 
+    ULONG64 num_to_zero = 0;
+    ULONG64 extra_to_free = 0;
+
     // Add the other half to be zeroed out!
-    for (ULONG64 page_idx = FREE_FRAMES_PORTION; page_idx < num_allocated; page_idx++) {
+    for (ULONG64 page_idx = zeroing_start; page_idx < num_allocated; page_idx++) {
         ULONG64 page_zeroing_idx = get_zeroing_struct_idx();
 
         // We try to claim the slot
@@ -1018,12 +1027,12 @@ static void refresh_free_and_zero_lists() {
         if (old_slot_val != PAGE_SLOT_OPEN) {
             SetEvent(zero_pages_event);
             ULONG64 remaining_pages = num_allocated - page_idx;
-            free_frames_add_batch(&pages_to_refresh[page_idx], remaining_pages);
-
+            free_frames_add_batch(&page_storage[page_idx], remaining_pages);
+            extra_to_free = remaining_pages;
             break;
         }
 
-        curr_page = pages_to_refresh[page_idx];
+        curr_page = page_storage[page_idx];
 
         curr_page->status = ZERO_STATUS;
         curr_page->pte = NULL;
@@ -1035,8 +1044,12 @@ static void refresh_free_and_zero_lists() {
         // Increment the value to signal that the zeroing thread can use this slot to zero
         custom_spin_assert(InterlockedIncrement(&page_zeroing->status_map[page_zeroing_idx]) == PAGE_SLOT_READY);
 
+        num_to_zero++;
         InterlockedIncrement64(&page_zeroing->total_slots_used);
     }
+
+
+    custom_spin_assert(num_to_zero + zeroing_start + extra_to_free == num_allocated);
 
     SetEvent(zero_pages_event);
 
@@ -1044,7 +1057,6 @@ static void refresh_free_and_zero_lists() {
     InterlockedAnd(&list_refresh_ongoing, FALSE);
     #endif
 
-    refresh_update_thread_storages(LIST_REFRESH_NOT_ONGOING);
 }
 
 
@@ -1053,7 +1065,7 @@ static void refresh_free_and_zero_lists() {
  * 
  * This helps us reduce contention on the standby list and avoids the unnecessary work coming from zeroing out pages
  */
-static void refresh_free_frames() {
+static void refresh_free_frames(PAGE** page_storage) {
     
     #if ONLY_ONE_REFRESHER
     if (InterlockedOr(&list_refresh_ongoing, TRUE) == TRUE) {
@@ -1061,11 +1073,7 @@ static void refresh_free_frames() {
     }
     #endif
 
-    refresh_update_thread_storages(LIST_REFRESH_ONGOING);
-
-    PAGE* pages_to_refresh[NUM_PAGES_FAULTER_REFRESH];
-
-    ULONG64 num_allocated = standby_pop_batch(pages_to_refresh, NUM_PAGES_FAULTER_REFRESH);
+    ULONG64 num_allocated = standby_pop_batch(page_storage, NUM_PAGES_THREAD_REFRESH);
 
     // The standby list is empty!
     if (num_allocated == 0) {
@@ -1075,22 +1083,19 @@ static void refresh_free_frames() {
         InterlockedAnd(&list_refresh_ongoing, FALSE);
         #endif
 
-        refresh_update_thread_storages(LIST_REFRESH_NOT_ONGOING);
-
         return;
     }
 
     // Update the old transition PTEs to be disk format
-    update_pte_sections_to_disk_format(pages_to_refresh, num_allocated);
+    update_pte_sections_to_disk_format(page_storage, num_allocated);
 
     // Add all the pages to their respective free lists
-    free_frames_add_batch(pages_to_refresh, min(num_allocated, NUM_PAGES_FAULTER_REFRESH));
+    free_frames_add_batch(page_storage, min(num_allocated, NUM_PAGES_THREAD_REFRESH));
 
     #if ONLY_ONE_REFRESHER
     InterlockedAnd(&list_refresh_ongoing, FALSE);
     #endif
 
-    refresh_update_thread_storages(LIST_REFRESH_NOT_ONGOING);
 }
 
 
@@ -1099,7 +1104,7 @@ static void refresh_free_frames() {
  * 
  * This helps us replenish the zero list as quickly as possible when necessary
  */
-static void refresh_zero_lists() {
+static void refresh_zero_lists(PAGE** page_storage) {
     
     #if ONLY_ONE_REFRESHER
     if (InterlockedOr(&list_refresh_ongoing, TRUE) == TRUE) {
@@ -1109,9 +1114,7 @@ static void refresh_zero_lists() {
 
     refresh_update_thread_storages(LIST_REFRESH_ONGOING);
 
-    PAGE* pages_to_refresh[NUM_PAGES_FAULTER_REFRESH];
-
-    ULONG64 num_allocated = standby_pop_batch(pages_to_refresh, NUM_PAGES_FAULTER_REFRESH);
+    ULONG64 num_allocated = standby_pop_batch(page_storage, NUM_PAGES_THREAD_REFRESH);
 
     // The standby list is empty!
     if (num_allocated == 0) {
@@ -1121,17 +1124,17 @@ static void refresh_zero_lists() {
         InterlockedAnd(&list_refresh_ongoing, FALSE);
         #endif
 
-        refresh_update_thread_storages(LIST_REFRESH_NOT_ONGOING);
-
         return;
     }
 
     // Update the old transition PTEs to be disk format
-    update_pte_sections_to_disk_format(pages_to_refresh, num_allocated);
+    update_pte_sections_to_disk_format(page_storage, num_allocated);
 
     long old_slot_val;
 
     PAGE* curr_page;
+    ULONG64 num_added_to_zero = 0;
+    ULONG64 extra_to_free = 0;
 
     // Add the other half to be zeroed out!
     for (ULONG64 page_idx = 0; page_idx < num_allocated; page_idx++) {
@@ -1144,12 +1147,12 @@ static void refresh_zero_lists() {
         if (old_slot_val != PAGE_SLOT_OPEN) {
             SetEvent(zero_pages_event);
             ULONG64 remaining_pages = num_allocated - page_idx;
-            free_frames_add_batch(&pages_to_refresh[page_idx], remaining_pages);
-
+            free_frames_add_batch(&page_storage[page_idx], remaining_pages);
+            extra_to_free = remaining_pages;
             break;
         }
 
-        curr_page = pages_to_refresh[page_idx];
+        curr_page = page_storage[page_idx];
 
         curr_page->status = ZERO_STATUS;
         curr_page->pte = NULL;
@@ -1160,17 +1163,19 @@ static void refresh_zero_lists() {
 
         // Increment the value to signal that the zeroing thread can use this slot to zero
         custom_spin_assert(InterlockedIncrement(&page_zeroing->status_map[page_zeroing_idx]) == PAGE_SLOT_READY);
+        num_added_to_zero++;
 
         InterlockedIncrement64(&page_zeroing->total_slots_used);
     }
 
     SetEvent(zero_pages_event);
 
+    custom_spin_assert(num_added_to_zero + extra_to_free == num_allocated);
+
     #if ONLY_ONE_REFRESHER
     InterlockedAnd(&list_refresh_ongoing, FALSE);
     #endif
 
-    refresh_update_thread_storages(LIST_REFRESH_NOT_ONGOING);
 }
 
 /**
@@ -1195,24 +1200,9 @@ void potential_list_refresh(ULONG64 thread_idx) {
     }
 
     if (standby_list->list_length > physical_page_count / STANDBY_LIST_REFRESH_PROPORTION) {
-        #if 0
-        if (free_frames->total_available + zero_lists->total_available < physical_page_count / TOTAL_ZERO_AND_FREE_LIST_REFRESH_PROPORTION) {
-            refresh_free_and_zero_lists();
-        } 
-        #if 1
-        else if (free_frames->total_available < physical_page_count / INDIVIDUAL_LIST_REFRESH_PROPORTION) {
-            refresh_free_frames();
-        }
-        #endif
-        #endif
-        if (zero_lists->total_available < physical_page_count / ZERO_LIST_REFRESH_PROPORTION && 
+        if (zero_lists->total_available < physical_page_count / ZERO_LIST_REFRESH_PROPORTION || 
             free_frames->total_available < physical_page_count / FREE_LIST_REFRESH_PROPORTION) {
-            refresh_free_and_zero_lists();
-        }
-        if (zero_lists->total_available < physical_page_count / ZERO_LIST_REFRESH_PROPORTION) {
-            refresh_zero_lists();
-        } else if (free_frames->total_available < physical_page_count / FREE_LIST_REFRESH_PROPORTION) {
-            refresh_free_frames();
+            SetEvent(refresh_lists_event);
         }
     }
 }
@@ -1424,6 +1414,7 @@ ULONG64 find_batch_available_pages(BOOL zeroed_pages_preferred, PAGE** page_stor
     return total_allocated_pages;
 }
 
+
 /**
  * Takes the pages and unlinks them from the standby list
  */
@@ -1612,13 +1603,9 @@ void release_batch_unneeded_pages(PAGE** pages, ULONG64 num_pages) {
     if (num_standby_pages > 0) {
         create_chain_of_pages(standby_pages, num_standby_pages, STANDBY_STATUS);
 
-        insert_page_section(standby_list, standby_pages[0], standby_pages[num_standby_pages - 1], num_standby_pages);
-
         InterlockedAdd64(&total_available_pages, num_standby_pages);
 
-        for (ULONG64 i = 0; i < num_standby_pages; i++) {
-            release_pagelock(standby_pages[i], 40);
-        }
+        insert_page_section(standby_list, standby_pages[0], standby_pages[num_standby_pages - 1], num_standby_pages);
 
     }
 
@@ -1645,10 +1632,9 @@ void release_batch_unneeded_pages(PAGE** pages, ULONG64 num_pages) {
  */
 void release_unneeded_page(PAGE* page) {
     if (page->status == STANDBY_STATUS) {
+        InterlockedIncrement64(&total_available_pages);
 
         insert_page(standby_list, page);
-
-        InterlockedIncrement64(&total_available_pages);
 
     } else if (page->status == MODIFIED_STATUS) {
        DebugBreak();
@@ -1684,11 +1670,11 @@ void zero_lists_add(PAGE* page) {
 
     page->status = ZERO_STATUS;
 
-    insert_page(head, page);
-    
     InterlockedIncrement64(&total_available_pages);
 
     InterlockedIncrement64(&zero_lists->total_available);
+
+    insert_page(head, page);
 }
 
 
@@ -1710,11 +1696,11 @@ void free_frames_add(PAGE* page) {
 
     page->status = FREE_STATUS;
 
-    insert_page(head, page);
-
     InterlockedIncrement64(&total_available_pages);
 
     InterlockedIncrement64(&free_frames->total_available);
+
+    insert_page(head, page);
 }
 
 
@@ -1747,4 +1733,53 @@ void create_chain_of_pages(PAGE** pages_to_chain, ULONG64 num_pages, ULONG64 new
         
     // We need to modify the final page's status
     next_page->status = new_page_status;
+}
+
+
+
+/**
+ * Thread dedicated to refreshing the free and zero lists using old standby pages
+ */
+LPTHREAD_START_ROUTINE* thread_free_and_zero_refresher(void* parameters) {
+    WORKER_THREAD_PARAMETERS* thread_params = (WORKER_THREAD_PARAMETERS*) parameters;
+    ULONG64 worker_thread_idx = thread_params->thread_idx;
+
+    PAGE** page_storage = (PAGE**) malloc(sizeof(PAGE*) * NUM_PAGES_THREAD_REFRESH);
+
+    if (page_storage == NULL) {
+        fprintf(stderr, "Failed to allocate memory for page storage for list refreshing thread\n");
+        return NULL;
+    }
+
+    HANDLE events[2];
+    ULONG64 signaled_event;
+
+    events[0] = refresh_lists_event;
+    events[1] = shutdown_event;
+
+    while (TRUE) {
+        signaled_event = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+
+        if (signaled_event == 1) {
+            free(page_storage);
+            return NULL;
+        }
+
+        refresh_update_thread_storages(LIST_REFRESH_ONGOING);
+
+        if (zero_lists->total_available < physical_page_count / ZERO_LIST_REFRESH_PROPORTION && 
+            free_frames->total_available < physical_page_count / FREE_LIST_REFRESH_PROPORTION) {
+            refresh_free_and_zero_lists(page_storage);
+        }
+        if (zero_lists->total_available < physical_page_count / ZERO_LIST_REFRESH_PROPORTION) {
+            refresh_zero_lists(page_storage);
+        } else {
+            refresh_free_frames(page_storage);
+        }
+
+        refresh_update_thread_storages(LIST_REFRESH_NOT_ONGOING);
+       
+    }
+
+    return NULL;
 }

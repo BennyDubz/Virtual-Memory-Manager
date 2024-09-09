@@ -51,8 +51,10 @@
  */
 #define NUM_PAGES_FAULTER_REFRESH   max(NUM_CACHE_SLOTS / 4, 64)
 
-// When refreshing both the free and zero lists, this proportion goes to the free lists
-#define FREE_FRAMES_PORTION   NUM_PAGES_FAULTER_REFRESH / 2
+#define NUM_PAGES_THREAD_REFRESH    NUM_CACHE_SLOTS * 4
+
+// When refreshing both the free and zero lists, (1 / FREE_FRAMES_PROPORTION) goes to the free lists
+#define FREE_FRAMES_PROPORTION  2
 
 // Whether or not only a single thread can refresh these lists at once. Currently experimenting with this as multiple refreshing threads might just create
 // standby list-lock contention and overall slow things down. However, if we had a large amount of threads, they might overwhelm the refreshing
@@ -291,3 +293,9 @@ void free_frames_add(PAGE* page);
  * section to a list very quickly. This can avoid an extra loop later.
  */
 void create_chain_of_pages(PAGE** pages_to_chain, ULONG64 num_pages, ULONG64 new_page_status);
+
+
+/**
+ * Thread dedicated to refreshing the free and zero lists using old standby pages
+ */
+LPTHREAD_START_ROUTINE* thread_free_and_zero_refresher(void* parameters);

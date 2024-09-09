@@ -32,9 +32,20 @@ LPTHREAD_START_ROUTINE thread_aging(void* parameters) {
     ULONG64 section_start;
     PTE_LOCKSECTION* curr_pte_locksection;
 
+    HANDLE events[2];
+    ULONG64 signaled_event;
+
+    events[0] = aging_event;
+    events[1] = shutdown_event;
+
     while(TRUE) {
-        WaitForSingleObject(aging_event, INFINITE);
-        
+
+        signaled_event = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+
+        if (signaled_event == 1) {
+            return NULL;
+        }  
+
         // Go through each lock section and increment all valid PTEs
         for (ULONG64 lock_section = 0; lock_section < pagetable->num_locks; lock_section++) {
             section_start = lock_section * ptes_per_lock;
@@ -102,9 +113,19 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
     PAGE* page_section_already_being_writen[TRIM_PER_SECTION];
     PULONG_PTR trim_addresses[TRIM_PER_SECTION];
 
+    HANDLE events[2];
+    ULONG64 signaled_event;
+
+    events[0] = trimming_event;
+    events[1] = shutdown_event;
+
 
     while(TRUE) {
-        WaitForSingleObject(trimming_event, INFINITE);
+        signaled_event = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+
+        if (signaled_event == 1) {
+            return NULL;
+        }
 
         trim_update_thread_storages(TRIMMER_NOT_SIGNALLED);
 
@@ -162,6 +183,8 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
                 // This PTE is now on the chopping block
                 pte_section_trim[section_num_ptes_trimmed] = curr_pte;
 
+                custom_spin_assert(curr_page->status == ACTIVE_STATUS);
+
                 // If the page still has a pagefile index stored within it, then we can trim it straight to standby
                 if (curr_page->pagefile_idx == DISK_IDX_NOTUSED) {
                     if (curr_page->writing_to_disk == PAGE_BEING_WRITTEN && curr_page->modified == PAGE_NOT_MODIFIED) {
@@ -192,10 +215,7 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
                 continue;
             }
 
-            /**
-             * We separate the disconnecting MapUserPhysicalPagesScatter call from the insertion from the modified list
-             * to reduce the time/contention inside of the modified list lock. Hence, the two nearly identical loops
-             */
+
             PTE transition_pte_contents;
             transition_pte_contents.complete_format = 0;
             transition_pte_contents.transition_format.is_transition = 1;
@@ -238,12 +258,6 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
                 end_of_section = page_section_trim_to_modified[trim_to_modified - 1];
                 
                 insert_page_section(modified_list, beginning_of_section, end_of_section, trim_to_modified);
-                
-                // Now release the pagelocks so that the mod-writer can use them
-                for (ULONG64 trim_idx = 0; trim_idx < trim_to_modified; trim_idx++) {
-                    curr_page = page_section_trim_to_modified[trim_idx];
-                    release_pagelock(curr_page, 18);
-                }
 
                 signal_modified = TRUE;
                 #if 0
@@ -267,14 +281,9 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
                 // We only want to set the event if we desperately need pages, and we check before we modify the global
                 signal_waiting_for_pages_event = (total_available_pages == 0);
                 
-                insert_page_section(standby_list, beginning_of_section, end_of_section, trim_to_standby);
-
                 InterlockedAdd64(&total_available_pages, trim_to_standby);
 
-                for (ULONG64 trim_idx = 0; trim_idx < trim_to_standby; trim_idx++) {
-                    curr_page = page_section_trim_to_standby[trim_idx];
-                    release_pagelock(curr_page, 23);
-                }
+                insert_page_section(standby_list, beginning_of_section, end_of_section, trim_to_standby);
 
                 if (signal_waiting_for_pages_event == TRUE) {
                     SetEvent(waiting_for_pages_event);
@@ -448,13 +457,8 @@ void faulter_trim_behind(PTE* accessed_pte) {
         
         insert_page_section(modified_list, beginning_of_section, end_of_section, trim_to_modified);
 
-        for (ULONG64 i = 0; i < trim_to_modified; i++) {
-            curr_page = pages_trimmed_to_modified[i];
-            release_pagelock(curr_page, 41);
-        } 
-
         // We don't want to bother setting this event unless the mod-writer will do subtantial work
-        if (modified_list->list_length > MAX_PAGES_WRITABLE / 2) {
+        if (modified_list->list_length > MAX_PAGES_WRITABLE / 4) {
             SetEvent(modified_writer_event);
         }
         
@@ -469,14 +473,9 @@ void faulter_trim_behind(PTE* accessed_pte) {
         beginning_of_section = pages_trimmed_to_standby[0];
         end_of_section = pages_trimmed_to_standby[trim_to_standby - 1];
 
-        insert_page_section(standby_list, beginning_of_section, end_of_section, trim_to_standby);      
-
         InterlockedAdd64(&total_available_pages, trim_to_standby);
 
-        for (ULONG64 i = 0; i < trim_to_standby; i++) {
-            curr_page = pages_trimmed_to_standby[i];
-            release_pagelock(curr_page, 24);
-        } 
+        insert_page_section(standby_list, beginning_of_section, end_of_section, trim_to_standby);      
 
         // We only want to set this event if we were out of pages before - otherwise, we can avoid the overhead
         if (signal_waiting_for_pages) {
@@ -530,9 +529,21 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
 
     printf("Max pages writable 0x%llx\n", MAX_PAGES_WRITABLE);
 
+    HANDLE events[2];
+    ULONG64 signaled_event;
+
+    events[0] = modified_writer_event;
+    events[1] = shutdown_event;
+
     while(TRUE) {
         if (wait_for_signal == TRUE) {
-            WaitForSingleObject(modified_writer_event, INFINITE);
+            signaled_event = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+
+            if (signaled_event == 1) {
+                free(pages_confirmed_to_standby);
+                free(disk_batch);
+                return NULL;
+            }
         }
 
         /**
@@ -636,13 +647,13 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
 
         ULONG64 num_available_disk_slots = allocate_many_disk_slots(disk_batch->disk_indices, disk_batch->num_pages);
 
-        custom_spin_assert(num_available_disk_slots == disk_batch->num_pages);
+        // custom_spin_assert(num_available_disk_slots == disk_batch->num_pages);
 
         // Map the physical pages to our large disk write slot
         if (MapUserPhysicalPages(disk->disk_large_write_slot, num_available_disk_slots, disk_batch->pfns) == FALSE) {
             printf ("MapUserPhysPages in thread_modified_writer failed, error %#x\n", GetLastError());
             fprintf(stderr, "Failed to map physical pages to large disk write slot in write_batch_to_disk\n");
-            DebugBreak();
+            custom_spin_assert(FALSE);
         }
 
         /**
@@ -741,13 +752,9 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
                 PAGE* end_page = pages_confirmed_to_standby[num_pages_confirmed_to_standby - 1];
             
                 BOOL signal_waiting_for_pages = (total_available_pages == 0);
-
-                insert_page_section(standby_list, beginning_page, end_page, num_pages_confirmed_to_standby);
             
-                InterlockedAdd64(&total_available_pages, num_pages_confirmed_to_standby);
-
                 /**
-                 * Now edit all of the pages to add all of the pagefile information and release the pagelocks
+                 * Now edit all of the pages to add all of the pagefile information
                  */
                 for (ULONG64 i = start_of_minibatch; i < end_of_minibatch; i++) {
                     curr_page = disk_batch->pages_being_written[i];
@@ -756,9 +763,11 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
 
                     custom_spin_assert(curr_page->pagefile_idx == DISK_IDX_NOTUSED);
                     curr_page->pagefile_idx = disk_batch->disk_indices[i];
-
-                    release_pagelock(curr_page, 21);
                 }
+
+                InterlockedAdd64(&total_available_pages, num_pages_confirmed_to_standby);
+
+                insert_page_section(standby_list, beginning_page, end_page, num_pages_confirmed_to_standby);
 
                 if (signal_waiting_for_pages == TRUE) {
                     SetEvent(waiting_for_pages_event);
@@ -767,96 +776,6 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
 
             
         }
-        #if 0
-            // Perform all of this sections memcpys
-            for (ULONG64 i = start_of_section; i < end_of_section; i++) {
-
-                disk_slot_addr = disk_idx_to_addr(disk_batch->disk_indices[i]);
-
-                memcpy(disk_slot_addr, source_addr, PAGE_SIZE);
-
-                // Increment the source address to the next page's data
-                source_addr += (PAGE_SIZE / sizeof(PULONG_PTR));
-            }
-
-            /**
-             * Acquire pagelocks ahead of time, then get the standby list lock
-             */
-            for (ULONG64 i = start_of_section; i < end_of_section; i++) {
-                curr_page = disk_batch->pages_being_written[i];
-                release_slot = FALSE;
-
-                acquire_pagelock(curr_page, 9);
-
-                curr_page->writing_to_disk = PAGE_NOT_BEING_WRITTEN;
-
-                // In either case, we need to bail from adding this page to standby
-                if (curr_page->status != MODIFIED_STATUS || 
-                        curr_page->modified == PAGE_MODIFIED) {
-
-                    custom_spin_assert(curr_page->pagefile_idx == DISK_IDX_NOTUSED);
-
-                    // We can still use the pagefile space even if the page was rescued
-                    if (curr_page->modified == PAGE_NOT_MODIFIED) {
-                        curr_page->pagefile_idx = disk_batch->disk_indices[i];
-                    } else {
-                        // We need to discard the pagefile space
-                        release_slot = TRUE;
-                    }
-
-                    release_pagelock(curr_page, 10);
-
-                    disk_batch->pages_being_written[i] = NULL;
-
-                    // We would rather release the disk slot while not holding this pagelock
-                    if (release_slot) {
-                        release_single_disk_slot(disk_batch->disk_indices[i]);
-                    }
-                
-                    continue;
-                }
-
-                pages_confirmed_to_standby[num_pages_confirmed_to_standby] = curr_page;
-                num_pages_confirmed_to_standby++;
-            }
-
-            // We have pages to commit to the standby list
-            if (num_pages_confirmed_to_standby > 0) {
-
-                set_event_at_end = TRUE;
-
-                // We are able to create an entire chain of pages to the standby list very quickly
-                create_chain_of_pages(pages_confirmed_to_standby, num_pages_confirmed_to_standby, STANDBY_STATUS);
-
-                PAGE* beginning_of_section = pages_confirmed_to_standby[0];
-                PAGE* end_of_section = pages_confirmed_to_standby[num_pages_confirmed_to_standby - 1];
-               
-                BOOL signal_waiting_for_pages = (total_available_pages == 0);
-
-                insert_page_section(standby_list, beginning_of_section, end_of_section, num_pages_confirmed_to_standby);
-               
-                InterlockedAdd64(&total_available_pages, num_pages_confirmed_to_standby);
-
-                /**
-                 * Now edit all of the pages to add all of the pagefile information and release the pagelocks
-                 */
-                for (ULONG64 i = start_of_section; i < end_of_section; i++) {
-                    curr_page = disk_batch->pages_being_written[i];
-
-                    if (curr_page == NULL) continue;
-
-                    custom_spin_assert(curr_page->pagefile_idx == DISK_IDX_NOTUSED);
-                    curr_page->pagefile_idx = disk_batch->disk_indices[i];
-
-                    release_pagelock(curr_page, 21);
-                }
-
-                if (signal_waiting_for_pages == 0) {
-                    SetEvent(waiting_for_pages_event);
-                }
-            }
-        }
-        #endif
 
         // Unmap the physical pages from the large write slot
         if (MapUserPhysicalPages(disk->disk_large_write_slot, num_available_disk_slots, NULL) == FALSE) {

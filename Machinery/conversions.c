@@ -168,7 +168,7 @@ CRITICAL_SECTION* disk_idx_to_lock(ULONG64 disk_idx) {
     }
 
     //ULONG64 lock_index = disk_idx / (DISK_STORAGE_SLOTS / disk->num_locks);
-    ULONG64 lock_index = disk_idx / (disk->slots_per_lock);
+    ULONG64 lock_index = disk_idx / (disk->slots_per_section);
 
     return &disk->disk_slot_locks[lock_index];
 }

@@ -93,6 +93,10 @@ HANDLE modified_writer_event;
 
 HANDLE zero_pages_event;
 
+HANDLE refresh_lists_event;
+
+HANDLE shutdown_event;
+
 ULONG64 num_worker_threads;
 
 HANDLE* threads;
@@ -495,8 +499,12 @@ static int init_multithreading(ULONG64 num_usermode_threads) {
 
     zero_pages_event = CreateEvent(NULL, FALSE, FALSE, NULL);
 
+    refresh_lists_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+
+    shutdown_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+
     // Does not include this thread that handles page faults, and does not include worker threads
-    num_worker_threads = 4; 
+    num_worker_threads = 5; 
 
     threads = (HANDLE*) malloc(sizeof(HANDLE) * num_worker_threads);
 
@@ -577,6 +585,19 @@ static int init_multithreading(ULONG64 num_usermode_threads) {
 
     threads[3] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) thread_populate_zero_lists, zeroer_params, 0, NULL);
 
+    /**
+     * Refresh thread setup
+     */
+    WORKER_THREAD_PARAMETERS* refresher_params = (WORKER_THREAD_PARAMETERS*) malloc(sizeof(WORKER_THREAD_PARAMETERS));
+
+    if (refresher_params == NULL) {
+        fprintf(stderr, "Failed to allocate memory for worker thread parameters in init_multithreading\n");
+    }
+
+    refresher_params->thread_idx = num_usermode_threads + 4;
+    refresher_params->other_parameters = NULL;
+
+    threads[4] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) thread_free_and_zero_refresher, refresher_params, 0, NULL);
 
     for (ULONG64 thread_idx = 0; thread_idx < num_usermode_threads + num_worker_threads; thread_idx++) {
         thread_storage[thread_idx].list_refresh_status = LIST_REFRESH_NOT_ONGOING;

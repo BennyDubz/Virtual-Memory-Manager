@@ -54,7 +54,7 @@
 #define DISK_READSECTION_NEEDS_FLUSH 2 
 
 // This determines the size of the large write slot that the mod-writer uses
-#define MAX_PAGES_WRITABLE      max(DISK_STORAGE_SLOTS >> 8, 512)
+#define MAX_PAGES_WRITABLE      max(DISK_STORAGE_SLOTS >> 10, 512)
 
 // For storage slots on the disk
 #define DISK_USEDSLOT 0
@@ -87,8 +87,10 @@ typedef struct {
     UCHAR* disk_slot_statuses;
 
     CRITICAL_SECTION* disk_slot_locks;
-    ULONG64 num_locks;
-    ULONG64 slots_per_lock;
+    ULONG64 num_disk_sections;
+    ULONG64 slots_per_section;
+
+    DECLSPEC_ALIGN(64)
     ULONG64* open_slot_counts;
 
     DECLSPEC_ALIGN(64)

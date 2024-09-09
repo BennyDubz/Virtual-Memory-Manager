@@ -43,27 +43,27 @@ DISK* initialize_disk(MEM_EXTENDED_PARAMETER* vmem_parameters) {
     /**
      * Initialize disk slot locks
      */
-    ULONG64 num_locks = DISK_STORAGE_NUM_SECTIONS;
-    ULONG64 slots_per_lock = DISK_STORAGE_SLOTS / num_locks;
+    ULONG64 num_disk_sections = DISK_STORAGE_NUM_SECTIONS;
+    ULONG64 slots_per_section = DISK_STORAGE_SLOTS / num_disk_sections;
 
-    ULONG64 remaining_disk_slots = DISK_STORAGE_SLOTS % num_locks;
+    ULONG64 remaining_disk_slots = DISK_STORAGE_SLOTS % num_disk_sections;
     BOOL extra_lock;
     // Determine whether we need an extra lock for the last few disk slots
     if (remaining_disk_slots != 0) {
-        num_locks++;
+        num_disk_sections++;
         extra_lock = TRUE;
     } else {
         extra_lock = FALSE;
     }
 
-    CRITICAL_SECTION* disk_slot_locks = (CRITICAL_SECTION*) malloc(sizeof(CRITICAL_SECTION) * num_locks);
+    CRITICAL_SECTION* disk_slot_locks = (CRITICAL_SECTION*) malloc(sizeof(CRITICAL_SECTION) * num_disk_sections);
 
     if (disk_slot_locks == NULL) {
         fprintf(stderr, "Unable to allocate memory for disk slot locks in initialize_disk\n");
         return NULL;
     }
 
-    ULONG64* disk_open_slots = (ULONG64*) malloc(sizeof(ULONG64) * num_locks);
+    ULONG64* disk_open_slots = (ULONG64*) malloc(sizeof(ULONG64) * num_disk_sections);
 
     if (disk_open_slots == NULL) {
         fprintf(stderr, "Unable to allocate memory for disk_open_slots in initialize_disk\n");
@@ -71,7 +71,7 @@ DISK* initialize_disk(MEM_EXTENDED_PARAMETER* vmem_parameters) {
     }
 
     // We will set all of the final indices to DISK_USED if we have an extra lock for the last few disk slots
-    ULONG64 extra_invalid_slot_count = slots_per_lock - remaining_disk_slots;
+    ULONG64 extra_invalid_slot_count = slots_per_section - remaining_disk_slots;
     ULONG64 total_char_amount = extra_lock ? DISK_STORAGE_SLOTS + extra_invalid_slot_count : DISK_STORAGE_SLOTS;
 
     UCHAR* disk_slot_statuses = (UCHAR*) malloc(sizeof(UCHAR) * total_char_amount);
@@ -107,19 +107,19 @@ DISK* initialize_disk(MEM_EXTENDED_PARAMETER* vmem_parameters) {
      * Keeping a count of the number of open disk slots in each section can make
      * searching for disk slots much easier
      */
-    for (ULONG64 lock_num = 0; lock_num < num_locks; lock_num++) {
+    for (ULONG64 lock_num = 0; lock_num < num_disk_sections; lock_num++) {
         initialize_lock(&disk_slot_locks[lock_num]);
         if (lock_num == 0) {
-            disk_open_slots[lock_num] = slots_per_lock - 1;
-        } else if (extra_lock && lock_num == num_locks - 1){
+            disk_open_slots[lock_num] = slots_per_section - 1;
+        } else if (extra_lock && lock_num == num_disk_sections - 1){
             disk_open_slots[lock_num] = remaining_disk_slots;
         } else {
-            disk_open_slots[lock_num] = slots_per_lock;
+            disk_open_slots[lock_num] = slots_per_section;
         }
     }
 
-    disk->num_locks = num_locks;
-    disk->slots_per_lock = slots_per_lock;
+    disk->num_disk_sections = num_disk_sections;
+    disk->slots_per_section = slots_per_section;
     disk->disk_slot_locks = disk_slot_locks;
     disk->open_slot_counts = disk_open_slots;
     disk->total_available_slots = DISK_STORAGE_SLOTS - 1;

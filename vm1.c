@@ -189,6 +189,10 @@ void usermode_virtual_memory_simulation () {
     // citizen and free it.
     //
 
+    SetEvent(shutdown_event);
+
+    WaitForMultipleObjects(num_worker_threads, threads, TRUE, INFINITE);
+
     VirtualFree (vmem_base, 0, MEM_RELEASE);
 
     return;

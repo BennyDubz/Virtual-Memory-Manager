@@ -201,9 +201,11 @@ void unlink_page(PAGE_LIST* list, PAGE* page);
 
 /**
  * Inserts the chain of pages between the beginning and end at the head,
- * where the beginning node will be closest to the head 
+ * where the beginning node will be closest to the head. 
  * 
- * Takes advantage of the shared lock and pagelock scheme. Does NOT release the pagelocks for each node in the section
+ * Releases all of the pagelocks for the pages we add into the list
+ * 
+ * Takes advantage of the shared lock and pagelock scheme
  */
 void insert_page_section(PAGE_LIST* list, PAGE* beginning, PAGE* end, ULONG64 num_pages);
 
