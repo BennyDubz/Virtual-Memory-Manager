@@ -670,7 +670,7 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
         PULONG_PTR source_addr = disk->disk_large_write_slot;
         BOOL release_slot;
         PULONG_PTR disk_slot_addr;
-        ULONG64 num_minibatches = min(disk_batch->num_pages / MOD_WRITER_MINIBATCH_SIZE + 1, MAX_PAGES_WRITABLE / MOD_WRITER_MINIBATCH_SIZE);
+        ULONG64 num_minibatches = min((disk_batch->num_pages / MOD_WRITER_MINIBATCH_SIZE) + 1, MAX_PAGES_WRITABLE / MOD_WRITER_MINIBATCH_SIZE);
         ULONG64 start_of_minibatch;
         ULONG64 end_of_minibatch;
         PAGE* curr_page;

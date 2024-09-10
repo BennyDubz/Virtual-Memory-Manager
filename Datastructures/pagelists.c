@@ -394,6 +394,8 @@ void unlink_batch_scattered_pages(PAGE_LIST* list, PAGE** pages_to_remove, ULONG
                 curr_page->flink = NULL;
                 curr_page->blink = NULL;
 
+                if (curr_page->page_lock == PAGE_UNLOCKED) DebugBreak();
+
                 /**
                  * We need to check that we acquired pagelocks that were NOT in our list already before we release them
                  */
@@ -458,7 +460,7 @@ void unlink_batch_scattered_pages(PAGE_LIST* list, PAGE** pages_to_remove, ULONG
  * Assumes that you already hold the lock for the page that you are trying to unlink
  */
 void unlink_page(PAGE_LIST* list, PAGE* page) {
-    if (page->status == LIST_STATUS) {
+    if (page->status == LIST_STATUS || page->page_lock == PAGE_UNLOCKED) {
         DebugBreak();
     }
 
@@ -622,10 +624,8 @@ void remove_page_section(PAGE_LIST* list, PAGE* beginning, PAGE* end, ULONG64 nu
             InterlockedAdd64(&list->list_length, - num_pages);
 
             release_pagelock(ahead, 75);
-
-            if (ahead != behind) {
-                release_pagelock(behind, 76);
-            }
+            release_pagelock(behind, 76);
+            
 
             ReleaseSRWLockShared(&list->shared_lock);
 

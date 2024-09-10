@@ -531,7 +531,8 @@ ULONG64 allocate_many_disk_slots(ULONG64* result_storage, ULONG64 num_disk_slots
             // Now we have a disk slot to use
             open_disk_idx = disk_idx;
             disk->disk_slot_statuses[disk_idx] = DISK_USEDSLOT;
-            disk->open_slot_counts[section] -= 1;
+            
+            InterlockedDecrement64(&disk->open_slot_counts[section]);
             InterlockedDecrement64(&disk->total_available_slots);
 
             result_storage[num_slots_allocated] = disk_idx;
@@ -543,6 +544,8 @@ ULONG64 allocate_many_disk_slots(ULONG64* result_storage, ULONG64 num_disk_slots
 
         if (num_slots_allocated == num_disk_slots) return num_disk_slots;
     }
+
+    if (num_slots_allocated < num_disk_slots) DebugBreak();
 
     return num_slots_allocated;
 
@@ -612,9 +615,9 @@ int release_single_disk_slot(ULONG64 disk_idx) {
 
     // EnterCriticalSection(disk_idx_to_lock(disk_idx));
 
-    InterlockedExchange8(&disk->disk_slot_statuses[disk_idx], DISK_FREESLOT);
-
     InterlockedIncrement64(&disk->open_slot_counts[disk_idx / disk->slots_per_section]);
+
+    InterlockedExchange8(&disk->disk_slot_statuses[disk_idx], DISK_FREESLOT);
 
     if (InterlockedIncrement64(&disk->total_available_slots) == 0) {
         SetEvent(disk_open_slots_event);

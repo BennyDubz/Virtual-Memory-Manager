@@ -20,7 +20,7 @@
  * Note that we might have one more lock section to account for the additional two disk slots that we have that make
  * the total no longer divisible by two
  */
-#define DISK_STORAGE_NUM_SECTIONS   max(DISK_STORAGE_SLOTS >> 4, 1);
+#define DISK_STORAGE_NUM_SECTIONS   max(DISK_STORAGE_SLOTS >> 8, 1);
 
 // The maximum number of pages readable from a single thread at a time
 #define MAX_PAGES_READABLE      16

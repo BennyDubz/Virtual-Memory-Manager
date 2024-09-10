@@ -75,6 +75,7 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
     }
     #endif
 
+
     #ifdef DEBUG_CHECKING
     custom_spin_assert(modified_list->list_length <= disk->total_available_slots);
     custom_spin_assert(disk->disk_slot_statuses[DISK_IDX_NOTUSED] == DISK_USEDSLOT);
@@ -199,9 +200,9 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
     }
     
 
-    // if (is_disk_format(local_pte) == FALSE) {
-    commit_pages(allocated_pages, ptes_to_connect, accessed_pte, num_ptes_to_connect, access_type);
-    // }
+    if (is_disk_format(local_pte) == FALSE) {
+        commit_pages(allocated_pages, ptes_to_connect, accessed_pte, num_ptes_to_connect, access_type);
+    }
 
     #if 0
     // We are writing to the page - this may communicate to the modified writer that they need to return pagefile space
@@ -260,17 +261,9 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
     }
     #endif
 
-
-    if (num_ptes_to_connect == 1) {
-        if (connect_pte_to_page(ptes_to_connect[0], allocated_pages[0], access_type) == ERROR) {
-            DebugBreak();
-        }
-    } else {
-        if (connect_batch_ptes_to_pages(ptes_to_connect, accessed_pte, allocated_pages, access_type, num_ptes_to_connect) == ERROR) {
-            DebugBreak();
-        }
+    if (connect_batch_ptes_to_pages(ptes_to_connect, accessed_pte, allocated_pages, access_type, num_ptes_to_connect) == ERROR) {
+        DebugBreak();
     }
-
     
     if (is_used_pte(local_pte) == FALSE) {
         LeaveCriticalSection(pte_lock);
@@ -834,7 +827,7 @@ static int handle_disk_pte_fault(ULONG64 thread_idx, PTE* accessed_pte, PAGE** r
         release_sequential_disk_read_rights(&ptes_to_connect_storage[num_pages_acquired], num_to_read - num_pages_acquired);
     }
 
-    // commit_pages(result_pages_storage, ptes_to_connect_storage, accessed_pte, num_pages_acquired, access_type);
+    commit_pages(result_pages_storage, ptes_to_connect_storage, accessed_pte, num_pages_acquired, access_type);
 
     THREAD_DISK_READ_RESOURCES* thread_disk_resources = &thread_information.thread_local_storages[thread_idx].disk_resources;
 
@@ -954,11 +947,7 @@ static void commit_pages(PAGE** pages_to_commit, PTE** ptes, PTE* accessed_pte, 
     }
 
     // We may need to release stale pagefile slots and/or modify the page's pagefile information
-    if (num_pages == 1) {
-        handle_end_of_fault_disk_slot(read_pte_contents(ptes[0]), pages_to_commit[0], access_type);
-    } else {
-        handle_batch_end_of_fault_disk_slot(ptes, accessed_pte, pages_to_commit, access_type, num_pages);
-    }
+    handle_batch_end_of_fault_disk_slot(ptes, accessed_pte, pages_to_commit, access_type, num_pages);
 
     /**
      * For unaccessed PTEs, we need to ensure they start off with a clean page

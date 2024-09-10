@@ -329,9 +329,7 @@ LPTHREAD_START_ROUTINE thread_populate_zero_lists(void* parameters) {
 
         InterlockedAnd(&page_zeroing->zeroing_ongoing, FALSE);
 
-        // Get all of the pages from the standby list into our sections
-        // standby_zerolist_pop_batch(page_sections, ptes_to_update, pte_section_counts, page_section_counts, num_to_repurpose);
-        
+        // Get all of the pages from the standby list into our sections        
         zero_list_add_batch(page_list, num_to_zero);
 
         // We are unlikely to need to work immediately, we should potentially do some extra work while we are awake
