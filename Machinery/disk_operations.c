@@ -531,7 +531,7 @@ ULONG64 allocate_many_disk_slots(ULONG64* result_storage, ULONG64 num_disk_slots
             // Now we have a disk slot to use
             open_disk_idx = disk_idx;
             disk->disk_slot_statuses[disk_idx] = DISK_USEDSLOT;
-            
+
             InterlockedDecrement64(&disk->open_slot_counts[section]);
             InterlockedDecrement64(&disk->total_available_slots);
 
@@ -757,10 +757,11 @@ void handle_batch_end_of_fault_disk_slot(PTE** ptes, PTE* original_pte_accessed,
  * Real disks take a long time to perform their operations. We simulate this
  * by forcing the caller to spin, so that we can better represent optimizations
  * on disk operations
+ * 
+ * This
  */
 static void disk_spin() {
-    // If we want to test with a lenient disk (so that we are not slowed down),
-    #ifndef LENIENT_DISK
+    #ifdef HARSH_DISK
     for (int i = 0; i < MB(3); i++) {}
     #endif
 

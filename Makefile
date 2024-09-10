@@ -7,8 +7,8 @@ CC=cl
 # Custom flags
 LOCK_SPINNING_FLAGS=-DLOCK_SPINNING=1
 DEBUG_FLAGS=-DDEBUG_CHECKING=1
-LARGE_SIM_FLAGS=-DLARGE_SIM=1
-LENIENT_DISK_FLAGS=-DLENIENT_DISK=1
+SMALL_SIM_FLAGS=-DSMALL_SIM=1
+HARSH_DISK_FLAGS=-DHARSH_DISK=1
 
 CFLAGS=/Zi /EHsc /I.
 
@@ -41,23 +41,24 @@ vm.exe: $(OBJ)
 	$(CC) $(CFLAGS) /Fevm.exe /Fo:. $^
 
 #### Custom targets ####
-large: CFLAGS += $(LARGE_SIM_FLAGS)
-large: vm.exe
+small: CFLAGS += $(SMALL_SIM_FLAGS)
+small: vm.exe
 
-lenient_disk: CFLAGS += $(LENIENT_DISK_FLAGS)
-lenient_disk: vm.exe
+# Enabling the harsh disk makes the disk operations take longer ()
+harsh_disk: CFLAGS += $(HARSH_DISK_FLAGS)
+harsh_disk: vm.exe
 
-large_lenient: CFLAGS += $(LARGE_SIM_FLAGS) $(LENIENT_DISK_FLAGS)
-large_lenient: vm.exe
+small_harsh: CFLAGS += $(SMALL_SIM_FLAGS) $(HARSH_DISK_FLAGS)
+small_harsh: vm.exe
 
 lock_spinning: CFLAGS += $(LOCK_SPINNING_FLAGS)
 lock_spinning: vm.exe
 
-lock_spinning_lenient: CFLAGS += $(LOCK_SPINNING_FLAGS) $(LENIENT_DISK_FLAGS)
-lock_spinning_lenient: vm.exe
+lock_spinning_harsh: CFLAGS += $(LOCK_SPINNING_FLAGS) $(HARSH_DISK_FLAGS)
+lock_spinning_harsh: vm.exe
 
-large_spinning_lenient: CFLAGS += $(LOCK_SPINNING_FLAGS) $(LENIENT_DISK_FLAGS) $(LARGE_SIM_FLAGS)
-large_spinning_lenient: vm.exe
+small_spinning_harsh: CFLAGS += $(LOCK_SPINNING_FLAGS) $(HARSH_DISK_FLAGS) $(SMALL_SIM_FLAGS)
+small_spinning_harsh: vm.exe
 
 debug: CFLAGS += $(DEBUG_FLAGS)
 debug: vm.exe

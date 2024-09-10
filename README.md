@@ -12,6 +12,8 @@ I take advantage of Windows APIs that allow me to manage a chunk of physical mem
 
 In order to run the simulation, you would need to be using a Windows computer and adjust their settings so that my program isn't flagged as a virus. To do this, go to Security Settings -> Local Policies -> User Rights Assignment and enable "“lock pages in memory" for your user. 
 
+Then, to compile, just run "make" in the parent directory. See the makefile for other possible configurations.
+
 ## The Progression
 
 ### Single-threaded Implementation
@@ -39,7 +41,7 @@ It is one thing to have a multi-threaded state machine, but another for it to ac
 
 4. **Shared locks** - Originally, I used critical sections in order to protect all of the linked list datastructures. However, with the use of pagelocks, I was able to move toward a shared-lock scheme so that multiple threads can edit the linked lists at the same time. This allows faulting threads to rescue pages from the modified/standby lists simultaneously while rarely colliding with eachother or the other system threads
 
-5. **Preserved Pagefile Space & Distinguishing Read / Read-Write Permissions** - When an address is read from rather than written to, if we have a copy of the memory stored on the disk we can keep it there rather than immediately invalidating it if we failed to distinguish between reads and writes. This allows us to trim pages directly to standby and reduce the amount of time that the modified-writer thread needs to work
+5. **Preserved Pagefile Space Through Distinguishing Read / Read-Write Permissions and Accesses** - When an address is read from rather than written to, if we have a copy of the memory stored on the disk we can keep it there rather than immediately invalidating it if we failed to distinguish between reads and writes. This allows us to trim pages directly to standby and reduce the amount of time that the modified-writer thread needs to work
 
 6. **Additional System Worker Threads** - I implemented threads that would keep the free and zero lists replenished with pages, reducing contention on the standby list. Moreover, I implemented a thread that can zero-out many pages at once. This reduces the overall workload on the faulters if there is a sudden demand for zeroed pages.
 

@@ -11,7 +11,7 @@
 #include "../macros.h"
 
 void initialize_lock(CRITICAL_SECTION* critsec) {
-    InitializeCriticalSection(critsec);
+    InitializeCriticalSectionAndSpinCount(critsec, MB(2));
 
     #ifdef LOCK_SPINNING
     SetCriticalSectionSpinCount(critsec, MB(16) - 1);

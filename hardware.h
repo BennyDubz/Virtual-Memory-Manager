@@ -28,16 +28,17 @@
 #define DOWN_TO_PAGE_ADDR(x) (x & ~(PAGE_SIZE - 1))
 #define DOWN_TO_PAGE_NUM(x) (x >> PAGE_POWER)
 
-#ifndef LARGE_SIM
+
+#ifndef SMALL_SIM
 
 /**
- * SMALL SIMULATION
+ * LARGE SIMULATION
  */
-#define VIRTUAL_ADDRESS_SIZE        MB(8)
+#define VIRTUAL_ADDRESS_SIZE        GB(1)
 
 #define VIRTUAL_ADDRESS_SIZE_IN_UNSIGNED_CHUNKS        (VIRTUAL_ADDRESS_SIZE / sizeof (ULONG_PTR))
 
-#define CACHE_SIZE      KB(16)
+#define CACHE_SIZE      MB(1)
 
 /**
  * Right now, we need the + 2 as we do not use the 0th disk slot, and we need an extra for mod-writing when all other slots are taken.
@@ -54,26 +55,24 @@
  * and on disk if we are running low on pagefile space - but I haven't implemented this yet (but might in the future).
  * 
  */
+#define DISK_SIZE      (VIRTUAL_ADDRESS_SIZE + (PAGE_SIZE * 2))
+
+#define NUMBER_OF_PHYSICAL_PAGES   ((VIRTUAL_ADDRESS_SIZE / PAGE_SIZE) / 3)
+
+#else
+
+
+/**
+ * SMALL SIMULATION
+ */
+#define VIRTUAL_ADDRESS_SIZE        MB(8)
+
+#define VIRTUAL_ADDRESS_SIZE_IN_UNSIGNED_CHUNKS        (VIRTUAL_ADDRESS_SIZE / sizeof (ULONG_PTR))
+
+#define CACHE_SIZE      KB(16)
+
 #define DISK_SIZE       (VIRTUAL_ADDRESS_SIZE + (PAGE_SIZE * 2))
 
 #define NUMBER_OF_PHYSICAL_PAGES   ((VIRTUAL_ADDRESS_SIZE / PAGE_SIZE) / 3)
 
-
-#else
-
-/**
- * LARGE SIMULATION
- */
-#define VIRTUAL_ADDRESS_SIZE        GB(1)
-
-#define VIRTUAL_ADDRESS_SIZE_IN_UNSIGNED_CHUNKS        (VIRTUAL_ADDRESS_SIZE / sizeof (ULONG_PTR))
-
-#define CACHE_SIZE      MB(1)
-
-/**
- * See above comment for the reasoning behind this number
- */
-#define DISK_SIZE      (VIRTUAL_ADDRESS_SIZE + (PAGE_SIZE * 2))
-
-#define NUMBER_OF_PHYSICAL_PAGES   ((VIRTUAL_ADDRESS_SIZE / PAGE_SIZE) / 3)
 #endif

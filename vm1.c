@@ -13,23 +13,12 @@
 #include "./Datastructures/pagelists.h"
 
 
-#define NUM_USERMODE_THREADS        ((ULONG64) (10))
+#define NUM_USERMODE_THREADS        ((ULONG64) (12))
 #define MAX_CONSECUTIVE_ACCESSES    64
-#define TOTAL_ACCESS_AMOUNT         (GB(5))
+#define TOTAL_ACCESS_AMOUNT         (MB(10))
 
 // How frequently in milliseconds we print out all of the information about the simulation and our current progress
 #define PRINT_FREQUECY_MS          2000 
-
-/**
- * 1 thread - 10mb - 21.1 seconds
- * 2 threads - 10mb - 12.67 seconds
- * 4 threads - 10mb - 8.95 seconds
- * 6 threads - 10 mb - 7.5 seconds
- * 8 threads - 10 mb - 7.4 seconds
- * 10 threads - 10mb - 6.75 seconds
- * 12 threads - 10mb - 6.6 seconds
- */
-
 
 /**
  * Reads are more common in the real world - if (random_number % WRITE_PROBABILITY_MODULO == 0) then we write to the address
