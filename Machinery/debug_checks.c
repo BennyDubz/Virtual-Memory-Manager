@@ -14,69 +14,6 @@
 
 void custom_spin_assert(BOOL expression);
 
-#if 0
-/**
- * Returns TRUE if the page is not in the free, modfied, or standby lists, FALSE otherwise
- */
-int page_is_isolated(PAGE* page) {
-    if (page == NULL) {
-        fprintf(stderr, "NULL page given to page_is_isolated\n");
-        return OTHER_ERROR;
-    }
-    DB_LL_NODE* curr_node;
-
-    // Check the free lists
-    for (ULONG64 free_list = 0; free_list < NUM_CACHE_SLOTS; free_list++) {
-        EnterCriticalSection(&free_frames->list_locks[free_list]);
-
-        curr_node = free_frames->listheads[free_list]->flink;
-
-        while (curr_node != free_frames->listheads[free_list]) {
-            if (curr_node->item == page) {
-                LeaveCriticalSection(&free_frames->list_locks[free_list]);
-                return IN_FREE;
-            }
-
-            curr_node = curr_node->flink;
-        }
-        
-        LeaveCriticalSection(&free_frames->list_locks[free_list]);
-    }
-
-    // Check the modified list
-    EnterCriticalSection(&modified_list->lock);
-    curr_node = modified_list->head->flink;
-    while (curr_node != modified_list->head) {
-        if (curr_node->item == page) {
-            LeaveCriticalSection(&modified_list->lock);
-            return IN_MODIIFED;
-        }
-
-        curr_node = curr_node->flink;
-    }
-
-    LeaveCriticalSection(&modified_list->lock);
-
-
-    // Check the standby list
-    EnterCriticalSection(&standby_list->lock);
-    curr_node = standby_list->head->flink;
-    while (curr_node != standby_list->head) {
-        if (curr_node->item == page) {
-            LeaveCriticalSection(&standby_list->lock);
-            return IN_STANDBY;
-        }
-
-        curr_node = curr_node->flink;
-    }
-
-    LeaveCriticalSection(&standby_list->lock);
-
-    return ISOLATED;
-}
-#endif
-
-
 
 /**
  * Returns TRUE if the pfn is associated with a single PTE, FALSE if it is associated with zero

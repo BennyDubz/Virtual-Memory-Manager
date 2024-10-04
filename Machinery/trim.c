@@ -299,12 +299,7 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
                 insert_page_section(modified_list, beginning_of_section, end_of_section, trim_to_modified);
 
                 signal_modified = TRUE;
-                #if 0
-                // If we are desperate, set the event to start mod writing immediately
-                if (total_available_pages < physical_page_count / 3) {
-                    SetEvent(modified_writer_event);
-                }
-                #endif
+               
                 SetEvent(modified_writer_event);
             }   
 
@@ -649,14 +644,6 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
          * and write as many pages to disk as we can
          */
         ULONG64 num_to_get_per_section;
-        
-        #if 0
-        if (standby_list->list_length < physical_page_count / MOD_WRITER_PREFERRED_STANDBY_MINIMUM_PROPORTION) {
-            num_to_get_per_section = num_to_write;
-        } else {
-            num_to_get_per_section = MOD_WRITER_SECTION_SIZE;
-        }
-        #endif
 
         while (curr_attempts < num_to_write) {
             section_attempts = 0;
@@ -926,19 +913,15 @@ static void determine_batch_address_appropriate_permissions(PTE** ptes_in_questi
     if (original_accessed_pte != ptes_in_question[0]) {
         start_index = 0;
     } else {
-        #if 0
-        if (access_type == WRITE_ACCESS || is_used_pte(read_pte_contents(original_accessed_pte)) == FALSE) {
-            permission_storage[0] = PAGE_READWRITE;
-        } else {
-            permission_storage[0] = PAGE_READONLY;
-        }
-        #else
+        /**
+         * If the PTE is in memory format, it has the "being-changed" bit set - and it was a previously
+         * an unaccessed PTE whose fault we are resolving. 
+         */
         if (access_type == WRITE_ACCESS || is_memory_format(read_pte_contents(original_accessed_pte))) {
             permission_storage[0] = PAGE_READWRITE;
         } else {
             permission_storage[0] = PAGE_READONLY;
         }
-        #endif
         start_index = 1;
     }
 
@@ -946,19 +929,16 @@ static void determine_batch_address_appropriate_permissions(PTE** ptes_in_questi
     for (ULONG64 i = start_index; i < num_ptes; i++) {
         curr_pte = ptes_in_question[i];
 
-        #if 0
-        if (is_used_pte(read_pte_contents(curr_pte)) == FALSE) {
-            permission_storage[i] = PAGE_READWRITE;
-        } else {
-            permission_storage[i] = PAGE_READONLY;
-        }
-        #else
+        /**
+         * If the PTE is in memory format, it has the "being-changed" bit set - and it was a previously
+         * an unaccessed PTE who we are speculatively bring in. Since it cannot have any pagefile space preserved,
+         * we set its permissions to READWRITE to avoid an extra fault if we write to the PTE.
+         */
         if (is_memory_format(read_pte_contents(curr_pte))) {
             permission_storage[i] = PAGE_READWRITE;
         } else {
             permission_storage[i] = PAGE_READONLY;
         }
-        #endif
 
     }
 }

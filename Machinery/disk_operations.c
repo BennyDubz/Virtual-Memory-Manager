@@ -154,29 +154,6 @@ static int acquire_disk_readsection(ULONG64* disk_readsection_idx_storage, THREA
         return SUCCESS;
     }
 
-    #if 0
-    while (num_attempts < DISK_READSECTIONS && disk->num_available_readsections > 0) {   
-        /**
-         * Using the interlocked operations here with the read indices makes it almost certain that threads will not share the same
-         * read index, and if we are able to refresh the slots frequently enough, then we should be able to find a disk slot in
-         * O(1) time rather than the worst case O(n) time if we performed a typical linear walk. The worst case scenario though is still the
-         * linear walk that fails to find a disk slot - in which case a thread will refresh the read slots in the parent
-         */
-        curr_idx = InterlockedIncrement64(&disk->disk_read_curr_idx) % DISK_READSECTIONS;
-
-        old_val = InterlockedCompareExchange(&disk->disk_readsection_statuses[curr_idx], DISK_READSECTION_USED, DISK_READSECTION_OPEN);
-        
-        // We successfully claimed the disk slot
-        if (old_val == DISK_READSECTION_OPEN) {
-            *disk_readsection_idx_storage = curr_idx;
-            InterlockedDecrement64(&disk->num_available_readsections);
-            return SUCCESS;
-        }
-
-        num_attempts++;
-    }
-    #endif
-
     // There were no slots available, we will need to refresh the list and try again
     return ERROR;
 }
@@ -190,68 +167,6 @@ static void release_disk_readsection(ULONG64 disk_readslot_idx) {
     custom_spin_assert(InterlockedIncrement(&disk->disk_readsection_statuses[disk_readslot_idx].status) == DISK_READSECTION_NEEDS_FLUSH);
 }
 
-#if 0
-/**
- * Releases all of the given readslots and sets their statuses to DISK_READSECTION_NEEDS_FLUSH
- */
-static void release_batch_disk_readslots(ULONG64* disk_read_indices, ULONG64 num_to_release) {
-    for (ULONG64 i = 0; i < num_to_release; i++) {
-        custom_spin_assert(InterlockedIncrement(&disk->disk_readsection_statuses[disk_read_indices[i]]) == DISK_READSECTION_NEEDS_FLUSH);
-    }
-}
-#endif
-
-#if 0
-/**
- * Tries to find num_to_acquire disk readslots and writes them into the storage
- * 
- * Returns the number of disk readslots found
- */
-#define READSLOT_INTERLOCKED_OPERATIONS 1
-static ULONG64 acquire_batch_disk_readslots(ULONG64* disk_read_indices_storage, ULONG64 num_to_acquire) {
-    long old_val;
-
-    ULONG64 num_attempts = 0;
-    ULONG64 num_acquired = 0;
-    #if READSLOT_INTERLOCKED_OPERATIONS
-    ULONG64 curr_idx;
-    #else
-    ULONG64 curr_idx = 0;
-    #endif
-
-    while (num_attempts < DISK_READ_SLOTS && num_acquired < num_to_acquire) {   
-
-        #if READSLOT_INTERLOCKED_OPERATIONS
-        /**
-         * Using the interlocked operations here with the read indices makes it almost certain that threads will not share the same
-         * read index, and if we are able to refresh the slots frequently enough, then we should be able to find a disk slot in
-         * O(1) time rather than the worst case O(n) time if we performed a typical linear walk. The worst case scenario though is still the
-         * linear walk that fails to find a disk slot - in which case a thread will refresh the read slots in the parent
-         */
-        curr_idx = InterlockedIncrement64(&disk->disk_read_curr_idx) % DISK_READ_SLOTS;
-        #endif
-
-        old_val = InterlockedCompareExchange(&disk->disk_readsection_statuses[curr_idx], DISK_READSECTION_USED, DISK_READSECTION_OPEN);
-            
-        // We successfully claimed the disk slot
-        if (old_val == DISK_READSECTION_OPEN) {
-            disk_read_indices_storage[num_acquired] = curr_idx;
-            InterlockedDecrement64(&disk->num_available_readsections);
-            num_acquired++;
-        }
-
-
-        #if READSLOT_INTERLOCKED_OPERATIONS
-        #else
-        curr_idx++;
-        #endif
-        num_attempts++;
-    }
-
-    // There were no slots available, we will need to refresh the list and try again
-    return num_acquired;
-}
-#endif
 
 /**
  * Unmaps all of these readslot virtual addresses from the CPU,
@@ -346,69 +261,6 @@ static void refresh_disk_readslots(THREAD_DISK_READ_RESOURCES* thread_disk_resou
 
 }
 
-#if 0
-/**
- * Fetches the memory from the disk index and puts it onto the open page
- * 
- * Returns SUCCESS if there are no issues, ERROR otherwise
- */
-int read_page_from_disk(PAGE* open_page, ULONG64 disk_idx) {
-    if (disk_idx > DISK_STORAGE_SLOTS) {
-        fprintf(stderr, "Disk idx too large in read_page_from_disk\n");
-        DebugBreak();
-        return ERROR;
-    }
-
-    ULONG64 pfn = page_to_pfn(open_page);
-
-    PULONG_PTR disk_slot_addr = disk_idx_to_addr(disk_idx);
-
-    ULONG64 disk_readsection;
-
-    // Someone else likely beat us to freeing this disk slot
-    if (disk->disk_slot_statuses[disk_idx] == DISK_FREESLOT) { 
-        DebugBreak();
-    }
-
-
-    // We if this fails, we need to try to begin the refresh process if it hasn't begun already
-    while (acquire_disk_readsection(&disk_readsection) == ERROR) {
-        
-        /**
-         * Right now, we will try immediately again if the refresh is ongoing - since it may have refreshed pages behind us
-         * otherwise, if a refresh is not ongoing, we will do it ourselves
-         */
-        if (disk_refresh_ongoing == FALSE) {
-            // If another thread beat us to it, this will return almost immediately
-            refresh_disk_readslots();
-        }
-    }
-
-    PULONG_PTR disk_read_addr = disk->disk_read_base_addr + (disk_readsection * PAGE_SIZE / sizeof(PULONG_PTR));
-
-    // Map the CPU
-    if (MapUserPhysicalPages (disk_read_addr, 1, &pfn) == FALSE) {
-        fprintf (stderr, "read_page_from_disk : could not map VA %p\n", disk_read_addr);
-        DebugBreak();
-        return ERROR;
-    }
-
-    memcpy(disk_read_addr, disk_slot_addr, (size_t) PAGE_SIZE);
-
-    // To simulate that real disks are slow, we spin a bit here
-    disk_spin();
-
-    release_disk_readsection(disk_readsection);
-    
-    // If we are running low on disk read slots, attempt to refresh the disk slots
-    if (disk->num_available_readsections < DISK_REFRESH_BOUNDARY && disk_refresh_ongoing == FALSE) {
-        // If someone else is already doing it (race condition) - we will return almost immediately
-        refresh_disk_readslots();
-    }
-
-    return SUCCESS;
-}
-#endif
 
 /**
  * Reads all of the data from the given disk indices on the PTEs into the given pages
@@ -489,14 +341,6 @@ int read_pages_from_disk(PAGE** open_pages, PTE** ptes_to_read, ULONG64 num_to_r
     // If we are simulating a penalty for the disk operations, we spin here
     disk_spin();
 
-    #if 0
-    // If we are running low on disk read slots, attempt to refresh the disk slots
-    if (disk->num_available_readsections < DISK_REFRESH_BOUNDARY && disk_refresh_ongoing == FALSE) {
-        // If someone else is already doing it (race condition) - we will return almost immediately
-        refresh_disk_readslots();
-    }
-    #endif
-
     return SUCCESS;
 }
 
@@ -548,48 +392,6 @@ ULONG64 allocate_many_disk_slots(ULONG64* result_storage, ULONG64 num_disk_slots
     if (num_slots_allocated < num_disk_slots) DebugBreak();
 
     return num_slots_allocated;
-
-    #if 0
-    /**
-     * Now, we are forced to wait for disk lock sections
-     */
-    for (ULONG64 lock_section = 0; lock_section < disk->num_locks; lock_section++) {
-        section_start = lock_section * disk->slots_per_section;
-        
-        // This will block the thread until we get into the critical section, and is the only part
-        // that differs from the previous loop
-        EnterCriticalSection(&disk->disk_slot_locks[lock_section]);
-
-        // Skip over empty disk sections
-        if (disk->open_slot_counts[lock_section] == 0) {
-            LeaveCriticalSection(&disk->disk_slot_locks[lock_section]);
-            continue;
-        }
-
-        // Now we are guaranteed to find a disk slot somewhere in this section
-        for (ULONG64 disk_idx = section_start; disk_idx < section_start + disk->slots_per_section; disk_idx++) {
-            if (disk->disk_slot_statuses[disk_idx] == DISK_USEDSLOT) continue;
-
-            // Now we have a disk slot to use
-            open_disk_idx = disk_idx;
-            disk->disk_slot_statuses[disk_idx] = DISK_USEDSLOT;
-            disk->open_slot_counts[lock_section] -= 1;
-
-            result_storage[num_slots_allocated] = disk_idx;
-            num_slots_allocated++;
-
-            // If we have found enough slots, or there are none left in this section, break out
-            if (num_slots_allocated == num_disk_slots || disk->open_slot_counts[lock_section] == 0) break;
-        }
-
-        LeaveCriticalSection(&disk->disk_slot_locks[lock_section]);
-
-        if (num_slots_allocated == num_disk_slots) return num_disk_slots;
-    }
-
-
-    return num_slots_allocated;
-    #endif
 }
 
 
@@ -629,61 +431,6 @@ int release_single_disk_slot(ULONG64 disk_idx) {
     return SUCCESS;
 }
 
-#if 0
-/**
- * Called at the end of a pagefault to determine whether or not a pagefile slot needs to be
- * released. Modifies the page if necessary to remove the reference to the pagefile slot if it is released,
- * and releases the disk slot if appropriate
- * 
- * Assumes the caller holds the given page's pagelock.
- */
-void handle_end_of_fault_disk_slot(PTE local_pte, PAGE* allocated_page, ULONG64 access_type) {
-        
-    if (access_type == READ_ACCESS) {
-
-        // We want to store the disk index in the page so we don't lose it
-        if (is_disk_format(local_pte)) {
-            UCHAR disk_status = disk->disk_slot_statuses[local_pte.disk_format.pagefile_idx];
-
-            allocated_page->pagefile_idx = local_pte.disk_format.pagefile_idx;
-            custom_spin_assert(disk_status == DISK_USEDSLOT);
-            return;
-        }
-
-        if (is_used_pte(local_pte) == FALSE) {
-            allocated_page->pagefile_idx = DISK_IDX_NOTUSED;
-            return;
-        } 
-        
-        // By enabling this, we no longer preserve disk slots. Trimming straight to standby will now be impossible
-        #if DISABLE_PAGEFILE_PRESERVATION
-        if (is_transition_format(local_pte) && allocated_page->pagefile_idx != DISK_IDX_NOTUSED) {
-            release_single_disk_slot(allocated_page->pagefile_idx);
-            allocated_page->pagefile_idx = DISK_IDX_NOTUSED;
-        }
-        #endif
-
-        return;
-    }
-
-    if (access_type == WRITE_ACCESS) {
-
-        // We have to throw out the pagefile space stored in the PTE
-        if (is_disk_format(local_pte)) {
-            release_single_disk_slot(local_pte.disk_format.pagefile_idx);
-        } else if (is_transition_format(local_pte) && allocated_page->status == STANDBY_STATUS) {
-            release_single_disk_slot(allocated_page->pagefile_idx);
-        }
-
-        // In all cases, we cannot store any pagefile information in the page
-        allocated_page->pagefile_idx = DISK_IDX_NOTUSED;
-        return;
-    }
-    
-    DebugBreak();
-}
-#endif
-
 
 /**
  * Called at the end of a pagefault to determine whether or not pagefile slots need to be
@@ -712,16 +459,11 @@ void handle_batch_end_of_fault_disk_slot(PTE** ptes, PTE* original_pte_accessed,
             if (is_memory_format(read_pte_contents(original_pte_accessed))) {
                 allocated_pages[0]->pagefile_idx = DISK_IDX_NOTUSED;
             }
-            #if 0
-            if (is_used_pte(read_pte_contents(original_pte_accessed)) == FALSE) {
-                allocated_pages[0]->pagefile_idx = DISK_IDX_NOTUSED;
-            } 
-            #else
+
             // These represent unaccessed PTEs whose "being_changed" bits are set - they have yet to be mapped
             if (is_memory_format(read_pte_contents(original_pte_accessed))) {
                 allocated_pages[0]->pagefile_idx = DISK_IDX_NOTUSED;
             }
-            #endif
         }
 
         if (access_type == WRITE_ACCESS) {
@@ -753,18 +495,11 @@ void handle_batch_end_of_fault_disk_slot(PTE** ptes, PTE* original_pte_accessed,
         }
 
 
-        #if 0
-        if (is_used_pte(read_pte_contents(curr_pte)) == FALSE) {
-            curr_page->pagefile_idx = DISK_IDX_NOTUSED;
-            continue;
-        }
-        #else
         // These represent unaccessed PTEs whose "being_changed" bits are set - they have yet to be mapped
         if (is_memory_format(read_pte_contents(original_pte_accessed))) {
             curr_page->pagefile_idx = DISK_IDX_NOTUSED;
             continue;
         }
-        #endif
 
         // Transition PTEs will already have the disk index in their respective page
     }

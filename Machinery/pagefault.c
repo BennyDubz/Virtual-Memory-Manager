@@ -61,21 +61,6 @@ static void commit_pages(PAGE** pages_to_commit, PTE** ptes, PTE* accessed_pte, 
  */
 int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_idx) {    
     
-    #if 0
-    if (fault_count % KB(128) == 0) {
-        // ULONG64 manual_count_disk_slots = 0;
-
-        // for (ULONG64 i = 0; i < DISK_STORAGE_SLOTS; i++) {
-        //     if (disk->disk_slot_statuses[i] == DISK_FREESLOT) manual_count_disk_slots++;
-        // }
-
-        printf("Curr fault count 0x%llX\n", fault_count);
-        printf("\tPhys page standby ratio: %f Zeroed: 0x%llX Free: 0x%llX Standby: 0x%llX Mod 0x%llX Num disk slots %llX\n", (double)  standby_list->list_length / physical_page_count, zero_lists->total_available, free_frames->total_available, 
-                                            standby_list->list_length, modified_list->list_length, disk->total_available_slots);
-    }
-    #endif
-
-
     #ifdef DEBUG_CHECKING
     custom_spin_assert(modified_list->list_length <= disk->total_available_slots);
     custom_spin_assert(disk->disk_slot_statuses[DISK_IDX_NOTUSED] == DISK_USEDSLOT);
@@ -131,11 +116,6 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
         }
 
         custom_spin_assert(is_transition_format(*ptes_to_connect[0]));
-
-        #if 0
-        ptes_to_connect[0] = accessed_pte;
-        num_ptes_to_connect = 1;
-        #endif
 
     } else if (is_disk_format(local_pte)) {
 
@@ -909,7 +889,6 @@ static void commit_pages(PAGE** pages_to_commit, PTE** ptes, PTE* accessed_pte, 
 
     for (ULONG64 i = 0; i < num_pages; i++) {
         if (is_memory_format(read_pte_contents(ptes[i]))) {
-        // if (is_used_pte(read_pte_contents(ptes[i])) == FALSE) {
             if (pages_to_commit[i]->status != ZERO_STATUS) {
                 pages_to_zero[num_pages_to_zero] = pages_to_commit[i];
                 num_pages_to_zero++;

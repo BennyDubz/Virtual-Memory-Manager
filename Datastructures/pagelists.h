@@ -167,18 +167,6 @@ BOOL try_acquire_pagelock(PAGE* page, ULONG64 origin_code);
 void insert_page(PAGE_LIST* list, PAGE* page);
 
 
-#if 0
-/**
- * Pops a page from the list while taking advantage of the shared lock and pagelock scheme
- * 
- * Assumes you already own the pagelock of the tail page
- * 
- * Returns a pointer to the popped page if successful with its pagelock acquired, NULL otherwise. 
- */
-PAGE* pop_page2(PAGE_LIST* list);
-#endif
-
-
 /**
  * Removes all of the given pages from the list, assumes that all of the pagelocks are held.
  * 
@@ -330,14 +318,3 @@ PAGE_LIST* initialize_modified_list();
  * Returns a pointer to the standby list or NULL upon error
  */
 PAGE_LIST* initialize_standby_list();
-
-#if 0
-/**
- * Adds the given page to the standby list
- * 
- * Returns SUCCESS if there are no issues, ERROR otherwise
- */
-int standby_add_page(PAGE* page, STANDBY_LIST* standby_list);
-
-#endif
-
