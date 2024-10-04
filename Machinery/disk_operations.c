@@ -629,7 +629,7 @@ int release_single_disk_slot(ULONG64 disk_idx) {
     return SUCCESS;
 }
 
-
+#if 0
 /**
  * Called at the end of a pagefault to determine whether or not a pagefile slot needs to be
  * released. Modifies the page if necessary to remove the reference to the pagefile slot if it is released,
@@ -682,7 +682,7 @@ void handle_end_of_fault_disk_slot(PTE local_pte, PAGE* allocated_page, ULONG64 
     
     DebugBreak();
 }
-
+#endif
 
 
 /**
@@ -708,9 +708,20 @@ void handle_batch_end_of_fault_disk_slot(PTE** ptes, PTE* original_pte_accessed,
                 custom_spin_assert(disk_status == DISK_USEDSLOT);
             } 
 
+            // These represent unaccessed PTEs whose "being_changed" bits are set - they have yet to be mapped
+            if (is_memory_format(read_pte_contents(original_pte_accessed))) {
+                allocated_pages[0]->pagefile_idx = DISK_IDX_NOTUSED;
+            }
+            #if 0
             if (is_used_pte(read_pte_contents(original_pte_accessed)) == FALSE) {
                 allocated_pages[0]->pagefile_idx = DISK_IDX_NOTUSED;
             } 
+            #else
+            // These represent unaccessed PTEs whose "being_changed" bits are set - they have yet to be mapped
+            if (is_memory_format(read_pte_contents(original_pte_accessed))) {
+                allocated_pages[0]->pagefile_idx = DISK_IDX_NOTUSED;
+            }
+            #endif
         }
 
         if (access_type == WRITE_ACCESS) {
@@ -741,16 +752,24 @@ void handle_batch_end_of_fault_disk_slot(PTE** ptes, PTE* original_pte_accessed,
             continue;
         }
 
+
+        #if 0
         if (is_used_pte(read_pte_contents(curr_pte)) == FALSE) {
             curr_page->pagefile_idx = DISK_IDX_NOTUSED;
             continue;
         }
+        #else
+        // These represent unaccessed PTEs whose "being_changed" bits are set - they have yet to be mapped
+        if (is_memory_format(read_pte_contents(original_pte_accessed))) {
+            curr_page->pagefile_idx = DISK_IDX_NOTUSED;
+            continue;
+        }
+        #endif
 
         // Transition PTEs will already have the disk index in their respective page
     }
 
 }
-
 
 
 /**

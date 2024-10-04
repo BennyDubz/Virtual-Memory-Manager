@@ -25,6 +25,12 @@
 #define PTE_NOT_BEING_READ_FROM_DISK 0
 #define PTE_BEING_READ_FROM_DISK 1
 
+
+// Allows us to not hold the PTE lock during the MapUserPhysicalPages call in the trimmer, see VALID_PTE struct for more
+#define VALID_PTE_NOT_BEING_CHANGED 0
+#define VALID_PTE_BEING_CHANGED 1
+
+
 /**
  * We choose 512 to match the real world where there is a PTE lock for each page of memory
  * 
@@ -43,6 +49,21 @@ typedef struct {
     ULONG64 frame_number:40;
     ULONG64 age:4;
     ULONG64 protections:2;
+
+    /**
+     * This allows us to address the specific case where we do not want to hold the PTE lock in the trimmer while unmapping valid PTEs.
+     * 
+     * When trimming, we will mark the PTE as 'being_changed', but leave it in valid format. Any thread that accesses this PTE between this moment and the
+     * MapUserPhysicalPagesScatter call that unmaps the VA will not pagefault. However, there will be a short gap when the VA is unmapped but the PTE is valid where this will
+     * be set. In this case, the faulting thread will have to spin and wait for the PTE to be changed to transition format.
+     * 
+     * Furthermore, for an unaccessed PTE, we can do the same trick of marking the PTE as being changed while we are mapping it at the end of a page fault. 
+     * That way, other faulting threads will not have to needlessly acquire pages (most of the time), 
+     * and we significantly reduce the hold time on the PTE lock by not holding it during the MapUserPhysicalPages call.
+     * 
+     * While the spinning is not ideal, we are able to reduce the PTE lock hold time significantly reducing overall contention
+     */
+    ULONG64 being_changed:1;
 } VALID_PTE;
 
 

@@ -197,116 +197,55 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
         }   
 
         num_ptes_to_connect = num_ptes_not_changed;
+
+        /**
+         * Set all of the PTEs that we are connecting to the valid format, but being changed
+         */
+        PTE* curr_pte;
+        PTE pte_contents;
+        pte_contents.memory_format.valid = VALID;
+        pte_contents.memory_format.being_changed = VALID_PTE_BEING_CHANGED;
+        for (ULONG64 i = 0; i < num_ptes_to_connect; i++) {
+            curr_pte = ptes_to_connect[i];
+            pte_contents.memory_format.frame_number = page_to_pfn(allocated_pages[i]);
+
+            // The protections are determined later on when we are connecting them, so this is a placeholder since we will fault anyway
+            pte_contents.memory_format.protections = PTE_PROTNONE;
+            write_pte_contents(curr_pte, pte_contents);
+        }
+        
+        LeaveCriticalSection(pte_lock);
     }
+
     
 
     if (is_disk_format(local_pte) == FALSE) {
         commit_pages(allocated_pages, ptes_to_connect, accessed_pte, num_ptes_to_connect, access_type);
     }
 
-    #if 0
-    // We are writing to the page - this may communicate to the modified writer that they need to return pagefile space
-    if (access_type == WRITE_ACCESS) {
-        allocated_pages[0]->modified = PAGE_MODIFIED;
-    }
-
-    // We may need to edit the old PTE, in which case, we want a copy so we can still find it
-    PAGE allocated_pages_copies[MAX_PAGES_READABLE];
-
-    if (is_transition_format(local_pte) == FALSE) {
-        for (ULONG64 i = 0; i < num_ptes_to_connect; i++) {
-            allocated_pages_copies[i] = *allocated_pages[i];
-        }
-    }
-
-
-    // We may need to release stale pagefile slots and/or modify the page's pagefile information
-    if (num_ptes_to_connect == 1) {
-        handle_end_of_fault_disk_slot(read_pte_contents(ptes_to_connect[0]), allocated_pages[0], access_type);
-    } else {
-        handle_batch_end_of_fault_disk_slot(ptes_to_connect, accessed_pte, allocated_pages, access_type, num_ptes_to_connect);
-    }
-
-    /**
-     * For unaccessed PTEs, we need to ensure they start off with a clean page
-     * 
-     * Note - this is treating the individual threads to be similar to different processes accessing the same
-     * address space, which would not be the case normally. However, this allows us to demonstrate the infrastructure
-     * required to zero out pages when needed. Typically, different threads within a process would not need to have zeroed out pages
-     * if their previous owner was withn the same process - since the threads are a part of the same process, we do not have the
-     * security concern of sharing data between processes. 
-     */
-
-    PAGE* pages_to_zero[MAX_PAGES_READABLE];
-    ULONG64 num_pages_to_zero = 0;
-
-    for (ULONG64 i = 0; i < num_ptes_to_connect; i++) {
-        if (is_used_pte(read_pte_contents(ptes_to_connect[i])) == FALSE) {
-            if (allocated_pages[i]->status != ZERO_STATUS) {
-                pages_to_zero[num_pages_to_zero] = allocated_pages[i];
-                num_pages_to_zero++;
-            }
-        }
-
-        allocated_pages[i]->status = ACTIVE_STATUS;
-        allocated_pages[i]->pte = ptes_to_connect[i];
-
-        #if LIGHT_DEBUG_PAGELOCK
-        allocated_pages[i]->acquiring_pte_copy = *ptes_to_connect[i];
-        #endif
-    }
-
-    if (num_pages_to_zero > 0) {
-        zero_out_pages(pages_to_zero, num_pages_to_zero);
-    }
-    #endif
-
     if (connect_batch_ptes_to_pages(ptes_to_connect, accessed_pte, allocated_pages, access_type, num_ptes_to_connect) == ERROR) {
         DebugBreak();
     }
     
-    if (is_used_pte(local_pte) == FALSE) {
-        LeaveCriticalSection(pte_lock);
-    }
-    
-    #if 0
-    /**
-     * We need to modify the other PTEs associated with the standby pages now that we are committing
-     * 
-     * The worst case is that other threads are spinning on the pagelock in transition format waiting for this to happen,
-     * and they will need to retry the fault as their PTE will be in disk format
-     */
-    if (is_transition_format(local_pte) == FALSE) {
-        PAGE curr_page_copy;
-        PTE pte_contents;
-        pte_contents.complete_format = 0;
-
-        for (ULONG64 i = 0; i < num_ptes_to_connect; i++) {
-            curr_page_copy = allocated_pages_copies[i];
-
-            if (curr_page_copy.status == STANDBY_STATUS) {
-                PTE* old_pte = curr_page_copy.pte;
-                pte_contents.disk_format.pagefile_idx = curr_page_copy.pagefile_idx;
-
-                write_pte_contents(old_pte, pte_contents);
-            }
-        }
-    }
-
-    for (ULONG64 i = 0; i < num_ptes_to_connect; i++) {
-        release_pagelock(allocated_pages[i], 11);
-    }
-    #endif
-    
-    // // For unaccessed PTEs that we might have speculated on incorrectly, we might need to return pages that we never used
-    // if (num_unneeded_pages > 0) {
-    //     release_batch_unneeded_pages(unneeded_pages, num_unneeded_pages);
+    // if (is_used_pte(local_pte) == FALSE) {
+    //     LeaveCriticalSection(pte_lock);
     // }
 
     end_of_fault_work(accessed_pte, thread_idx);
 
     return SUCCESSFUL_FAULT;
 }   
+
+
+
+/**
+ * Spins until the accessed PTE is no longer equal to the local PTE. Yields the processor between checks
+ */
+static void spin_wait_for_pte_change(PTE local_pte, PTE* accessed_pte) {
+    while (ptes_are_equal(local_pte, read_pte_contents(accessed_pte))) {
+        YieldProcessor();
+    }
+}
 
 
 /**
@@ -316,6 +255,12 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
  * and we can take the opportunity to reset the age to zero
  */
 static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 access_type) {
+
+    // The PTE is being trimmed, we just have to wait until it is in transition format. This collision with the trimmer should be unlikely
+    if (local_pte.memory_format.being_changed == VALID_PTE_BEING_CHANGED) {
+        spin_wait_for_pte_change(local_pte, accessed_pte);
+        return VALID_PTE_RACE_CONTIION_FAIL;
+    }
 
     custom_spin_assert(local_pte.memory_format.protections != PTE_PROTNONE);
 
@@ -375,7 +320,7 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
     }
 
 
-    custom_spin_assert(pfn_to_page(accessed_pte->memory_format.frame_number)->status == ACTIVE_STATUS);
+    custom_spin_assert(curr_page->status == ACTIVE_STATUS);
 
     custom_spin_assert(is_memory_format(read_pte_contents(accessed_pte)));
 
@@ -963,7 +908,8 @@ static void commit_pages(PAGE** pages_to_commit, PTE** ptes, PTE* accessed_pte, 
     ULONG64 num_pages_to_zero = 0;
 
     for (ULONG64 i = 0; i < num_pages; i++) {
-        if (is_used_pte(read_pte_contents(ptes[i])) == FALSE) {
+        if (is_memory_format(read_pte_contents(ptes[i]))) {
+        // if (is_used_pte(read_pte_contents(ptes[i])) == FALSE) {
             if (pages_to_commit[i]->status != ZERO_STATUS) {
                 pages_to_zero[num_pages_to_zero] = pages_to_commit[i];
                 num_pages_to_zero++;

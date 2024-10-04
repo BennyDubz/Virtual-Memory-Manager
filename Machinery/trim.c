@@ -19,6 +19,13 @@
 
 /**
  * Thread dedicated to aging all of the valid PTEs in the pagetable
+ * 
+ * As of right now this thread sleeps forever as we do not take advantage of any aging in the trimmer. This is primarily due to the extra overhead
+ * it would introduce into the simulation that would not be present in the real world. In the simulation, even when a user thread successfully accessed an address,
+ * they would still need to acquire their respective PTE lock in order to set the age back to zero, which would greatly increase contention on the lock. However, in the real world,
+ * the age bit is set to zero by the CPU when the address is accessed with no need for the PTE lock. Since I am unable to do it without the lock without creating race conditions,
+ * I have not yet implemented a sophisticated aging scheme. We do still make some efforts to trim pages that are unlikely to be accessed again via faulters trimming behind,
+ * but that is all.
  */
 LPTHREAD_START_ROUTINE thread_aging(void* parameters) {
     WORKER_THREAD_PARAMETERS* thread_params = (WORKER_THREAD_PARAMETERS*) parameters;
@@ -142,7 +149,6 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
 
             // if (curr_pte_locksection->valid_pte_count < TRIM_PER_SECTION / 4) continue;
 
-
             section_num_ptes_trimmed = 0;
             trim_to_modified = 0;
             trim_to_standby = 0;
@@ -164,17 +170,17 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
                     continue;
                 }
 
+                // Addressing a race condition between the trimming thread, when faulters trim behind themselves, and when
+                // we are handling the end of a pagefault for unaccessed PTEs
+                if (curr_pte->memory_format.being_changed == VALID_PTE_BEING_CHANGED) {
+                    continue;
+                }
+
                 curr_page = pfn_to_page(curr_pte->memory_format.frame_number);
 
                 /**
-                 * If someone else has the pagelock, then we need to back up - they are
-                 * likely at the final stage of resolving a fault and we need to give up the lock
-                 * so that they can finish. We may still be able to trim the page after, however,
-                 * so we decrement the pte_index again.
-                 * 
-                 * Later, once the age of a PTE is a factor in the trimming, this will be less of a concern
-                 * (and may actually save some hot pages from being trimmed last-minute) 
-                 * 
+                 * If someone else has the pagelock, then they are likely at the final stage of resolving a fault.
+                 * We do not wait for them to finish.
                  */
                 if (try_acquire_pagelock(curr_page, 6) == FALSE) {
                     continue;
@@ -216,23 +222,56 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
             }
 
 
-            PTE transition_pte_contents;
-            transition_pte_contents.complete_format = 0;
-            transition_pte_contents.transition_format.is_transition = 1;
+            PTE pte_contents;
+            pte_contents.complete_format = 0;
+
+            #if VALID_PTE_THROUGH_TRIM
+            pte_contents.memory_format.valid = VALID;
+            pte_contents.memory_format.being_changed = VALID_PTE_BEING_CHANGED;
+            #else
+            pte_contents.transition_format.is_transition = 1;
+            #endif
 
             for (ULONG64 trim_idx = 0; trim_idx < section_num_ptes_trimmed; trim_idx++) {
                 curr_pte = pte_section_trim[trim_idx];
-                transition_pte_contents.transition_format.frame_number = curr_pte->memory_format.frame_number;
-                write_pte_contents(curr_pte, transition_pte_contents);
+                #if VALID_PTE_THROUGH_TRIM
+                pte_contents.memory_format.frame_number = curr_pte->memory_format.frame_number;
+                pte_contents.memory_format.protections = curr_pte->memory_format.protections;
+                #else
+                pte_contents.transition_format.frame_number = curr_pte->memory_format.frame_number;
+                #endif
+                write_pte_contents(curr_pte, pte_contents);
                 trim_addresses[trim_idx] = pte_to_va(curr_pte);
             }
 
-            // This will be an expensive call to MapUserPhysicalPages, so we want to batch at least a few addresses
+            #if VALID_PTE_THROUGH_TRIM
+            LeaveCriticalSection(&curr_pte_locksection->lock);
+
+            disconnect_va_batch_from_cpu(trim_addresses, section_num_ptes_trimmed);
+
+            // Reset the PTE contents so that we can use it to change the PTEs into transition format
+            pte_contents.complete_format = 0;
+            pte_contents.transition_format.is_transition = 1;
+
+
+            for (ULONG64 i = 0; i < section_num_ptes_trimmed; i++) {
+                curr_pte = pte_section_trim[i];
+                pte_contents.transition_format.frame_number = curr_pte->memory_format.frame_number;
+                write_pte_contents(curr_pte, pte_contents);
+            }
+
+            InterlockedAdd64(&curr_pte_locksection->valid_pte_count, - section_num_ptes_trimmed);
+
+            #else
+
+           // This will be an expensive call to MapUserPhysicalPages, so we want to batch at least a few addresses
             disconnect_va_batch_from_cpu(trim_addresses, section_num_ptes_trimmed);
 
             InterlockedAdd64(&curr_pte_locksection->valid_pte_count, - section_num_ptes_trimmed);
 
             LeaveCriticalSection(&curr_pte_locksection->lock);
+            #endif
+
 
 
             /**
@@ -348,14 +387,19 @@ void faulter_trim_behind(PTE* accessed_pte) {
 
     PTE pte_contents;
     pte_contents.complete_format = 0;
+    #if VALID_PTE_THROUGH_TRIM
+    pte_contents.memory_format.valid = VALID;
+    pte_contents.memory_format.being_changed = VALID_PTE_BEING_CHANGED;
+    #else
     pte_contents.transition_format.is_transition = 1;
-
+    #endif
     ULONG64 num_ptes_trimmed = 0;
     ULONG64 trim_to_modified = 0;
     ULONG64 trim_to_standby = 0;
     ULONG64 trim_already_being_written = 0;
 
     PULONG_PTR trimmed_addresses[FAULTER_TRIM_BEHIND_MAX];
+    PTE* trimmed_ptes[FAULTER_TRIM_BEHIND_MAX];
     PAGE* pages_trimmed_to_modified[FAULTER_TRIM_BEHIND_MAX];
     PAGE* pages_trimmed_to_standby[FAULTER_TRIM_BEHIND_MAX];
     PAGE* pages_already_being_written[FAULTER_TRIM_BEHIND_MAX];
@@ -373,6 +417,12 @@ void faulter_trim_behind(PTE* accessed_pte) {
         curr_pte = &pagetable->pte_list[pte_idx];
         
         if (is_memory_format(read_pte_contents(curr_pte)) == FALSE) {
+            continue;
+        }
+
+        // Addresses the race condition of the trimming thread already modifying this PTE, 
+        // or that it was an unaccessed PTE whose first pagefault is being resolved
+        if (curr_pte->memory_format.being_changed == VALID_PTE_BEING_CHANGED) {
             continue;
         }
 
@@ -416,12 +466,19 @@ void faulter_trim_behind(PTE* accessed_pte) {
 
         custom_spin_assert(curr_page->pte == curr_pte);
 
+        #if VALID_PTE_THROUGH_TRIM
+        // Edit the PTE so that it is still in valid format, but the trimming bit is set
+        pte_contents.memory_format.frame_number = curr_pfn;
+        pte_contents.memory_format.protections = curr_pte->memory_format.protections;
+        #else
         // Edit the PTE to be on transition format
         pte_contents.transition_format.frame_number = curr_pfn;
+        #endif
         write_pte_contents(curr_pte, pte_contents);
         
         // Store the virtual addresses so that they can be unmapped easily
         trimmed_addresses[num_ptes_trimmed] = pte_to_va(curr_pte);
+        trimmed_ptes[num_ptes_trimmed] = curr_pte;
 
         num_ptes_trimmed++;
     }
@@ -432,11 +489,30 @@ void faulter_trim_behind(PTE* accessed_pte) {
         return;
     }
 
+    #if VALID_PTE_THROUGH_TRIM
+    LeaveCriticalSection(&curr_pte_locksection->lock);
+
+    disconnect_va_batch_from_cpu(trimmed_addresses, num_ptes_trimmed);
+
+    pte_contents.complete_format = 0;
+    pte_contents.transition_format.is_transition = 1;
+
+    for (ULONG64 i = 0; i < num_ptes_trimmed; i++) {
+        curr_pte = trimmed_ptes[i];
+        pte_contents.transition_format.frame_number = curr_pte->memory_format.frame_number;
+        write_pte_contents(curr_pte, pte_contents);
+    }
+
+    InterlockedAdd64(&curr_pte_locksection->valid_pte_count, - num_ptes_trimmed);
+
+
+    #else
     disconnect_va_batch_from_cpu(trimmed_addresses, num_ptes_trimmed);
 
     InterlockedAdd64(&curr_pte_locksection->valid_pte_count, - num_ptes_trimmed);
 
     LeaveCriticalSection(&curr_pte_locksection->lock);
+    #endif
 
     if (trim_already_being_written > 0) {
         for (ULONG64 i = 0; i < trim_already_being_written; i++) {
@@ -850,11 +926,19 @@ static void determine_batch_address_appropriate_permissions(PTE** ptes_in_questi
     if (original_accessed_pte != ptes_in_question[0]) {
         start_index = 0;
     } else {
+        #if 0
         if (access_type == WRITE_ACCESS || is_used_pte(read_pte_contents(original_accessed_pte)) == FALSE) {
             permission_storage[0] = PAGE_READWRITE;
         } else {
             permission_storage[0] = PAGE_READONLY;
         }
+        #else
+        if (access_type == WRITE_ACCESS || is_memory_format(read_pte_contents(original_accessed_pte))) {
+            permission_storage[0] = PAGE_READWRITE;
+        } else {
+            permission_storage[0] = PAGE_READONLY;
+        }
+        #endif
         start_index = 1;
     }
 
@@ -862,11 +946,19 @@ static void determine_batch_address_appropriate_permissions(PTE** ptes_in_questi
     for (ULONG64 i = start_index; i < num_ptes; i++) {
         curr_pte = ptes_in_question[i];
 
+        #if 0
         if (is_used_pte(read_pte_contents(curr_pte)) == FALSE) {
             permission_storage[i] = PAGE_READWRITE;
         } else {
             permission_storage[i] = PAGE_READONLY;
         }
+        #else
+        if (is_memory_format(read_pte_contents(curr_pte))) {
+            permission_storage[i] = PAGE_READWRITE;
+        } else {
+            permission_storage[i] = PAGE_READONLY;
+        }
+        #endif
 
     }
 }

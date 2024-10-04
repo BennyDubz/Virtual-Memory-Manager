@@ -28,6 +28,8 @@
  */
 #define MOD_WRITER_PREFERRED_STANDBY_MINIMUM_PROPORTION  3
 
+#define VALID_PTE_THROUGH_TRIM 1
+
 
 /**
  * Thread dedicated to aging all of the valid PTEs in the pagetable

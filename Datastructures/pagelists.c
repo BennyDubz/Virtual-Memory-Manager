@@ -588,11 +588,11 @@ void insert_page_section(PAGE_LIST* list, PAGE* beginning, PAGE* end, ULONG64 nu
 
     PAGE* curr_page = beginning;
     while (curr_page != end) {
-        release_pagelock(curr_page, 84);
+        release_pagelock(curr_page, 86);
         curr_page = curr_page->flink;
     }
 
-    release_pagelock(end, 85);
+    release_pagelock(end, 87);
 
     ReleaseSRWLockExclusive(&list->shared_lock);
 }
