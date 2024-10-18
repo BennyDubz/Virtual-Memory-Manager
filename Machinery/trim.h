@@ -10,6 +10,10 @@
 // The maximum number of PTEs that we can trim per PTE locksection
 #define TRIM_PER_SECTION 96
 
+// Once the number of total available pages is less than (total physical memory / proportion), we will trim PTES
+// that have the access bit set
+#define TRIM_ACCESSED_PTES_PROPORTION 5
+
 // The minimum and maximum amount of PTEs that can be trimmed by the faulting threads
 #define FAULTER_TRIM_BEHIND_MIN 16
 #define FAULTER_TRIM_BEHIND_MAX 64
@@ -27,8 +31,6 @@
  * If the standby list is smaller than the (total physical memory / proportion) then it will hog the modified list lock
  */
 #define MOD_WRITER_PREFERRED_STANDBY_MINIMUM_PROPORTION  3
-
-#define VALID_PTE_THROUGH_TRIM 1
 
 
 /**

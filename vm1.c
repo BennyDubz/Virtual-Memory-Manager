@@ -8,6 +8,7 @@
 
 #include "./init.h"
 #include "./Machinery/pagefault.h"
+#include "./Machinery/conversions.h"
 #include "./hardware.h"
 #include "./Machinery/debug_checks.h"
 #include "./Datastructures/pagelists.h"
@@ -18,7 +19,7 @@
 #define TOTAL_ACCESS_AMOUNT         (MB(10))
 
 // How frequently in milliseconds we print out all of the information about the simulation and our current progress
-#define PRINT_FREQUECY_MS          2000 
+#define PRINT_FREQUECY_MS          2000
 
 /**
  * Reads are more common in the real world - if (random_number % WRITE_PROBABILITY_MODULO == 0) then we write to the address
@@ -45,6 +46,7 @@ typedef struct {
 
 
 int thread_access_random_addresses(void* params);
+void usermode_valid_pte_set_access_bit(PULONG_PTR virtual_address);
 
 
 /**
@@ -308,16 +310,44 @@ int thread_access_random_addresses(void* params) {
         } else {
             /**
              * This is purely to simulate editing access bits in the PTE, which normally the CPU does for us
-             * 
-             * We have to do this ourselves at the beginning of the pagefault
              */
-
-            // pagefault(arbitrary_va);
+            
+           usermode_valid_pte_set_access_bit(arbitrary_va);
         }
-        //BW: ELSE: we mark the relevant PTE as accessed (real hardware would do this for us)
     }
 
     return SUCCESS;
+}
+
+
+/**
+ * Uses an InterlockedCompareExchange operation to update a valid PTE to set the accessed bit
+ * 
+ * We have to do this here as we cannot update our PTE's access bit automatically as would happen in
+ * a real system. However, this allows us to have a more sophisticated way to age and trim.
+ */
+void usermode_valid_pte_set_access_bit(PULONG_PTR virtual_address) {
+
+    PTE* accessed_pte = va_to_pte(virtual_address);
+    
+    // We need a copy for the InterlockedCompareExchange
+    PTE pte_copy = read_pte_contents(accessed_pte);
+    
+    // If the PTE has changed since we accessed it, then we shouldn't do anything
+    if (is_memory_format(pte_copy) == FALSE) {
+        return;
+    }
+
+    // We can save time and not perform the interlocked compare exchange
+    if (pte_copy.memory_format.access_bit == PTE_ACCESSED) {
+        return;
+    }
+
+    PTE updated_pte = pte_copy;
+
+    updated_pte.memory_format.access_bit = PTE_ACCESSED;
+
+    InterlockedCompareExchange64((ULONG64*) accessed_pte, updated_pte.complete_format, pte_copy.complete_format);
 }
 
 

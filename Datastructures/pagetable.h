@@ -12,6 +12,9 @@
 #define INVALID 0
 #define VALID 1
 
+#define PTE_NOT_ACCESSED 0
+#define PTE_ACCESSED 1
+
 // PTE protection statuses
 #define PTE_PROTNONE 0
 #define PTE_PROTREAD 1
@@ -31,6 +34,8 @@
 #define VALID_PTE_BEING_CHANGED 1
 
 
+
+
 /**
  * We choose 512 to match the real world where there is a PTE lock for each page of memory
  * 
@@ -47,8 +52,8 @@
 typedef struct {
     ULONG64 valid:1;
     ULONG64 frame_number:40;
-    ULONG64 age:4;
     ULONG64 protections:2;
+    ULONG64 access_bit:1;
 
     /**
      * This allows us to address the specific case where we do not want to hold the PTE lock in the trimmer while unmapping valid PTEs.

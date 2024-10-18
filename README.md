@@ -53,7 +53,8 @@ There are many more smaller optimizations and many tricks I have used along the 
 
 1. I would like to further reduce the lock contention on the PTE lock by not having to hold it while unmapping PTEs in the trimming thread, I have not yet implemented the reference counting scheme that would be needed.
 
-2. One of the largest limitations of this project is the lack of an aging implementation. The difficulty here stems from the fact that we are running a simulation and the CPU isn't changing our PTE structures to account for access bits and age. In the simulation, we would have to manually acquire the PTE lock **even when there wasn't a pagefault**, and set either/both the age and access bits if the PTE was still valid. This would create an enormous amount of overhead that we would not have to deal with in the real world, as it opens the possibility for far more PTE lock contention. This means that the trimmer is not always trimming the best candidates.
+2. One of the largest limitations of this project is the lack of an aging implementation. The difficulty here stems from the fact that we are running a simulation and the CPU isn't changing our PTE structures to account for access bits and age. In the simulation, we would have to manually acquire the PTE lock **even when there wasn't a pagefault**, and set either/both the age and access bits if the PTE was still valid. This would create an enormous amount of overhead that we would not have to deal with in the real world, as it opens the possibility for far more PTE lock contention. This means that the trimmer is not always trimming the best candidates. **Update as of October 17th: I was able to implement an access bit on valid PTEs using InterlockedCompareExchange operations. This allows us to have at least one simple aging heuristic for trimming. It is still not as realistic as a real world system, but it does help to have informed trimming.**
+
 
 
 

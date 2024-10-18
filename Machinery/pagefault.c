@@ -39,7 +39,7 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
 
 static BOOL acquire_disk_pte_read_rights(PTE* accessed_pte, PTE local_pte);
 
-static int handle_disk_pte_fault(ULONG64 thread_idx, PTE* accessed_pte, PAGE** result_page_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage, ULONG64 access_type);
+static int handle_disk_pte_fault(ULONG64 thread_idx, PTE local_pte, PTE* accessed_pte, PAGE** result_page_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage, ULONG64 access_type);
 
 static ULONG64 get_trailing_valid_pte_count(PTE* accessed_pte);
 
@@ -119,7 +119,7 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
 
     } else if (is_disk_format(local_pte)) {
 
-        if ((handler_result = handle_disk_pte_fault(thread_idx, accessed_pte, allocated_pages, ptes_to_connect, &num_ptes_to_connect, access_type)) != SUCCESS) {
+        if ((handler_result = handle_disk_pte_fault(thread_idx, local_pte, accessed_pte, allocated_pages, ptes_to_connect, &num_ptes_to_connect, access_type)) != SUCCESS) {
             return handler_result;
         }
 
@@ -252,7 +252,7 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
     pte_contents.complete_format = 0;
     pte_contents.memory_format.valid = VALID;
     pte_contents.memory_format.frame_number = local_pte.memory_format.frame_number;
-    pte_contents.memory_format.age = 0;
+    pte_contents.memory_format.access_bit = PTE_ACCESSED;
 
     if (access_type == READ_ACCESS) {
         pte_contents.memory_format.protections = PTE_PROTREAD;
@@ -271,10 +271,44 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
 
     PTE updated_pte_copy = read_pte_contents(accessed_pte);
 
+
+    /**
+     * We address two scenarios here:
+     * 
+     * The first is where another thread has already resolved the fault and set the access bit/correct protections. In that scenario,
+     * we do not have to perform any more work.
+     * 
+     * The second is where the PTE had been trimmed and we will need to retry the fault.
+     */
+    if (ptes_are_equal(updated_pte_copy, pte_contents) || is_memory_format(updated_pte_copy) == FALSE) {
+        release_pagelock(curr_page, 36);
+        return VALID_PTE_RACE_CONTIION_FAIL;
+    }
+
+    /**
+     * We address one final case, where the PTE is in the correct format except the access bit is no longer set.
+     *
+     * All we want to do in this case is set the access bit again but we do not need to perform any more work.
+     */
+    PTE alternative_pte_contents = pte_contents;
+    alternative_pte_contents.memory_format.access_bit = PTE_NOT_ACCESSED;
+    if (ptes_are_equal(alternative_pte_contents, updated_pte_copy)) {
+
+        while (InterlockedCompareExchange64((ULONG64*) accessed_pte, pte_contents.complete_format, updated_pte_copy.complete_format) != pte_contents.complete_format) {
+            updated_pte_copy = read_pte_contents(accessed_pte);
+        }
+
+        release_pagelock(curr_page, 89);
+
+        return SUCCESS;
+    }
+
+    #if 0
     if (ptes_are_equal(local_pte, updated_pte_copy) == FALSE) {
         release_pagelock(curr_page, 36);
         return VALID_PTE_RACE_CONTIION_FAIL;
     }
+    #endif
 
     // See if we need to change the permissions to PAGE_READWRITE
     if (access_type == WRITE_ACCESS && local_pte.memory_format.protections == PTE_PROTREAD) {
@@ -304,7 +338,9 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
 
     custom_spin_assert(is_memory_format(read_pte_contents(accessed_pte)));
 
-    write_pte_contents(accessed_pte, pte_contents);
+    while (InterlockedCompareExchange64((ULONG64*) accessed_pte, pte_contents.complete_format, updated_pte_copy.complete_format) != pte_contents.complete_format) {
+        updated_pte_copy = read_pte_contents(accessed_pte);
+    }
 
     release_pagelock(curr_page, 34);
 
@@ -701,7 +737,7 @@ static void release_sequential_disk_read_rights(PTE** ptes_to_release, ULONG64 n
  * Returns a pointer to the page with the restored contents on it, and stores the
  * disk index that it was at in disk_idx_storage
  */
-static int handle_disk_pte_fault(ULONG64 thread_idx, PTE* accessed_pte, PAGE** result_pages_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage, ULONG64 access_type) {
+static int handle_disk_pte_fault(ULONG64 thread_idx, PTE local_pte, PTE* accessed_pte, PAGE** result_pages_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage, ULONG64 access_type) {
     
     #if SEQUENTIAL_SPECULATIVE_DISK_READS
 
@@ -734,7 +770,8 @@ static int handle_disk_pte_fault(ULONG64 thread_idx, PTE* accessed_pte, PAGE** r
     
     // We failed to get any rights on any PTEs, including our accessed PTE
     if (num_to_read == 0) {
-        // We may want a better solution to this... spin for the accessed PTE to be resolved?
+        spin_wait_for_pte_change(local_pte, accessed_pte);
+
         return DISK_RACE_CONTIION_FAIL;
     }
 
@@ -937,6 +974,38 @@ static void commit_pages(PAGE** pages_to_commit, PTE** ptes, PTE* accessed_pte, 
 
 
 /**
+ * Speculatively sets the access bits on valid PTEs ahead of the accessed_pte.
+ * This reduces the probability that they will be trimmed by the time we access them sequentially,
+ * and might significantly reduce the amount of work for the accessing thread
+ */
+static void speculative_set_access_bits(PTE* accessed_pte) {
+    ULONG64 num_to_speculate = max(get_trailing_valid_pte_count(accessed_pte), 1);
+
+    ULONG64 accessed_pte_idx = pte_to_pagetable_idx(accessed_pte);
+    PTE pte_contents;
+
+    ULONG64 end_index = min(accessed_pte_idx + num_to_speculate + 1, pagetable->num_virtual_pages);
+
+    PTE* curr_pte;
+    PTE pte_copy;
+    for (ULONG64 speculative_idx = accessed_pte_idx + 1; speculative_idx < end_index; speculative_idx++) {
+        curr_pte = &pagetable->pte_list[speculative_idx];
+        pte_copy = read_pte_contents(curr_pte);
+
+        // Ignore invalid PTEs, we cannot set their bit
+        if (is_memory_format(pte_copy) == FALSE || pte_copy.memory_format.access_bit == PTE_ACCESSED) {
+            continue;
+        }
+
+        pte_contents = pte_copy;
+        pte_contents.memory_format.access_bit = PTE_ACCESSED;
+        
+        InterlockedCompareExchange64((ULONG64*) curr_pte, pte_contents.complete_format, pte_copy.complete_format);
+    }
+}
+
+
+/**
  * Determines what kind of work or signaling the faulting thread should perform after they have resolved the pagefault
  */
 static void end_of_fault_work(PTE* accessed_pte, ULONG64 thread_idx) {
@@ -949,15 +1018,16 @@ static void end_of_fault_work(PTE* accessed_pte, ULONG64 thread_idx) {
             SetEvent(trimming_event);
         }
     }
-    
+
+    speculative_set_access_bits(accessed_pte);
 
     // We try to trim behind us... currently using placeholder heuristics
     if (total_available_pages < (physical_page_count / 4) && modified_list->list_length < physical_page_count / 4) {
         faulter_trim_behind(accessed_pte);
     }
-    //faulter_trim_behind(accessed_pte);
+
+    faulter_trim_behind(accessed_pte);
 
     // The faulter might take pages from the standby list to replenish the free and zero lists
     potential_list_refresh(thread_idx);
 }
-

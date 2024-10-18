@@ -377,6 +377,12 @@ void unlink_batch_scattered_pages(PAGE_LIST* list, PAGE** pages_to_remove, ULONG
         ahead = curr_page->flink;
         behind = curr_page->blink;
 
+        if (ahead == behind) {
+            acquire_pagelock(ahead, 0xaaa);
+            // This purposefully will spin forever
+            acquire_pagelock(behind, 0xbbb);
+        }
+
         acquired_unique_pagelock_ahead = try_acquire_pagelock(ahead, 79);
 
         // If we have already acquired the pagelock or it is somewhere in our list of pages ahead of us, then we can keep going
@@ -385,8 +391,7 @@ void unlink_batch_scattered_pages(PAGE_LIST* list, PAGE** pages_to_remove, ULONG
             
             acquired_unique_pagelock_behind = try_acquire_pagelock(behind, 80);
 
-            if (acquired_unique_pagelock_behind || page_is_in_list(ahead, &pages_to_remove[page_idx + 1], num_pages - page_idx - 1) 
-                                || ahead == behind) {
+            if (acquired_unique_pagelock_behind || page_is_in_list(behind, &pages_to_remove[page_idx + 1], num_pages - page_idx - 1)) {
                 
                 ahead->blink = behind;
                 behind->flink = ahead;
@@ -471,6 +476,11 @@ void unlink_page(PAGE_LIST* list, PAGE* page) {
 
     ahead = page->flink;
     behind = page->blink;
+
+    if (ahead == behind) {
+        acquire_pagelock(ahead, 0xaaa);
+        acquire_pagelock(behind, 0xbbb);
+    }
 
     if (try_acquire_pagelock(ahead, 63)) {
         if (try_acquire_pagelock(behind, 64)) {
