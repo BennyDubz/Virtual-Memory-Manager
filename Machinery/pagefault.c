@@ -1026,7 +1026,7 @@ static void end_of_fault_work(PTE* accessed_pte, ULONG64 thread_idx) {
         faulter_trim_behind(accessed_pte);
     }
 
-    faulter_trim_behind(accessed_pte);
+    // faulter_trim_behind(accessed_pte);
 
     // The faulter might take pages from the standby list to replenish the free and zero lists
     potential_list_refresh(thread_idx);

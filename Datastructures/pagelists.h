@@ -9,7 +9,7 @@
 
 // If this is 1, then we will use normal critical sections instead of just the bit
 #define DEBUG_PAGELOCK 0
-#define LIGHT_DEBUG_PAGELOCK 1
+#define LIGHT_DEBUG_PAGELOCK 0
 
 
 // For development while switching between generic linked list nodes and keeping the flink/blink inside the page

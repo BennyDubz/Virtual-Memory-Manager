@@ -59,7 +59,6 @@ typedef struct {
 
 
 typedef struct {
-    // This value might be accessed frequently in loops,
     ULONG64 total_thread_count;
     ULONG64 buffer[7];
     THREAD_LOCAL_STORAGE* thread_local_storages;

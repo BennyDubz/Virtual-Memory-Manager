@@ -249,13 +249,11 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
                 continue;
             }
 
+
             // Reset the PTE contents from when we were using this to un-set the access bit
             for (ULONG64 trim_idx = 0; trim_idx < section_num_ptes_trimmed; trim_idx++) {
                 curr_pte = pte_section_trim[trim_idx];
                 pte_copy = read_pte_contents(curr_pte);
-
-                // pte_contents.memory_format.frame_number = curr_pte->memory_format.frame_number;
-                // pte_contents.memory_format.protections = curr_pte->memory_format.protections;
 
                 pte_contents = pte_copy;
                 pte_contents.memory_format.being_changed = VALID_PTE_BEING_CHANGED;
@@ -295,7 +293,6 @@ LPTHREAD_START_ROUTINE thread_trimming(void* parameters) {
             }
 
             InterlockedAdd64(&curr_pte_locksection->valid_pte_count, - section_num_ptes_trimmed);
-
 
 
             /**
