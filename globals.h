@@ -55,11 +55,14 @@ typedef struct {
     UCHAR buffer3[63];
 
     THREAD_DISK_READ_RESOURCES disk_resources;
+
+    THREAD_TRIM_RESOURCES trim_resources;
 } THREAD_LOCAL_STORAGE;
 
 
 typedef struct {
     ULONG64 total_thread_count;
+    ULONG64 num_usermode_threads;
     ULONG64 buffer[7];
     THREAD_LOCAL_STORAGE* thread_local_storages;
 } THREAD_SIMULATION_INFORMATION;

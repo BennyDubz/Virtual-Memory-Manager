@@ -157,11 +157,15 @@ void release_pagelock(PAGE* page, ULONG64 origin_code) {
     page->two_ago = page->prev_code;
     page->prev_code = page->origin_code;
     page->origin_code = origin_code;
-    #endif
 
     if (InterlockedCompareExchange16(&page->page_lock, PAGE_UNLOCKED, PAGE_LOCKED) != PAGE_LOCKED) {
         DebugBreak();
     };
+
+    return;
+    #endif
+
+    InterlockedAnd16(&page->page_lock, PAGE_UNLOCKED);
 }
 
 
@@ -264,6 +268,7 @@ void insert_page(PAGE_LIST* list, PAGE* page) {
 }
 
 
+#if 0
 /**
  * Pops a page from the list while taking advantage of the shared lock and pagelock scheme
  * 
@@ -331,7 +336,7 @@ PAGE* pop_page2(PAGE_LIST* list) {
 
     return NULL;
 }
-
+#endif
 
 /**
  * Returns TRUE if the given page is in the list, FALSE otherwise
@@ -603,6 +608,69 @@ void insert_page_section(PAGE_LIST* list, PAGE* beginning, PAGE* end, ULONG64 nu
     }
 
     release_pagelock(end, 87);
+
+    ReleaseSRWLockExclusive(&list->shared_lock);
+}
+
+
+/**
+ * Inserts the chain of pages between the beginning and end at the head,
+ * where the beginning node will be closest to the head. 
+ * 
+ * DOES NOT release the pagelocks for the pages we add into the list.
+ * 
+ * Takes advantage of the shared lock and pagelock scheme
+ */
+void insert_page_section_no_release(PAGE_LIST* list, PAGE* beginning, PAGE* end, ULONG64 num_pages) {
+    PAGE* head = &list->head;
+    PAGE* front_page;
+
+    AcquireSRWLockShared(&list->shared_lock);
+
+    if (try_acquire_pagelock(head, 92)) {
+
+        // this might be the tail of the list if it is empty
+        front_page = head->flink;
+
+        if (try_acquire_pagelock(front_page, 93)) {
+
+            /**
+             * At this point, we have all of the pagelocks necessary to insert the page into the list 
+             */
+            head->flink = beginning;
+            front_page->blink = end;
+            beginning->blink = head;
+            end->flink = front_page;
+
+            InterlockedAdd64(&list->list_length, num_pages);
+
+            release_pagelock(head, 94);
+            release_pagelock(front_page, 95);
+
+            ReleaseSRWLockShared(&list->shared_lock);
+            return;
+
+        } else {
+            release_pagelock(head, 96);
+        }
+    }
+
+    ReleaseSRWLockShared(&list->shared_lock);
+
+    /**
+     * We have the policy that we can modify the flinks/blinks of the pages with the exclusive lock
+     * **without** having to acquire the pagelocks
+     */
+    AcquireSRWLockExclusive(&list->shared_lock);
+
+    front_page = head->flink;
+
+    head->flink = beginning;
+    front_page->blink = end;
+    beginning->blink = head;
+    end->flink = front_page;
+    
+    InterlockedAdd64(&list->list_length, num_pages);
 
     ReleaseSRWLockExclusive(&list->shared_lock);
 }

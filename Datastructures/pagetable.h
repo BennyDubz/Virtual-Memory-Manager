@@ -130,9 +130,31 @@ typedef struct {
 } PAGETABLE;
 
 #define MAX_AGE (1 << 4) - 1
-// typedef struct {
-    
-// } AGELISTS;
+
+#endif
+
+
+#ifndef THREAD_TRIM_STORAGE
+#define THREAD_TRIM_STORAGE
+
+// How many PTEs a thread can put in this buffer
+#define THREAD_TRIM_STORAGE_SIZE 256 
+
+/**
+ * We will allow individual threads to put good trimming candidates in their own local buffer.
+ * 
+ * This will be used at the end of a pagefault when a faulting thread might trim behind itself.
+ * Instead of a faulter going through all of the work and having to unmap PTEs and 
+ * put them in the right lists, they will merely find the correct candidates and put them on this buffer
+ * for the trimming thread to handle instead.
+ */
+typedef struct {
+    volatile ULONG64 num_ptes_in_buffer;
+    ULONG64 curr_idx;
+    volatile PTE* pte_storage[THREAD_TRIM_STORAGE_SIZE];
+
+} THREAD_TRIM_RESOURCES;
+
 #endif
 
 /**

@@ -77,6 +77,7 @@ static int page_cache_color_compare(const void* page1, const void* page2) {
 static void update_pte_sections_to_disk_format(PAGE** page_list, ULONG64 num_pages) {
     PTE* curr_pte;
     PAGE* curr_page;
+    PTE pte_copy;
 
     // The first and last field will always be zero for all the PTEs we update
     PTE pte_contents;
@@ -85,12 +86,19 @@ static void update_pte_sections_to_disk_format(PAGE** page_list, ULONG64 num_pag
     for (ULONG64 page_idx = 0; page_idx < num_pages; page_idx++) {
         curr_page = page_list[page_idx];
         curr_pte = curr_page->pte;
+        pte_copy = read_pte_contents(curr_pte);
 
         if (is_transition_format(*curr_pte) == FALSE) DebugBreak();
 
         pte_contents.disk_format.pagefile_idx = curr_page->pagefile_idx;
 
-        write_pte_contents(curr_pte, pte_contents);
+        /**
+         * We need to force a write here, as we must not collide with the end of the trimming thread when pages are added
+         * to the standby list. See more info there
+         */
+        while (InterlockedCompareExchange64((ULONG64*) curr_pte, pte_contents.complete_format, pte_copy.complete_format) != pte_copy.complete_format) {
+            pte_copy = read_pte_contents(curr_pte);
+        }
     }
 
 }

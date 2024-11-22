@@ -477,9 +477,6 @@ static int init_datastructures() {
  */
 static int init_multithreading(ULONG64 num_usermode_threads) {
     
-
-    //BW: This could later be turned into a manual-reset lock if we are able to write
-    // multiple pages to standby simultaneously, but right now we do it one page at a time
     waiting_for_pages_event = CreateEvent(NULL, TRUE, FALSE, NULL);
 
     aging_event = CreateEvent(NULL, FALSE, FALSE, NULL);
@@ -524,7 +521,9 @@ static int init_multithreading(ULONG64 num_usermode_threads) {
         return ERROR;
     }
 
+    // The total count of usermode and worker threads
     thread_information.total_thread_count = num_usermode_threads + num_worker_threads;
+    thread_information.num_usermode_threads = num_usermode_threads;
     thread_information.thread_local_storages = thread_storage;
 
     
@@ -622,6 +621,18 @@ static int init_multithreading(ULONG64 num_usermode_threads) {
         disk_resources->max_readsection_idx = max_idx;
         disk_resources->num_allocated_readsections = num_readsections_per_thread;
         disk_resources->curr_readsection_idx = min_idx;
+
+        // We also need to initialize all of our trim resources to be 0
+        THREAD_TRIM_RESOURCES* trim_resources = &thread_storage[thread_idx].trim_resources;
+
+        trim_resources->curr_idx = 0;
+        trim_resources->num_ptes_in_buffer = 0;
+
+        // Doing this manually might be faster than calloc'ing the entire thing from the beginning?
+        for (int i = 0; i < THREAD_TRIM_STORAGE_SIZE; i++) {
+            trim_resources->pte_storage[i] = NULL;
+        }
+
     }
 
 

@@ -15,8 +15,7 @@
 #define TRIM_ACCESSED_PTES_PROPORTION 5
 
 // The minimum and maximum amount of PTEs that can be trimmed by the faulting threads
-#define FAULTER_TRIM_BEHIND_MIN 16
-#define FAULTER_TRIM_BEHIND_MAX 64
+#define FAULTER_TRIM_BEHIND_NUM 64
 
 // We need to OR the final bit of a pfn in order to have read-only permissions
 #define PAGE_MAPUSERPHYSCAL_READONLY_MASK 0x8000000000000000
@@ -33,6 +32,21 @@
 #define MOD_WRITER_PREFERRED_STANDBY_MINIMUM_PROPORTION  3
 
 
+typedef struct {
+    ULONG64 total_num_ptes;
+    PTE** pte_storage;
+    PULONG_PTR* trim_addresses;
+
+    ULONG64 num_to_modified;
+    PAGE** pages_to_modified;
+
+    ULONG64 num_to_standby;
+    PAGE** pages_to_standby;
+
+    BOOL trim_accessed_ptes;
+    ULONG64 ptes_per_locksection;
+} TRIM_INFORMATION;
+
 /**
  * Thread dedicated to aging all of the valid PTEs in the pagetable
  */
@@ -46,16 +60,29 @@ void trim_update_thread_storages(UCHAR trim_signal_status);
 
 
 /**
- * Thread dedicated to trimming PTEs from the pagetable and putting them on the modified list
+ * Thread dedicated to everything trimming related.
+ * 
+ * Takes valid PTEs off of buffers from threads trimming behind themselves, as well as PTEs straight off
+ * the pagetable to unmap and put their pages on the modified/standby list depending on whether or not
+ * they have been modified.
+ * 
+ * Has a limited aging implementation, where we use the access bit to sometimes avoid trimming PTEs and unset this bit
+ * when we come across it.
  */
 LPTHREAD_START_ROUTINE thread_trimming(void* parameters);
 
 
 /**
- * Trims the PTEs behind the faulting thread if there are at least FAULTER_TRIM_BEHIND_BOUNDARY of them active,
+ * Trims the PTEs behind the faulting thread if there are at least FAULTER_TRIM_BEHIND_MIN of them active,
  * but will only enter one PTE locksection to ensure low wait-times for the faulting thread
+ * 
+ * Does NOT distinguish between accessed / unaccessed valid PTEs. We are trimming behind ourselves because
+ * we are speculating that these PTEs will no longer be accessed anymore (as they were recently sequentially accessed).
+ * 
+ * We consider only a maximum of FAULTER_TRIM_BEHIND_NUM pages. Furthermore, we do not actually trim the PTEs to completion-
+ * instead, we put them on a buffer for the trimming thread to handle. This saves the faulting thread a considerable amount of time.
  */
-void faulter_trim_behind();
+void faulter_trim_behind(PTE* accessed_pte, ULONG64 thread_idx);
 
 
 /**

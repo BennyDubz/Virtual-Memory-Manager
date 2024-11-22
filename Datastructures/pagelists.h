@@ -9,7 +9,7 @@
 
 // If this is 1, then we will use normal critical sections instead of just the bit
 #define DEBUG_PAGELOCK 0
-#define LIGHT_DEBUG_PAGELOCK 0
+#define LIGHT_DEBUG_PAGELOCK 1
 
 
 // For development while switching between generic linked list nodes and keeping the flink/blink inside the page
@@ -196,6 +196,19 @@ void unlink_page(PAGE_LIST* list, PAGE* page);
  * Takes advantage of the shared lock and pagelock scheme
  */
 void insert_page_section(PAGE_LIST* list, PAGE* beginning, PAGE* end, ULONG64 num_pages);
+
+
+/**
+ * May combine this with the normal insert_page_section later...
+ * 
+ * Inserts the chain of pages between the beginning and end at the head,
+ * where the beginning node will be closest to the head. 
+ * 
+ * DOES NOT release the pagelocks for the pages we add into the list.
+ * 
+ * Takes advantage of the shared lock and pagelock scheme
+ */
+void insert_page_section_no_release(PAGE_LIST* list, PAGE* beginning, PAGE* end, ULONG64 num_pages);
 
 
 /**

@@ -249,6 +249,18 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
     
     // Prepare the contents ahead of time depending on whether or not we are changing the permissions
     PTE pte_contents;
+
+    pte_contents = local_pte;
+    pte_contents.memory_format.being_changed = VALID_PTE_BEING_CHANGED;
+
+    /**
+     * Effectively acquire the rights to edit this PTE by setting its "being_changed" bit
+     */
+    if (InterlockedCompareExchange64((ULONG64*) accessed_pte, pte_contents.complete_format, local_pte.complete_format) != local_pte.complete_format) {
+        return VALID_PTE_RACE_CONTIION_FAIL;
+    }
+
+
     pte_contents.complete_format = 0;
     pte_contents.memory_format.valid = VALID;
     pte_contents.memory_format.frame_number = local_pte.memory_format.frame_number;
@@ -262,53 +274,7 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
 
     PAGE* curr_page = pfn_to_page(local_pte.memory_format.frame_number);
 
-    acquire_pagelock(curr_page, 33);
-
-    /**
-     * Here - if the PTE that we read is still in memory format, then we can guarantee that we are the only ones who can access
-     * it and that no one else can trim it. This allows us to edit the PTE without the PTE lock and 
-     */
-
     PTE updated_pte_copy = read_pte_contents(accessed_pte);
-
-
-    /**
-     * We address two scenarios here:
-     * 
-     * The first is where another thread has already resolved the fault and set the access bit/correct protections. In that scenario,
-     * we do not have to perform any more work.
-     * 
-     * The second is where the PTE had been trimmed and we will need to retry the fault.
-     */
-    if (ptes_are_equal(updated_pte_copy, pte_contents) || is_memory_format(updated_pte_copy) == FALSE) {
-        release_pagelock(curr_page, 36);
-        return VALID_PTE_RACE_CONTIION_FAIL;
-    }
-
-    /**
-     * We address one final case, where the PTE is in the correct format except the access bit is no longer set.
-     *
-     * All we want to do in this case is set the access bit again but we do not need to perform any more work.
-     */
-    PTE alternative_pte_contents = pte_contents;
-    alternative_pte_contents.memory_format.access_bit = PTE_NOT_ACCESSED;
-    if (ptes_are_equal(alternative_pte_contents, updated_pte_copy)) {
-
-        while (InterlockedCompareExchange64((ULONG64*) accessed_pte, pte_contents.complete_format, updated_pte_copy.complete_format) != pte_contents.complete_format) {
-            updated_pte_copy = read_pte_contents(accessed_pte);
-        }
-
-        release_pagelock(curr_page, 89);
-
-        return SUCCESS;
-    }
-
-    #if 0
-    if (ptes_are_equal(local_pte, updated_pte_copy) == FALSE) {
-        release_pagelock(curr_page, 36);
-        return VALID_PTE_RACE_CONTIION_FAIL;
-    }
-    #endif
 
     // See if we need to change the permissions to PAGE_READWRITE
     if (access_type == WRITE_ACCESS && local_pte.memory_format.protections == PTE_PROTREAD) {
@@ -316,7 +282,7 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
 
         // All we want to do is change the permissions on the page - using MapUserPhysicalPages for this happens to be faster than
         // using VirtualProtect
-        if (MapUserPhysicalPages (pte_to_va(accessed_pte), 1, &pfn) == FALSE) {
+        if (MapUserPhysicalPages(pte_to_va(accessed_pte), 1, &pfn) == FALSE) {
 
             fprintf (stderr, "handle_valid_pte_fault : could not map VA %p to pfn %llX\n", pte_to_va(accessed_pte), pfn);
             DebugBreak();
@@ -338,11 +304,13 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
 
     custom_spin_assert(is_memory_format(read_pte_contents(accessed_pte)));
 
-    while (InterlockedCompareExchange64((ULONG64*) accessed_pte, pte_contents.complete_format, updated_pte_copy.complete_format) != pte_contents.complete_format) {
+    /**
+     * While we have the rights to change this PTE's permission bits, we must ensure that this write is sustained
+     * across any other thread setting the access bit
+     */
+    while (InterlockedCompareExchange64((ULONG64*) accessed_pte, pte_contents.complete_format, updated_pte_copy.complete_format) != updated_pte_copy.complete_format) {
         updated_pte_copy = read_pte_contents(accessed_pte);
     }
-
-    release_pagelock(curr_page, 34);
 
     return SUCCESS;
 }
@@ -915,7 +883,7 @@ static void commit_pages(PAGE** pages_to_commit, PTE** ptes, PTE* accessed_pte, 
      * For unaccessed PTEs, we need to ensure they start off with a clean page
      * 
      * Note - this is treating the individual threads to be similar to different processes accessing the same
-     * address space, which would not be the case normally. However, this allows us to demonstrate the infrastructure
+     * address space, which would not be the case normally. However, this allows me to demonstrate the infrastructure
      * required to zero out pages when needed. Typically, different threads within a process would not need to have zeroed out pages
      * if their previous owner was withn the same process - since the threads are a part of the same process, we do not have the
      * security concern of sharing data between processes. 
@@ -952,6 +920,7 @@ static void commit_pages(PAGE** pages_to_commit, PTE** ptes, PTE* accessed_pte, 
      */
     if (is_transition_format(read_pte_contents(ptes[0])) == FALSE) {
         PAGE curr_page_copy;
+        PTE old_pte_copy;
         PTE pte_contents;
         pte_contents.complete_format = 0;
 
@@ -960,9 +929,17 @@ static void commit_pages(PAGE** pages_to_commit, PTE** ptes, PTE* accessed_pte, 
 
             if (curr_page_copy.status == STANDBY_STATUS) {
                 PTE* old_pte = curr_page_copy.pte;
+                old_pte_copy = read_pte_contents(old_pte);
                 pte_contents.disk_format.pagefile_idx = curr_page_copy.pagefile_idx;
 
-                write_pte_contents(old_pte, pte_contents);
+                /**
+                 * We need to force a write here, as we must not collide with the end of the trimming thread when pages are added
+                 * to the standby list. See more info there
+                 */
+                while (InterlockedCompareExchange64((ULONG64*) old_pte, pte_contents.complete_format, old_pte_copy.complete_format) != old_pte_copy.complete_format) {
+                    old_pte_copy = read_pte_contents(old_pte);
+                }
+
             }
         }
     }
@@ -1019,15 +996,16 @@ static void end_of_fault_work(PTE* accessed_pte, ULONG64 thread_idx) {
         }
     }
 
+    // We speculate that we will access the PTEs ahead of us, so we set their access bits so that they aren't trimmed
     speculative_set_access_bits(accessed_pte);
 
-    // We try to trim behind us... currently using placeholder heuristics
-    if (total_available_pages < (physical_page_count / 4) && modified_list->list_length < physical_page_count / 4) {
-        faulter_trim_behind(accessed_pte);
-    }
 
-    // faulter_trim_behind(accessed_pte);
+    // We look at the PTEs behind us and put valid ones in a buffer to be trimmed
+    // We are speculating that we are much less likely to access sequential addresses backwards
+    faulter_trim_behind(accessed_pte, thread_idx);
 
-    // The faulter might take pages from the standby list to replenish the free and zero lists
+
+    // If the conditions are right, we will signal a thread to take frames from standby and move
+    // them to the free frames list and start the process of moving some to the zeroed pages list
     potential_list_refresh(thread_idx);
 }
