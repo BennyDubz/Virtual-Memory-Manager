@@ -150,37 +150,35 @@ static BOOL handle_trim_single_pte(PTE* pte, PTE pte_copy, TRIM_INFORMATION* tri
 
     // If the page still has a pagefile index stored within it, then we can trim it straight to standby
     if (curr_page->pagefile_idx == DISK_IDX_NOTUSED) {
+
+        /**
+         * 
+         * I want to avoid holding the pagelock at all. However, without the pagelock, I cannot coordinate
+         * with the modified writer for pages that are currently being written to disk.
+         * 
+         * However, if we grab the pagelock and check again, we can be certain that we put the page in the correct list
+         * 
+         * This means we do have to grab the pagelock briefly every time we might have to add a page to the modified list,
+         * however, as more and more pages have their disk space preserved, we will have to do this less frequently
+         * 
+         */
+        acquire_pagelock(curr_page, 90);
+
         if (curr_page->writing_to_disk == PAGE_BEING_WRITTEN && curr_page->modified == PAGE_NOT_MODIFIED) {
-
-            /**
-             * 
-             * I want to avoid holding the pagelock at all. However, without the pagelock, I cannot coordinate
-             * with the modified writer for pages that are currently being written to disk.
-             * 
-             * However, if we grab the pagelock and check again, we can be certain that we put the page in the correct list
-             * 
-             * Fortunately, this will happen rarely and the collisions with the modified writer will be even rarer,
-             * but this still needs to be addressed.
-             * 
-             */
-            acquire_pagelock(curr_page, 90);
-
-            if (curr_page->writing_to_disk == PAGE_BEING_WRITTEN && curr_page->modified == PAGE_NOT_MODIFIED) {
-                curr_page->status = MODIFIED_STATUS;
-            } else if (curr_page->pagefile_idx != DISK_IDX_NOTUSED) {
-                trim_information->pages_to_standby[trim_information->num_to_standby] = curr_page;
-                trim_information->num_to_standby++;
-            } else {
-                trim_information->pages_to_modified[trim_information->num_to_modified] = curr_page;
-                trim_information->num_to_modified++;
-            }
-
-            release_pagelock(curr_page, 91);
-
+            // The page is still being written to the disk, so we can just put it back in the modified-status and the 
+            // modified writer will handle the rest
+            curr_page->status = MODIFIED_STATUS;
+        } else if (curr_page->pagefile_idx != DISK_IDX_NOTUSED) {
+            // The modified write had just completed by the time we got the pagelock, so we can add it to standby
+            trim_information->pages_to_standby[trim_information->num_to_standby] = curr_page;
+            trim_information->num_to_standby++;
         } else {
+            // There is no preserved disk space, we just have to add it to the modified list
             trim_information->pages_to_modified[trim_information->num_to_modified] = curr_page;
             trim_information->num_to_modified++;
         }
+
+        release_pagelock(curr_page, 91);
         
     } else {
         trim_information->pages_to_standby[trim_information->num_to_standby] = curr_page;
@@ -825,6 +823,8 @@ LPTHREAD_START_ROUTINE thread_modified_writer(void* parameters) {
                         // We need to discard the pagefile space
                         release_slot = TRUE;
                     }
+
+                    // write is in flight --> rescued, read only --> trimmed back to modified w/o pagelock
 
                     release_pagelock(curr_page, 10);
 

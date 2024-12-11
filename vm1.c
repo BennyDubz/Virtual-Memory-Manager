@@ -16,7 +16,7 @@
 
 #define NUM_USERMODE_THREADS        ((ULONG64) (8))
 #define MAX_CONSECUTIVE_ACCESSES    64
-#define TOTAL_ACCESS_AMOUNT         (MB(10))
+#define TOTAL_ACCESS_AMOUNT         (GB(20))
 
 // How frequently in milliseconds we print out all of the information about the simulation and our current progress
 #define PRINT_FREQUECY_MS          2000
