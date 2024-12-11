@@ -404,6 +404,7 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
     acquire_pagelock(page_to_rescue, 1);
 
     // We lost the race to rescue this PTE - whether it was stolen from under us or someone else saved it
+    // or rarely, if the page is moved from standby to the free/zeroed list
     if (page_to_rescue->pte != accessed_pte || 
         (page_to_rescue->status != STANDBY_STATUS && page_to_rescue->status != MODIFIED_STATUS)) {
 

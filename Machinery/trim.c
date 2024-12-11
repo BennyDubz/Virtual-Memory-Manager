@@ -254,9 +254,9 @@ static void get_ptes_from_trim_behind(TRIM_INFORMATION* trim_information) {
                 pte_locksection = pte_to_locksection(curr_pte);
 
                 InterlockedDecrement64(&pte_locksection->valid_pte_count);
+                thread_pte_storage[i] = NULL;   
             }
 
-            thread_pte_storage[i] = NULL;
         }
 
         InterlockedAdd64(&user_thread_resources->num_ptes_in_buffer, - (num_ptes_found_thread + num_candidates_invalidated_thread));
