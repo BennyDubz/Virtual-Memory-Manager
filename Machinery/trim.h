@@ -10,6 +10,8 @@
 // The maximum number of PTEs that we can trim per PTE locksection
 #define TRIM_PER_SECTION 96
 
+#define TRIM_STORAGE_TARGET (THREAD_TRIM_STORAGE_SIZE * 0x8)
+
 // Once the number of total available pages is less than (total physical memory / proportion), we will trim PTES
 // that have the access bit set
 #define TRIM_ACCESSED_PTES_PROPORTION 5

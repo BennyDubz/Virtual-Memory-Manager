@@ -77,6 +77,14 @@ void handle_end_of_fault_disk_slot(PTE local_pte, PAGE* allocated_page, ULONG64 
 
 
 /**
+ * Called at the end of a **NON-DISK** pagefault to determine whether or not pagefile slots need to be
+ * released. Modifies the pages only if necessary to remove references to pagefile slots when appropriate
+ * and release pagefile slots when appropriate. 
+ */
+void handle_non_disk_fault_batch_disk_slots(PTE** ptes, PTE* original_pte_accessed, PAGE** allocated_pages, ULONG64 access_type, ULONG64 num_ptes);
+ 
+
+/**
  * Called at the end of a pagefault to determine whether or not pagefile slots need to be
  * released. Modifies the pages only if necessary to remove references to pagefile slots when appropriate
  * and release pagefile slots when appropriate

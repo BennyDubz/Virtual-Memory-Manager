@@ -29,9 +29,13 @@
 #define PTE_BEING_READ_FROM_DISK 1
 
 
-// Allows us to not hold the PTE lock during the MapUserPhysicalPages call in the trimmer, see VALID_PTE struct for more
+// Allows us to not hold the PTE lock during the MapUserPhysicalPages for valid faults
 #define VALID_PTE_NOT_BEING_CHANGED 0
 #define VALID_PTE_BEING_CHANGED 1
+
+// Allows us to not hold pagelocks or PTE locks while doing the MapUserPhysicalPages and a lot of other work in the trimmer
+#define VALID_PTE_NOT_BEING_TRIMMED 0
+#define VALID_PTE_BEING_TRIMMED 1
 
 
 
@@ -56,19 +60,45 @@ typedef struct {
     ULONG64 access_bit:1;
 
     /**
-     * This allows us to address the specific case where we do not want to hold the PTE lock in the trimmer while unmapping valid PTEs.
+     * These bits allow us to address the specific cases where we do not want to hold the PTE lock in the trimmer while unmapping valid PTEs, 
+     * and where the valid PTEs are having their permissions edited.
      * 
-     * When trimming, we will mark the PTE as 'being_changed', but leave it in valid format. Any thread that accesses this PTE between this moment and the
+     * When trimming, we will mark the PTE as 'being_trimmed', but leave it in valid format. Any thread that accesses this PTE between this moment and the
      * MapUserPhysicalPagesScatter call that unmaps the VA will not pagefault. However, there will be a short gap when the VA is unmapped but the PTE is valid where this will
      * be set. In this case, the faulting thread will have to spin and wait for the PTE to be changed to transition format.
      * 
-     * Furthermore, for an unaccessed PTE, we can do the same trick of marking the PTE as being changed while we are mapping it at the end of a page fault. 
+     * Furthermore, for an unaccessed PTE, we can do the same trick of marking the PTE as "being_changed" while we are mapping it at the end of a page fault. 
      * That way, other faulting threads will not have to needlessly acquire pages (most of the time), 
      * and we significantly reduce the hold time on the PTE lock by not holding it during the MapUserPhysicalPages call.
      * 
      * While the spinning is not ideal, we are able to reduce the PTE lock hold time significantly reducing overall contention
+     * 
+     * Note from 6/21/25:
+     * I used to have this as just the "being_changed" bit shared by both the trimmer and any faulters who were editing the permissions
+     * on the PTE. However, this led to a rare and frustrating race condition. It is as follows:
+     * 
+     * 1. A PTE was marked for trimming, and therefore had its "being_changed" bit set.
+     * 2. It was unmapped, and its page was added to the standby list directly due to saved disk space.
+     *      2a: However, the PTE itself was in valid-format with the "being_changed" bit still set.
+     * [trimmer sleeps, and has NOT changed the pte from valid --> transition format]
+     * 3. The standby page was repurposed, and the PTE is put onto disk format
+     * 4. The PTE is then faulted on by another thread with a READ operation, and it is read in from disk
+     * 5. The PTE is then accessed with a WRITE. Since we like to preserve our useful disk space, the valid PTE only had read-permissions.
+     *      This meant that the WRITE access pagefaults, and in order to resolve this, it set the PTE's "being_changed" bit to 1.
+     * [trimmer wakes up]
+     * 6. The trimmer sees that the PTE is in valid, "being_changed" format which is exactly what it expects (it would ignore it in disk format by design,
+     *      which is why this took so long to find). However, the trimmer would think that
+     *      it was the thread that set the "being_changed" bit, but it was actually a faulter after all of the previous steps.
+     * 7. The trimmer then performs the InterlockedCmpExng to set this PTE to be in transition format.
+     * 8. The PTE is now in transition format, despite the fact that it is mapped and its page is not on any standby list. Any thread that tries
+     * to take it out of one of these lists (maybe another faulter doing a WRITE while the other is still setting permissions) will fail; the PTE
+     * is in a corrupted state.
+     * 
+     * So that is why we need two bits now instead of one. The trimmer can now be certain it was what set the "being_trimmed" bit instead of the common
+     * "being_changed" bit
      */
     ULONG64 being_changed:1;
+    ULONG64 being_trimmed:1;
 } VALID_PTE;
 
 

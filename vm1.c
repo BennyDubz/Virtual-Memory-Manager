@@ -14,9 +14,9 @@
 #include "./Datastructures/pagelists.h"
 
 
-#define NUM_USERMODE_THREADS        ((ULONG64) (8))
+#define NUM_USERMODE_THREADS        ((ULONG64) (0x8))
 #define MAX_CONSECUTIVE_ACCESSES    64
-#define TOTAL_ACCESS_AMOUNT         (GB(20))
+#define TOTAL_ACCESS_AMOUNT         (GB(1000))
 
 // How frequently in milliseconds we print out all of the information about the simulation and our current progress
 #define PRINT_FREQUECY_MS          2000
@@ -123,6 +123,7 @@ void usermode_virtual_memory_simulation () {
     ULONG64 current_access_count = 0;
     double proportion_of_total;
     ULONG64 wait_code;
+    ULONG64 prev_count = INFINITE;
     for (int user_thread_num = 0; user_thread_num < NUM_USERMODE_THREADS; user_thread_num++) {
         wait_code = WaitForSingleObject(simulation_thread_handles[user_thread_num], PRINT_FREQUECY_MS);
 
@@ -131,6 +132,29 @@ void usermode_virtual_memory_simulation () {
             for (ULONG64 i = 0; i < NUM_USERMODE_THREADS; i++) {
                 current_access_count += thread_params[i].current_access_count;
             }
+
+            // Deadlock everything! May make some debugging possible...
+            if (current_access_count == prev_count) {
+
+                fprintf(stderr, "No more faults, must have had a fatal error. Attempting to deadlock everything...\n");
+
+                // acquire_pagelock(&standby_list->head, 0x1000);
+                // acquire_pagelock(&standby_list->tail, 0x1000);
+
+                // for (int i = 0; i < NUM_CACHE_SLOTS; i++) {
+                //     acquire_pagelock(&free_frames->listheads[i].head, 0x1000);
+                //     acquire_pagelock(&free_frames->listheads[i].tail, 0x1000);
+                // }
+
+                // acquire_pagelock(&modified_list->head, 0x1000);
+                // acquire_pagelock(&modified_list->tail, 0x1000);
+
+                fprintf(stderr, "Zero: %llx Free frames: %llx, Standby list len: %llx\n", zero_lists->total_available, free_frames->total_available, standby_list->list_length);
+
+                custom_spin_assert(FALSE);
+            }
+
+            prev_count = current_access_count;
 
             proportion_of_total = (double) current_access_count / (double) TOTAL_ACCESS_AMOUNT;
 

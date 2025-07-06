@@ -248,6 +248,7 @@ void* db_pop_from_tail(DB_LL_NODE* listhead) {
     return item;
 }
 
+
 /**
  * Removes the given node from the middle of its list, and returns the item
  * 
@@ -285,6 +286,7 @@ void* db_remove_from_middle(DB_LL_NODE* listhead, DB_LL_NODE* middle_node) {
     // free(middle_node);
     return item;
 }
+
 
 /**
  * Removes the entire section from the list. Assumes all nodes between

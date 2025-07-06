@@ -88,8 +88,6 @@ static void update_pte_sections_to_disk_format(PAGE** page_list, ULONG64 num_pag
         curr_pte = curr_page->pte;
         pte_copy = read_pte_contents(curr_pte);
 
-        if (is_transition_format(*curr_pte) == FALSE) DebugBreak();
-
         pte_contents.disk_format.pagefile_idx = curr_page->pagefile_idx;
 
         /**
@@ -610,10 +608,11 @@ static PAGE* try_acquire_list_tail_pagelock(PAGE_LIST* list) {
 }
 
 
-/** it acquires the pagelock for the tail entry of the list, if there is a tail entry
+/** 
  * 
- * Spins until
- * Returns the page whose lock was acquired, or NULL if the list was empty and it was unable
+ * Spins until it acquires the pagelock for the tail entry of the list, if there is a tail entry
+ * 
+ * Returns the page whose lock was acquired, or NULL if the list was empty and it was unable to
  */
 static PAGE* acquire_list_tail_pagelock(PAGE_LIST* list) {
     PAGE* pagelist_tail = &list->tail;

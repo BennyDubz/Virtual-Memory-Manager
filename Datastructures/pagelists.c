@@ -19,6 +19,17 @@
  */
 
 
+void pagelist_debugbreak() {
+    volatile ULONG64 i = 0;
+
+    fprintf(stderr, "Pagelist spinning debugbreak\n");
+
+    for (ULONG64 _ = 0; _ < 0xFFFFFFFFFFFFFFFF; _++) {
+        i++;
+    }
+}
+
+
 /**
  * Initializes all of the pages, and organizes them in memory such that they are reachable using the pfn_to_page
  * function in O(1) time. Returns the address of page_storage_base representing the base address of where all the pages
@@ -148,7 +159,8 @@ void release_pagelock(PAGE* page, ULONG64 origin_code) {
 
     #if LIGHT_DEBUG_PAGELOCK
     if (page->holding_threadid != GetCurrentThreadId()) {
-        DebugBreak();
+        
+        pagelist_debugbreak();
     }
     page->holding_threadid = 0;
     page->five_ago = page->four_ago;
@@ -159,7 +171,7 @@ void release_pagelock(PAGE* page, ULONG64 origin_code) {
     page->origin_code = origin_code;
 
     if (InterlockedCompareExchange16(&page->page_lock, PAGE_UNLOCKED, PAGE_LOCKED) != PAGE_LOCKED) {
-        DebugBreak();
+        pagelist_debugbreak();
     };
 
     return;
@@ -268,76 +280,6 @@ void insert_page(PAGE_LIST* list, PAGE* page) {
 }
 
 
-#if 0
-/**
- * Pops a page from the list while taking advantage of the shared lock and pagelock scheme
- * 
- * Assumes you already own the pagelock of the tail page
- * 
- * Returns a pointer to the popped page if successful with its pagelock acquired, NULL otherwise. 
- */
-PAGE* pop_page2(PAGE_LIST* list) {
-    PAGE* head = &list->head;
-    PAGE* page_to_pop;
-    PAGE* new_tail;
-
-    // Pre-emptively return NULL without having to acquire any locks. The list might repopulate immediately after, though
-    if (list->list_length == 0) {
-        return NULL;
-    }
-
-    
-    AcquireSRWLockShared(&list->shared_lock);
-
-    if (try_acquire_pagelock(head, 55)) {
-        page_to_pop = head->blink;
-
-        if (page_to_pop == head) {
-            release_pagelock(head, 56);
-
-            ReleaseSRWLockShared(&list->shared_lock);
-            return NULL;
-        }
-
-        if (try_acquire_pagelock(page_to_pop, 57)) {
-            
-            new_tail = page_to_pop->blink;
-
-            if (try_acquire_pagelock(new_tail, 58)) {
-                
-                /**
-                 * Here, we have all three of the pagelocks required to correctly modify the list
-                 */
-
-                release_pagelock(head, 61);
-                release_pagelock(new_tail, 62);
-
-                ReleaseSRWLockShared(&list->shared_lock);
-                return page_to_pop;
-            } else {    
-                release_pagelock(head, 59);
-                release_pagelock(page_to_pop, 60);
-            }
-
-        } else {
-            release_pagelock(head, 51);
-        }
-    }
-
-    ReleaseSRWLockShared(&list->shared_lock);
-
-    /**
-     * We have the policy that we can modify the flinks/blinks of the pages with the exclusive lock
-     * **without** having to acquire the pagelocks
-     */
-    AcquireSRWLockExclusive(&list->shared_lock);
-
-    ReleaseSRWLockExclusive(&list->shared_lock);
-
-    return NULL;
-}
-#endif
-
 /**
  * Returns TRUE if the given page is in the list, FALSE otherwise
  */
@@ -382,11 +324,6 @@ void unlink_batch_scattered_pages(PAGE_LIST* list, PAGE** pages_to_remove, ULONG
         ahead = curr_page->flink;
         behind = curr_page->blink;
 
-        if (ahead == behind) {
-            acquire_pagelock(ahead, 0xaaa);
-            // This purposefully will spin forever
-            acquire_pagelock(behind, 0xbbb);
-        }
 
         acquired_unique_pagelock_ahead = try_acquire_pagelock(ahead, 79);
 
@@ -404,7 +341,7 @@ void unlink_batch_scattered_pages(PAGE_LIST* list, PAGE** pages_to_remove, ULONG
                 curr_page->flink = NULL;
                 curr_page->blink = NULL;
 
-                if (curr_page->page_lock == PAGE_UNLOCKED) DebugBreak();
+                if (curr_page->page_lock == PAGE_UNLOCKED) pagelist_debugbreak();
 
                 /**
                  * We need to check that we acquired pagelocks that were NOT in our list already before we release them
@@ -471,7 +408,7 @@ void unlink_batch_scattered_pages(PAGE_LIST* list, PAGE** pages_to_remove, ULONG
  */
 void unlink_page(PAGE_LIST* list, PAGE* page) {
     if (page->status == LIST_STATUS || page->page_lock == PAGE_UNLOCKED) {
-        DebugBreak();
+        pagelist_debugbreak();
     }
 
     PAGE* ahead;
@@ -482,10 +419,6 @@ void unlink_page(PAGE_LIST* list, PAGE* page) {
     ahead = page->flink;
     behind = page->blink;
 
-    if (ahead == behind) {
-        acquire_pagelock(ahead, 0xaaa);
-        acquire_pagelock(behind, 0xbbb);
-    }
 
     if (try_acquire_pagelock(ahead, 63)) {
         if (try_acquire_pagelock(behind, 64)) {

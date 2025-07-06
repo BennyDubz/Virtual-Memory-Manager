@@ -31,6 +31,8 @@ ULONG64 fault_count = 0;
 /**
  * Function declarations
  */
+static void spin_wait_for_pte_change(PTE local_pte, PTE* accessed_pte);
+
 static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 access_type);
 
 static int handle_unaccessed_pte_fault(PTE* accessed_pte, PAGE** result_page_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage);
@@ -47,6 +49,8 @@ static ULONG64 get_trailing_valid_and_being_read_pte_count(PTE* accessed_pte);
 
 static void end_of_fault_work();
 
+static void commit_pages_disk(PAGE** pages_to_commit, PTE** ptes, PTE* accessed_pte, ULONG64 num_pages, ULONG64 access_type);
+
 static void commit_pages(PAGE** pages_to_commit, PTE** ptes, PTE* accessed_pte, ULONG64 num_pages, ULONG64 access_type);
 
 
@@ -60,7 +64,7 @@ static void commit_pages(PAGE** pages_to_commit, PTE** ptes, PTE* accessed_pte, 
  * 
  */
 int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_idx) {    
-    
+
     #ifdef DEBUG_CHECKING
     custom_spin_assert(modified_list->list_length <= disk->total_available_slots);
     custom_spin_assert(disk->disk_slot_statuses[DISK_IDX_NOTUSED] == DISK_USEDSLOT);
@@ -115,7 +119,22 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
             return handler_result;
         }
 
-        custom_spin_assert(is_transition_format(*ptes_to_connect[0]));
+        /**
+         * We need to address a very rare race condition here. It occurs when two threads are trying to rescue their PTE,
+         * one succeeds, and the other is context-switched out. While the other thread is switched out, the trimmer trims the pages, but the PTE is
+         * valid and has its "being-changed" bit set. In the window where the pages are on the standby list but the PTE has yet to fully change into transition format,
+         * the other thread wakes up and completes the rescue. 
+         * 
+         * Therefore, we need to ensure the PTEs are in transition format before we finish so that we do not collide with the trimmer while writing to these PTEs.  
+         */
+        PTE pte_copy;
+        for (ULONG64 i = 0; i < num_ptes_to_connect; i++) {
+            pte_copy = read_pte_contents(ptes_to_connect[i]);
+
+            if (is_transition_format(pte_copy) == FALSE) {
+                spin_wait_for_pte_change(pte_copy, ptes_to_connect[i]);
+            }
+        }
 
     } else if (is_disk_format(local_pte)) {
 
@@ -198,7 +217,6 @@ int pagefault(PULONG_PTR virtual_address, ULONG64 access_type, ULONG64 thread_id
     }
 
     
-
     if (is_disk_format(local_pte) == FALSE) {
         commit_pages(allocated_pages, ptes_to_connect, accessed_pte, num_ptes_to_connect, access_type);
     }
@@ -237,7 +255,7 @@ static void spin_wait_for_pte_change(PTE local_pte, PTE* accessed_pte) {
 static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 access_type) {
 
     // The PTE is being trimmed, we just have to wait until it is in transition format. This collision with the trimmer should be unlikely
-    if (local_pte.memory_format.being_changed == VALID_PTE_BEING_CHANGED) {
+    if (local_pte.memory_format.being_changed == VALID_PTE_BEING_CHANGED || local_pte.memory_format.being_trimmed == VALID_PTE_BEING_TRIMMED) {
         spin_wait_for_pte_change(local_pte, accessed_pte);
         return VALID_PTE_RACE_CONTIION_FAIL;
     }
@@ -299,7 +317,6 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
         custom_spin_assert(curr_page->pagefile_idx == DISK_IDX_NOTUSED);
     }
 
-
     custom_spin_assert(curr_page->status == ACTIVE_STATUS);
 
     custom_spin_assert(is_memory_format(read_pte_contents(accessed_pte)));
@@ -319,7 +336,8 @@ static int handle_valid_pte_fault(PTE local_pte, PTE* accessed_pte, ULONG64 acce
 /**
  * Handles a pagefault for a PTE that has never been accessed before
  * 
- * Writes the p, or NULL if it fails
+ * Gets the page for the accessed PTE and speculates on the virtual address space ahead of it. 
+ * 
  */
 static int handle_unaccessed_pte_fault(PTE* accessed_pte, PAGE** result_page_storage, PTE** ptes_to_connect_storage, ULONG64* num_ptes_to_connect_storage) {
 
@@ -479,6 +497,7 @@ static int handle_transition_pte_fault(PTE local_pte, PTE* accessed_pte, PAGE** 
                 continue;
             }
             #else
+            
             /**
              * We know the PTE cannot be in transition format anymore if the page is in neither of these statuses
              */
@@ -758,13 +777,15 @@ static int handle_disk_pte_fault(ULONG64 thread_idx, PTE local_pte, PTE* accesse
         release_sequential_disk_read_rights(&ptes_to_connect_storage[num_pages_acquired], num_to_read - num_pages_acquired);
     }
 
-    commit_pages(result_pages_storage, ptes_to_connect_storage, accessed_pte, num_pages_acquired, access_type);
+    commit_pages_disk(result_pages_storage, ptes_to_connect_storage, accessed_pte, num_pages_acquired, access_type);
 
     THREAD_DISK_READ_RESOURCES* thread_disk_resources = &thread_information.thread_local_storages[thread_idx].disk_resources;
 
     if (read_pages_from_disk(result_pages_storage, ptes_to_connect_storage, num_pages_acquired, thread_disk_resources) == ERROR) {
         DebugBreak();
     }
+
+    handle_batch_end_of_fault_disk_slot(ptes_to_connect_storage, accessed_pte, result_pages_storage, access_type, num_pages_acquired);
 
     *num_ptes_to_connect_storage = num_pages_acquired;
 
@@ -852,6 +873,68 @@ static ULONG64 get_trailing_valid_and_being_read_pte_count(PTE* accessed_pte) {
 
 
 /**
+ * Commits pages for the disk faults
+ */
+static void commit_pages_disk(PAGE** pages_to_commit, PTE** ptes, PTE* accessed_pte, ULONG64 num_pages, ULONG64 access_type) {
+    // We may need to edit the old PTE, in which case, we want a copy so we can still find it
+    PAGE allocated_pages_copies[MAX_PAGES_READABLE];
+
+    // We are writing to the page - this may communicate to the modified writer that they need to return pagefile space
+    if (access_type == WRITE_ACCESS && accessed_pte == ptes[0]) {
+        pages_to_commit[0]->modified = PAGE_MODIFIED;
+    }
+
+    for (ULONG64 i = 0; i < num_pages; i++) {
+        allocated_pages_copies[i] = *pages_to_commit[i];
+        custom_spin_assert(pages_to_commit[i]->status != ACTIVE_STATUS);
+
+        pages_to_commit[i]->status = ACTIVE_STATUS;
+        pages_to_commit[i]->pte = ptes[i];
+
+        custom_spin_assert(is_disk_format(read_pte_contents(ptes[i])));
+
+        #if LIGHT_DEBUG_PAGELOCK
+        pages_to_commit[i]->acquiring_pte_copy = read_pte_contents(ptes[i]);
+        #endif
+    }
+
+    /**
+     * We need to modify the other PTEs associated with the standby pages now that we are committing
+     * 
+     * The worst case is that other threads are spinning on the pagelock in transition format waiting for this to happen,
+     * and they will need to retry the fault as their PTE will be in disk format
+     */
+    PAGE curr_page_copy;
+    PTE old_pte_copy;
+    PTE pte_contents;
+    pte_contents.complete_format = 0;
+
+    for (ULONG64 i = 0; i < num_pages; i++) {
+        curr_page_copy = allocated_pages_copies[i];
+
+        if (curr_page_copy.status == STANDBY_STATUS) {
+            PTE* old_pte = curr_page_copy.pte;
+            old_pte_copy = read_pte_contents(old_pte);
+            pte_contents.disk_format.pagefile_idx = curr_page_copy.pagefile_idx;
+
+            /**
+             * We need to force a write here, as we must not collide with the end of the trimming thread when pages are added
+             * to the standby list. See more info there
+             */
+            while (InterlockedCompareExchange64((ULONG64*) old_pte, pte_contents.complete_format, old_pte_copy.complete_format) != old_pte_copy.complete_format) {
+                old_pte_copy = read_pte_contents(old_pte);
+            }
+
+        }
+    }
+
+    for (ULONG64 i = 0; i < num_pages; i++) {
+        release_pagelock(pages_to_commit[i], 97);
+    }
+}
+
+
+/**
  * Commits the pages and releases the pagelocks
  * 
  * - All standby pages have their old PTEs set to disk format
@@ -878,7 +961,7 @@ static void commit_pages(PAGE** pages_to_commit, PTE** ptes, PTE* accessed_pte, 
     }
 
     // We may need to release stale pagefile slots and/or modify the page's pagefile information
-    handle_batch_end_of_fault_disk_slot(ptes, accessed_pte, pages_to_commit, access_type, num_pages);
+    handle_non_disk_fault_batch_disk_slots(ptes, accessed_pte, pages_to_commit, access_type, num_pages);
 
     /**
      * For unaccessed PTEs, we need to ensure they start off with a clean page

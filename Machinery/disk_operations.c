@@ -328,6 +328,7 @@ int read_pages_from_disk(PAGE** open_pages, PTE** ptes_to_read, ULONG64 num_to_r
 
     for (ULONG64 i = 0; i < num_to_read; i++) {
         PTE pte_copy = read_pte_contents(ptes_to_read[i]);
+
         custom_spin_assert(is_disk_format(pte_copy));
         custom_spin_assert(pte_copy.disk_format.being_read_from_disk == PTE_BEING_READ_FROM_DISK);
 
@@ -432,12 +433,60 @@ int release_single_disk_slot(ULONG64 disk_idx) {
 }
 
 
+
 /**
- * Called at the end of a pagefault to determine whether or not pagefile slots need to be
+ * Called at the end of a **NON-DISK** pagefault to determine whether or not pagefile slots need to be
+ * released. Modifies the pages only if necessary to remove references to pagefile slots when appropriate
+ * and release pagefile slots when appropriate. 
+ * 
+ * Assumes the caller holds the given page's pagelocks.
+ */
+void handle_non_disk_fault_batch_disk_slots(PTE** ptes, PTE* original_pte_accessed, PAGE** allocated_pages, ULONG64 access_type, ULONG64 num_ptes) {
+    
+    ULONG64 start_index = 0;
+
+    if (access_type == READ_ACCESS) {
+        // These represent unaccessed PTEs whose "being_changed" bits are set - they have yet to be mapped
+        if (is_memory_format(read_pte_contents(original_pte_accessed))) {
+            allocated_pages[0]->pagefile_idx = DISK_IDX_NOTUSED;
+        }
+    }
+
+    if (access_type == WRITE_ACCESS) {
+        if (is_transition_format(read_pte_contents(original_pte_accessed)) && allocated_pages[0]->status == STANDBY_STATUS) {
+            release_single_disk_slot(allocated_pages[0]->pagefile_idx);
+        }
+
+        allocated_pages[0]->pagefile_idx = DISK_IDX_NOTUSED;
+
+        start_index = 1;
+    }
+
+    PTE* curr_pte;
+    PAGE* curr_page;
+
+    // Now we determine how to handle the PTEs we are bringing in speculatively
+    for (ULONG64 i = 0; i < num_ptes; i++) {
+        curr_pte = ptes[i];
+        curr_page = allocated_pages[i];
+
+        // These represent unaccessed PTEs whose "being_changed" bits are set - they have yet to be mapped
+        if (is_memory_format(read_pte_contents(original_pte_accessed))) {
+            curr_page->pagefile_idx = DISK_IDX_NOTUSED;
+            continue;
+        }
+
+        // Transition PTEs will already have the disk index in their respective page
+    }
+}
+
+
+/**
+ * Called at the end of a **DISK** pagefault to determine whether or not pagefile slots need to be
  * released. Modifies the pages only if necessary to remove references to pagefile slots when appropriate
  * and release pagefile slots when appropriate
  * 
- * Assumes the caller holds the given page's pagelocks.
+ * Assumes all of the PTEs are in disk format. The pages must be committed, but the pagelocks need not be held for this. 
  */
 void handle_batch_end_of_fault_disk_slot(PTE** ptes, PTE* original_pte_accessed, PAGE** allocated_pages, ULONG64 access_type, ULONG64 num_ptes) {
     
@@ -454,25 +503,10 @@ void handle_batch_end_of_fault_disk_slot(PTE** ptes, PTE* original_pte_accessed,
                 allocated_pages[0]->pagefile_idx = original_pte_accessed->disk_format.pagefile_idx;
                 custom_spin_assert(disk_status == DISK_USEDSLOT);
             } 
-
-            // These represent unaccessed PTEs whose "being_changed" bits are set - they have yet to be mapped
-            if (is_memory_format(read_pte_contents(original_pte_accessed))) {
-                allocated_pages[0]->pagefile_idx = DISK_IDX_NOTUSED;
-            }
-
-            // These represent unaccessed PTEs whose "being_changed" bits are set - they have yet to be mapped
-            if (is_memory_format(read_pte_contents(original_pte_accessed))) {
-                allocated_pages[0]->pagefile_idx = DISK_IDX_NOTUSED;
-            }
         }
 
         if (access_type == WRITE_ACCESS) {
-            if (is_transition_format(read_pte_contents(original_pte_accessed)) && allocated_pages[0]->status == STANDBY_STATUS) {
-                release_single_disk_slot(allocated_pages[0]->pagefile_idx);
-            } else if (is_disk_format(read_pte_contents(original_pte_accessed))) {
-                release_single_disk_slot(original_pte_accessed->disk_format.pagefile_idx);
-            }
-
+            release_single_disk_slot(original_pte_accessed->disk_format.pagefile_idx);
             allocated_pages[0]->pagefile_idx = DISK_IDX_NOTUSED;
         }
 
@@ -482,26 +516,13 @@ void handle_batch_end_of_fault_disk_slot(PTE** ptes, PTE* original_pte_accessed,
     PTE* curr_pte;
     PAGE* curr_page;
 
-    // Now we determine how to handle the PTEs we are bringing in speculatively
+    // Now we handle the PTEs we are bringing in speculatively
     for (ULONG64 i = start_index; i < num_ptes; i++) {
         curr_pte = ptes[i];
         curr_page = allocated_pages[i];
-
-        if (is_disk_format(read_pte_contents(curr_pte))) {
-            UCHAR disk_status = disk->disk_slot_statuses[curr_pte->disk_format.pagefile_idx];
-            curr_page->pagefile_idx = curr_pte->disk_format.pagefile_idx;
-            custom_spin_assert(disk_status == DISK_USEDSLOT);
-            continue;
-        }
-
-
-        // These represent unaccessed PTEs whose "being_changed" bits are set - they have yet to be mapped
-        if (is_memory_format(read_pte_contents(original_pte_accessed))) {
-            curr_page->pagefile_idx = DISK_IDX_NOTUSED;
-            continue;
-        }
-
-        // Transition PTEs will already have the disk index in their respective page
+        UCHAR disk_status = disk->disk_slot_statuses[curr_pte->disk_format.pagefile_idx];
+        curr_page->pagefile_idx = curr_pte->disk_format.pagefile_idx;
+        custom_spin_assert(disk_status == DISK_USEDSLOT);
     }
 
 }

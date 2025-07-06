@@ -43,6 +43,8 @@ MEM_EXTENDED_PARAMETER vmem_parameters;
 
 volatile ULONG64 remaining_writable_addresses;
 
+volatile ULONG64 num_waiting_threads;
+
 
 /**
  * GLOBAL DATASTRUCTURES
